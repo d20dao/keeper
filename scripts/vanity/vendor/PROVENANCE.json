@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/0age/create2crunch",
+  "commit": "f0ad004acc874e38f7bb1e3424d44d3536be8ac7",
+  "path": "src/kernels/keccak256.cl",
+  "sha256": "a1a088a7da13070f594c3a51293d2827c58a6f484a8774d6e7784496cdeb7613",
+  "license": "Apache-2.0 header retained; source unchanged. Only permutation compiled by wrapper."
+}

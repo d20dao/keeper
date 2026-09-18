@@ -1,0 +1,33 @@
+name: Keeper container checks
+on:
+  push:
+    paths: ['keeper/**', 'deploy/docker/**', '.dockerignore', 'scripts/keeper-docker-smoke.mjs', '.github/workflows/keeper-docker.yml']
+  pull_request:
+    paths: ['keeper/**', 'deploy/docker/**', '.dockerignore', 'scripts/keeper-docker-smoke.mjs', '.github/workflows/keeper-docker.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  container:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: sh -n deploy/docker/keeper.sh deploy/docker/entrypoint.sh deploy/docker/import-keys.sh
+      - run: sh deploy/docker/keeper.sh init
+      - run: sh deploy/docker/keeper.sh config
+      - run: sh deploy/docker/keeper.sh build
+      - run: node scripts/keeper-docker-smoke.mjs
+        env:
+          EXPECTED_DOCKER_ARCH: ${{ matrix.arch }}

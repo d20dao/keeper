@@ -1,0 +1,9 @@
+[
+  {"name":"burst-8-rpc25", "count":8, "spacingMs":0, "rpcDelayMs":25},
+  {"name":"burst-8-rpc50", "count":8, "spacingMs":0, "rpcDelayMs":50},
+  {"name":"burst-8-rpc100", "count":8, "spacingMs":0, "rpcDelayMs":100},
+  {"name":"burst-8-rpc50-poll100", "count":8, "spacingMs":0, "rpcDelayMs":50, "pollMs":100},
+  {"name":"steady-1rps-rpc25", "count":40, "spacingMs":1000, "rpcDelayMs":25},
+  {"name":"steady-half-rps-rpc50", "count":24, "spacingMs":2000, "rpcDelayMs":50},
+  {"name":"burst8-then-half-rps-rpc50", "count":32, "spacingMs":2000, "rpcDelayMs":50, "initialBurst":8}
+]

@@ -1,0 +1,69 @@
+{
+  "arc-testnet": {
+    "name": "Arc Testnet",
+    "chainId": 5042002,
+    "testnet": true,
+    "owner": "0xcA35c280c5DF22958Adb74DD03911C8A0ec3eA03",
+    "rpcUrls": [
+      "https://rpc.testnet.arc.io",
+      "https://rpc.blockdaemon.testnet.arc.io",
+      "https://rpc.drpc.testnet.arc.io"
+    ],
+    "explorerUrl": "https://testnet.arcscan.app",
+    "nativeCurrency": {
+      "name": "USDC",
+      "symbol": "USDC",
+      "decimals": 18
+    },
+    "erc20UsdcDecimals": 6,
+    "compilerEvmTarget": "cancun",
+    "create2": {
+      "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+    },
+    "reviewedOn": "2026-09-15",
+    "documentation": "https://docs.arc.io/arc/references/connect-to-arc",
+    "gas": {
+      "blockGasLimit": 30000000,
+      "documentedMinimumBaseFeeWei": "20000000000",
+      "maxGas": 6000000,
+      "maxFeePerGasWei": "100000000000",
+      "cancelMaxFeePerGasWei": "150000000000",
+      "maxTxCostWei": "4000000000000000000"
+    },
+    "expectedBlockMs": 480
+  },
+  "arc-mainnet": {
+    "name": "Arc",
+    "chainId": 5042,
+    "testnet": false,
+    "owner": "0xB57f656149749eff6b496dF090336491f977E744",
+    "rpcUrls": [
+      "https://rpc.mainnet.arc.io",
+      "https://rpc.blockdaemon.mainnet.arc.io",
+      "https://rpc.drpc.mainnet.arc.io"
+    ],
+    "explorerUrl": "https://explorer.arc.io",
+    "nativeCurrency": {
+      "name": "USDC",
+      "symbol": "USDC",
+      "decimals": 18
+    },
+    "erc20UsdcDecimals": 6,
+    "compilerEvmTarget": "cancun",
+    "create2": {
+      "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+    },
+    "reviewedOn": "2026-09-16",
+    "documentation": "https://docs.arc.io/arc/references/connect-to-arc",
+    "gas": {
+      "blockGasLimit": 30000000,
+      "maxGas": 6000000,
+      "maxFeePerGasWei": "2000000000000",
+      "cancelMaxFeePerGasWei": "2500000000000",
+      "maxTxCostWei": "4000000000000000000"
+    },
+    "expectedBlockMs": 500
+  }
+}

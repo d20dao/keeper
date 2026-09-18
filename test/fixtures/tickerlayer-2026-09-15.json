@@ -1,0 +1,52 @@
+{
+  "collectedAt": "2026-09-15T16:54:55.138Z",
+  "signer": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+  "rows": [
+    {
+      "symbol": "BTCUSD",
+      "request": {
+        "operation": "lastTrade",
+        "parameters": {
+          "assetClass": "crypto",
+          "symbol": "BTCUSD"
+        }
+      },
+      "dataBytes": 74,
+      "envelope": {
+        "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 6e-8,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x370caadfe64a7df5e5d3eb4d2d37f1eaa81fc7097ddf0b906c3f6f38197901330b83acfab39773eafa249bceaa65a7853754421c6f17259ade0ba4a5ae9188441c"
+      }
+    },
+    {
+      "symbol": "ETHUSD",
+      "request": {
+        "operation": "lastTrade",
+        "parameters": {
+          "assetClass": "crypto",
+          "symbol": "ETHUSD"
+        }
+      },
+      "dataBytes": 76,
+      "envelope": {
+        "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+        "requestHash": "0x57a2f0e8ddeb9571da25876fdb06c21d327e83f56b347d77be29dd3eae851d06",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "ETHUSD",
+          "price": 2423.67,
+          "size": 0.13536,
+          "timestamp": 1789491296207
+        },
+        "signature": "0xa06b5b2a962e760a2a6a12ce116ebcc6ee500001ffedaf567c804896dc3cc1865a7f4162464465d3643212e36179813e82d0ac79cfd325023eb8058d66fd775c1c"
+      }
+    }
+  ]
+}

@@ -1,0 +1,349 @@
+{
+  "collectedAt": "2026-09-17",
+  "note": "Two live signed AirnodeHub responses per epoch recipe; each canonical request hash and EIP-191 signature was verified. builtinRecipe is the EpochEntropy built-in recipe id of the listing, or null for a listing that is not built in.",
+  "providers": {
+    "hyperliquid": {
+      "endpoint": "https://airnode-hyperliquid.fly.dev/",
+      "signer": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B"
+    },
+    "drpc": {
+      "endpoint": "https://airnode-drpc.fly.dev/",
+      "signer": "0x511AcE8648D2f64260d50D036F8f8ce622d92137"
+    },
+    "tickerlayer": {
+      "endpoint": "https://airnode-tickerlayer.fly.dev/",
+      "signer": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c"
+    },
+    "nodary": {
+      "endpoint": "https://airnode-nodary.fly.dev/",
+      "signer": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0"
+    }
+  },
+  "recipes": [
+    {
+      "name": "hyperliquid-btc-day-volume",
+      "builtinRecipe": 0,
+      "provider": "hyperliquid",
+      "request": {
+        "operation": "metaAndAssetCtxs",
+        "parameters": {
+          "dex": ""
+        },
+        "responseProjection": {
+          "symbol": "/0/universe/0/name",
+          "value": "/1/0/dayNtlVlm"
+        }
+      },
+      "canonicalRequest": "[\"metaAndAssetCtxs\",[[\"dex\",\"\"]],[[\"symbol\",\"/0/universe/0/name\"],[\"value\",\"/1/0/dayNtlVlm\"]]]",
+      "requestHash": "0x4a63b4b7d869f583964baa3857fdb6f10aac80ee1349635a81c51ea57f12f746",
+      "samples": [
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x4a63b4b7d869f583964baa3857fdb6f10aac80ee1349635a81c51ea57f12f746",
+          "timestamp": "1789653302",
+          "data": {
+            "symbol": "BTC",
+            "value": "3252667967.0465483665"
+          },
+          "signature": "0x64d797de42482de0a94fc7baaa25e84ef51e640b8bff741787ca68b598cbb5ef7af859347d57990e475bfdfefc71c4e3683330aa5749ae0a4d79b3070847ad251b"
+        },
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x4a63b4b7d869f583964baa3857fdb6f10aac80ee1349635a81c51ea57f12f746",
+          "timestamp": "1789653309",
+          "data": {
+            "symbol": "BTC",
+            "value": "3253662370.6127486229"
+          },
+          "signature": "0x9ae430bdfae58f90353106679527132101fc7b7093d97c5e4d1fd1cf74c15cbe27a60f1269dfd6963f895129f2c8175535cac2892808c8492174d4ba94c3853c1b"
+        }
+      ]
+    },
+    {
+      "name": "drpc-ethereum-blockhash",
+      "builtinRecipe": 1,
+      "provider": "drpc",
+      "request": {
+        "operation": "jsonRpc",
+        "parameters": {
+          "network": "ethereum",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xcA11bde05977b3631167028862bE2a173976CA11",
+              "data": "0x27e86d6e"
+            },
+            "latest"
+          ]
+        }
+      },
+      "canonicalRequest": "[\"jsonRpc\",[[\"method\",\"eth_call\"],[\"network\",\"ethereum\"],[\"params\",[[[\"data\",\"0x27e86d6e\"],[\"to\",\"0xcA11bde05977b3631167028862bE2a173976CA11\"]],\"latest\"]]]]",
+      "requestHash": "0xabe6d1ad9b60d0fb0a11fdb29f33b005bf366921961e833a62ba7f9c0098abda",
+      "samples": [
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xabe6d1ad9b60d0fb0a11fdb29f33b005bf366921961e833a62ba7f9c0098abda",
+          "timestamp": "1789653322",
+          "data": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": "0x71f0181a1e39770e4adfde7be6363e3605468828f8b86f65749f1747e7510c74"
+          },
+          "signature": "0x332a26e244f39a2071874575253f1c8da302c80195fbe7b32ab55cd58d2c901d5245ec71a13905a747e4d0ebe19eb8e72391475be56a73f32ce5a383ddf04a4d1b"
+        },
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xabe6d1ad9b60d0fb0a11fdb29f33b005bf366921961e833a62ba7f9c0098abda",
+          "timestamp": "1789653329",
+          "data": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": "0x042f0516a7468c09041ddfdbca4ef9a51ca066989c9468039aee85266707f1ec"
+          },
+          "signature": "0x864cc61a89bd1e073307ffa890c11af567154f27924c63dd18a71eb6d257fdd70fbf6a345dbbd9f10365fdd97793bf9855d47b61e5107f785ee7471ee73225391b"
+        }
+      ]
+    },
+    {
+      "name": "tickerlayer-btcusd",
+      "builtinRecipe": 2,
+      "provider": "tickerlayer",
+      "request": {
+        "operation": "lastTrade",
+        "parameters": {
+          "assetClass": "crypto",
+          "symbol": "BTCUSD"
+        }
+      },
+      "canonicalRequest": "[\"lastTrade\",[[\"assetClass\",\"crypto\"],[\"symbol\",\"BTCUSD\"]]]",
+      "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+      "samples": [
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+          "timestamp": "1789653336",
+          "data": {
+            "symbol": "BTCUSD",
+            "price": 76437.4,
+            "size": 0.03481735,
+            "timestamp": 1789653336751
+          },
+          "signature": "0x9b204fb81d02e6717fd9c8558e79276548943a94bd235127751b4fccabb0d3aa20d42bde2347abff8b8413f4242a3fb31a7c445c46dfef086def15f99997ad3f1b"
+        },
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+          "timestamp": "1789653344",
+          "data": {
+            "symbol": "BTCUSD",
+            "price": 76446.12,
+            "size": 0.00003761,
+            "timestamp": 1789653344075
+          },
+          "signature": "0x0380c06b93f711846aafa93fd14f544bad035715fb026e36e48233a5f9be99727a10ce64d7e2db324232490afc5708545b583894452882a975d402d2b050a75c1c"
+        }
+      ]
+    },
+    {
+      "name": "tickerlayer-ethusd",
+      "builtinRecipe": 3,
+      "provider": "tickerlayer",
+      "request": {
+        "operation": "lastTrade",
+        "parameters": {
+          "assetClass": "crypto",
+          "symbol": "ETHUSD"
+        }
+      },
+      "canonicalRequest": "[\"lastTrade\",[[\"assetClass\",\"crypto\"],[\"symbol\",\"ETHUSD\"]]]",
+      "requestHash": "0x57a2f0e8ddeb9571da25876fdb06c21d327e83f56b347d77be29dd3eae851d06",
+      "samples": [
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0x57a2f0e8ddeb9571da25876fdb06c21d327e83f56b347d77be29dd3eae851d06",
+          "timestamp": "1789653351",
+          "data": {
+            "symbol": "ETHUSD",
+            "price": 2459.21,
+            "size": 0.31184,
+            "timestamp": 1789653351187
+          },
+          "signature": "0x6558f5e60fb4c80d91aedae4a706a1cf4dde209c2ea30aca82bd33e1c944a3245681c8618f28dff4e8ad65fb7e1a2a4e2d6582f9ebab935176f7ad7fffede1501b"
+        },
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0x57a2f0e8ddeb9571da25876fdb06c21d327e83f56b347d77be29dd3eae851d06",
+          "timestamp": "1789653358",
+          "data": {
+            "symbol": "ETHUSD",
+            "price": 2459.49,
+            "size": 0.0012,
+            "timestamp": 1789653358317
+          },
+          "signature": "0x8f2373124ec5ef5d93985192f759d3346331d525cdf3a3f69290dbed33b91de47449ae4295b081274aeb611f8afdb305d665399a313362f245bd9c5adf7bdc021b"
+        }
+      ]
+    },
+    {
+      "name": "nodary-eth-usd",
+      "builtinRecipe": 4,
+      "provider": "nodary",
+      "request": {
+        "operation": "latestFeeds",
+        "parameters": {
+          "name": "ETH/USD"
+        }
+      },
+      "canonicalRequest": "[\"latestFeeds\",[[\"name\",\"ETH/USD\"]]]",
+      "requestHash": "0x95f2f0aef992826cc93ff0632171cce8258cc98d8796d6141e7c20601c20e439",
+      "samples": [
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x95f2f0aef992826cc93ff0632171cce8258cc98d8796d6141e7c20601c20e439",
+          "timestamp": "1789653375",
+          "data": {
+            "ETH/USD": {
+              "value": 2458.9,
+              "timestamp": 1789653374566,
+              "category": "crypto"
+            }
+          },
+          "signature": "0xa65b81d1969c1783865e354a46c96150c0ad5c62ad62dfeea8aeeabfa04b92847cbc76efff7b9ccfd85679e0cee4c20342c6a8ea468a06a1ef22876932f1cab21c"
+        },
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x95f2f0aef992826cc93ff0632171cce8258cc98d8796d6141e7c20601c20e439",
+          "timestamp": "1789653382",
+          "data": {
+            "ETH/USD": {
+              "value": 2458.945,
+              "timestamp": 1789653381569,
+              "category": "crypto"
+            }
+          },
+          "signature": "0x7a9c4c72315d075769829e0fb62733e16721509fa34fda5b7b87422efdb850452b62c0fe8db0daa6476bf5562257407f549ed2f4640df708dae9ffc2526314461c"
+        }
+      ]
+    },
+    {
+      "name": "hyperliquid-sol-mid",
+      "builtinRecipe": null,
+      "provider": "hyperliquid",
+      "request": {
+        "operation": "allMids",
+        "parameters": {},
+        "responseProjection": {
+          "mid": "/SOL"
+        }
+      },
+      "canonicalRequest": "[\"allMids\",[],[[\"mid\",\"/SOL\"]]]",
+      "requestHash": "0x2a831af42c1f333a185fc019a0ab78008d9db08253706c13e869120b59c3867f",
+      "samples": [
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x2a831af42c1f333a185fc019a0ab78008d9db08253706c13e869120b59c3867f",
+          "timestamp": "1789653389",
+          "data": {
+            "mid": "100.425"
+          },
+          "signature": "0x687847ddf456500929aee00394cc9e34240d35d9ba815be8ff52974b7f52a9b81c09ff99470130715ee2c15d697d5dfb881a91a40e2e357b22a5b8888bdf4c3f1c"
+        },
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x2a831af42c1f333a185fc019a0ab78008d9db08253706c13e869120b59c3867f",
+          "timestamp": "1789653396",
+          "data": {
+            "mid": "100.425"
+          },
+          "signature": "0xac0b64a054a2f219bd07a48d75b81dd4df8edc83bc5e142846b539d7ebe3c3da1fd3fe8f095532deaf754e0c455fa4ce4b863705276b7cec792a6ce87e4ba88b1c"
+        }
+      ]
+    },
+    {
+      "name": "drpc-base-blockhash",
+      "builtinRecipe": 5,
+      "provider": "drpc",
+      "request": {
+        "operation": "jsonRpc",
+        "parameters": {
+          "network": "base",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xcA11bde05977b3631167028862bE2a173976CA11",
+              "data": "0x27e86d6e"
+            },
+            "latest"
+          ]
+        }
+      },
+      "canonicalRequest": "[\"jsonRpc\",[[\"method\",\"eth_call\"],[\"network\",\"base\"],[\"params\",[[[\"data\",\"0x27e86d6e\"],[\"to\",\"0xcA11bde05977b3631167028862bE2a173976CA11\"]],\"latest\"]]]]",
+      "requestHash": "0xd5ded9748ec365437d5a4c26278ebe75afd3e2644cb7f9ada57a01d3b3562e3d",
+      "samples": [
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xd5ded9748ec365437d5a4c26278ebe75afd3e2644cb7f9ada57a01d3b3562e3d",
+          "timestamp": "1789653404",
+          "data": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": "0xdc6b343493e55e593b6a086d9d54469d784fb60c78456859bf2734f19102b4cd"
+          },
+          "signature": "0x8c6d2d518bcd99447ec80afd57534679dee8be802cfe2a530f304392fb815f0c79f5c3ff298f1081531860e7231d354beead863e04e6f8f59a7e00f6666bb3771c"
+        },
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xd5ded9748ec365437d5a4c26278ebe75afd3e2644cb7f9ada57a01d3b3562e3d",
+          "timestamp": "1789653411",
+          "data": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": "0xe994509ca9b0e52216b1d91510c65a6b182919bf44096cdc67f8ce774d5224a3"
+          },
+          "signature": "0x9bd78ab4376d9da8f1b340f30524c022698b3d2e43567b596438b15e24b22ffd5af2eee5ad5b76de16ce9fa4bfb7adc316eed40720a1a7c6d78d8765f53553cf1b"
+        }
+      ]
+    },
+    {
+      "name": "nodary-btc-usd",
+      "builtinRecipe": null,
+      "provider": "nodary",
+      "request": {
+        "operation": "latestFeeds",
+        "parameters": {
+          "name": "BTC/USD"
+        }
+      },
+      "canonicalRequest": "[\"latestFeeds\",[[\"name\",\"BTC/USD\"]]]",
+      "requestHash": "0x7f86101e6bb48a9bae1b45885a13829a918b886df1b76076bb569f5cd50a1fc2",
+      "samples": [
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x7f86101e6bb48a9bae1b45885a13829a918b886df1b76076bb569f5cd50a1fc2",
+          "timestamp": "1789653418",
+          "data": {
+            "BTC/USD": {
+              "value": 76634.54000000001,
+              "timestamp": 1789653418094,
+              "category": "crypto"
+            }
+          },
+          "signature": "0xcf7efc0eb2a583ea581385db572697a990044224f18c618a85aa297a8c5ce04d573212f345de9684be4a158357985d2b69281f15d59cfbc1b9d8b7ebd6fbbcc41b"
+        },
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x7f86101e6bb48a9bae1b45885a13829a918b886df1b76076bb569f5cd50a1fc2",
+          "timestamp": "1789653425",
+          "data": {
+            "BTC/USD": {
+              "value": 76642.3,
+              "timestamp": 1789653425110,
+              "category": "crypto"
+            }
+          },
+          "signature": "0xe5ebbbf213ef2f0e3b745a72c0742f944aa97a234bfd01d75bb17cffed35f98d7a60833926e9a924d225efa38fdf736c8487379c91a5bd36dcf0b58c9aaf96191c"
+        }
+      ]
+    }
+  ]
+}

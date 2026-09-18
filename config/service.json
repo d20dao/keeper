@@ -1,0 +1,12 @@
+{
+  "airnodeSigners": {
+    "hyperliquid": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+    "drpc": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+    "tickerlayer": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+    "nodary": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0"
+  },
+  "epochCatalog": [0, 1, 2, 4, 5],
+  "minFeeWei": "80000000000000000",
+  "keeperFeeBps": 5000,
+  "confirmations": 1
+}

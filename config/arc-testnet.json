@@ -1,0 +1,48 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "rpcUrls": [
+    "https://rpc.testnet.arc.io"
+  ],
+  "explorerUrl": "https://testnet.arcscan.app",
+  "nativeCurrency": {
+    "name": "USDC",
+    "symbol": "USDC",
+    "decimals": 18
+  },
+  "erc20UsdcDecimals": 6,
+  "evmFork": "osaka",
+  "compilerEvmTarget": "cancun",
+  "timing": {
+    "expectedBlockMs": 480,
+    "confirmations": 1,
+    "requestDeadlineSeconds": 60
+  },
+  "gas": {
+    "blockGasLimit": 30000000,
+    "documentedMinimumBaseFeeWei": "20000000000",
+    "maxGas": 2000000,
+    "maxFeePerGasWei": "100000000000",
+    "cancelMaxFeePerGasWei": "150000000000",
+    "maxTxCostWei": "200000000000000000"
+  },
+  "keeper": {
+    "pollMs": 250,
+    "sendMarginSeconds": 5,
+    "sendTransactions": false
+  },
+  "loadTest": {
+    "publicMaxRequests": 10,
+    "publicConcurrency": 1,
+    "heavyLoadLocalOnly": true
+  },
+  "protocol": "EpochVRF",
+  "epochLengthBlocks": 200,
+  "deployment": null,
+  "documentationReviewedOn": "2026-09-15",
+  "sources": [
+    "https://docs.arc.io/arc-chain",
+    "https://docs.arc.io/arc/references/rpc-endpoints",
+    "https://docs.arc.io/arc/references/gas-and-fees"
+  ]
+}

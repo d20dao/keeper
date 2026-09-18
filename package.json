@@ -1,0 +1,43 @@
+{
+  "name": "d20-keeper-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "typecheck": "tsc --noEmit",
+    "vendor:check": "node scripts/check-vendor.mjs",
+    "browser:check": "node scripts/check-browser.mjs",
+    "test:collector": "node --test scripts/tests/epoch-http.test.ts",
+    "test:deployment": "node --test scripts/tests/deployment.test.ts",
+    "test:admin": "node --test scripts/tests/recipe-file.test.ts",
+    "test:docker-wrapper": "node --test scripts/tests/keeper-wrapper.test.ts",
+    "storage:check": "node scripts/check-storage-layout.mjs",
+    "check": "npm run vendor:check && npm run compile && npm run storage:check && npm run typecheck && npm test && npm run browser:check && npm run test:collector && npm run test:deployment && npm run test:admin && npm run test:docker-wrapper",
+    "demo": "hardhat run scripts/demo.ts",
+    "node": "hardhat node"
+  },
+  "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "3.0.7",
+    "@openzeppelin/contracts": "5.6.1",
+    "@openzeppelin/contracts-upgradeable": "5.6.1",
+    "@types/chai": "5.2.3",
+    "@types/mocha": "10.0.10",
+    "@types/node": "24.10.0",
+    "chai": "5.3.3",
+    "esbuild": "0.28.2",
+    "ethers": "6.17.0",
+    "hardhat": "3.16.0",
+    "mocha": "11.7.5",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/d20dao/keeper.git"
+  }
+}

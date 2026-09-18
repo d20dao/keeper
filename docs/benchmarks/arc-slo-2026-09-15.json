@@ -1,0 +1,813 @@
+{
+  "generatedAt": "2026-09-15T15:00:54.691Z",
+  "environment": "LOCAL EDR only; no testnet SLA established",
+  "runtimeRevision": "c0b6ebc",
+  "scriptSha256": "7c22c614aec5a2cf42c7596b810e0d57b2ba4245317724b0f11b8019074476b4",
+  "samples": 224,
+  "fulfilled": 224,
+  "reports": [
+    {
+      "scenario": {
+        "name": "burst-8-rpc25",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 25
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 21,
+      "observedTimestamp": 1789483943,
+      "completedRefunds": 0,
+      "within10Blocks": 5,
+      "within10BlocksRate": 0.625,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 5,
+          "rate": 0.625
+        },
+        {
+          "blocks": 20,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 30,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 8,
+        "p95": 14,
+        "p99": 14,
+        "max": 14
+      },
+      "chainSeconds": {
+        "p50": 4,
+        "p95": 7,
+        "p99": 7,
+        "max": 7
+      },
+      "wallSeconds": 9.0472289,
+      "observedMeanBlockMs": 489.2253588235294,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 117,
+        "eth_getBlockByNumber": 82,
+        "eth_getTransactionCount": 16,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 8
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "burst-8-rpc50",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 50
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 29,
+      "observedTimestamp": 1789483947,
+      "completedRefunds": 0,
+      "within10Blocks": 3,
+      "within10BlocksRate": 0.375,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 3,
+          "rate": 0.375
+        },
+        {
+          "blocks": 20,
+          "count": 7,
+          "rate": 0.875
+        },
+        {
+          "blocks": 30,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 12,
+        "p95": 22,
+        "p99": 22,
+        "max": 22
+      },
+      "chainSeconds": {
+        "p50": 6,
+        "p95": 11,
+        "p99": 11,
+        "max": 11
+      },
+      "wallSeconds": 12.774391800000002,
+      "observedMeanBlockMs": 490.632452,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 113,
+        "eth_getBlockByNumber": 74,
+        "eth_getTransactionCount": 16,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 7
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "burst-8-rpc100",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 100
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 42,
+      "observedTimestamp": 1789483954,
+      "completedRefunds": 0,
+      "within10Blocks": 1,
+      "within10BlocksRate": 0.125,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 1,
+          "rate": 0.125
+        },
+        {
+          "blocks": 20,
+          "count": 4,
+          "rate": 0.5
+        },
+        {
+          "blocks": 30,
+          "count": 6,
+          "rate": 0.75
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 20,
+        "p95": 35,
+        "p99": 35,
+        "max": 35
+      },
+      "chainSeconds": {
+        "p50": 10,
+        "p95": 18,
+        "p99": 18,
+        "max": 18
+      },
+      "wallSeconds": 19.3435649,
+      "observedMeanBlockMs": 491.34267105263154,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 112,
+        "eth_getBlockByNumber": 70,
+        "eth_getTransactionCount": 16,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 7
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "burst-8-rpc50-poll100",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 50,
+        "pollMs": 100
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 100,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 26,
+      "observedTimestamp": 1789483946,
+      "completedRefunds": 0,
+      "within10Blocks": 3,
+      "within10BlocksRate": 0.375,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 3,
+          "rate": 0.375
+        },
+        {
+          "blocks": 20,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 30,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 11,
+        "p95": 19,
+        "p99": 19,
+        "max": 19
+      },
+      "chainSeconds": {
+        "p50": 6,
+        "p95": 10,
+        "p99": 10,
+        "max": 10
+      },
+      "wallSeconds": 11.408126199999998,
+      "observedMeanBlockMs": 490.8407999999998,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 114,
+        "eth_getBlockByNumber": 76,
+        "eth_getTransactionCount": 17,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 7
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "steady-1rps-rpc25",
+        "count": 40,
+        "spacingMs": 1000,
+        "rpcDelayMs": 25
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 40,
+      "fulfilled": 40,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 99,
+      "observedTimestamp": 1789483982,
+      "completedRefunds": 0,
+      "within10Blocks": 16,
+      "within10BlocksRate": 0.4,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 16,
+          "rate": 0.4
+        },
+        {
+          "blocks": 20,
+          "count": 40,
+          "rate": 1
+        },
+        {
+          "blocks": 30,
+          "count": 40,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 40,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 40,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 7,
+      "blockLatency": {
+        "p50": 11,
+        "p95": 15,
+        "p99": 16,
+        "max": 16
+      },
+      "chainSeconds": {
+        "p50": 5,
+        "p95": 8,
+        "p99": 8,
+        "max": 8
+      },
+      "wallSeconds": 47.2366223,
+      "observedMeanBlockMs": 490.3829715789473,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 578,
+        "eth_getBlockByNumber": 344,
+        "eth_getTransactionCount": 82,
+        "eth_estimateGas": 40,
+        "eth_sendRawTransaction": 40,
+        "eth_getTransactionReceipt": 40
+      },
+      "maxRpcInFlight": 2
+    },
+    {
+      "scenario": {
+        "name": "steady-half-rps-rpc50",
+        "count": 24,
+        "spacingMs": 2000,
+        "rpcDelayMs": 50
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 24,
+      "fulfilled": 24,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 105,
+      "observedTimestamp": 1789483985,
+      "completedRefunds": 0,
+      "within10Blocks": 24,
+      "within10BlocksRate": 1,
+      "tenBlockGoalMet": true,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 24,
+          "rate": 1
+        },
+        {
+          "blocks": 20,
+          "count": 24,
+          "rate": 1
+        },
+        {
+          "blocks": 30,
+          "count": 24,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 24,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 24,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 1,
+      "blockLatency": {
+        "p50": 4,
+        "p95": 4,
+        "p99": 4,
+        "max": 4
+      },
+      "chainSeconds": {
+        "p50": 2,
+        "p95": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "wallSeconds": 50.1800166,
+      "observedMeanBlockMs": 491.0241722772278,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 347,
+        "eth_getBlockByNumber": 208,
+        "eth_getTransactionCount": 62,
+        "eth_estimateGas": 24,
+        "eth_sendRawTransaction": 24,
+        "eth_getTransactionReceipt": 24
+      },
+      "maxRpcInFlight": 1
+    },
+    {
+      "scenario": {
+        "name": "burst8-then-half-rps-rpc50",
+        "count": 32,
+        "spacingMs": 2000,
+        "rpcDelayMs": 50,
+        "initialBurst": 8
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 32,
+      "fulfilled": 32,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 124,
+      "observedTimestamp": 1789483994,
+      "completedRefunds": 0,
+      "within10Blocks": 2,
+      "within10BlocksRate": 0.0625,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 2,
+          "rate": 0.0625
+        },
+        {
+          "blocks": 20,
+          "count": 6,
+          "rate": 0.1875
+        },
+        {
+          "blocks": 30,
+          "count": 24,
+          "rate": 0.75
+        },
+        {
+          "blocks": 40,
+          "count": 32,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 32,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 9,
+      "blockLatency": {
+        "p50": 29,
+        "p95": 31,
+        "p99": 32,
+        "max": 32
+      },
+      "chainSeconds": {
+        "p50": 14,
+        "p95": 16,
+        "p99": 16,
+        "max": 16
+      },
+      "wallSeconds": 59.606495699999996,
+      "observedMeanBlockMs": 489.980025,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 452,
+        "eth_getBlockByNumber": 268,
+        "eth_getTransactionCount": 65,
+        "eth_estimateGas": 32,
+        "eth_sendRawTransaction": 32,
+        "eth_getTransactionReceipt": 32
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "soak-burst8-half-rps-rpc50",
+        "count": 80,
+        "spacingMs": 2000,
+        "rpcDelayMs": 50,
+        "initialBurst": 8
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 80,
+      "fulfilled": 80,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 311,
+      "observedTimestamp": 1789484420,
+      "completedRefunds": 0,
+      "within10Blocks": 3,
+      "within10BlocksRate": 0.0375,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 3,
+          "rate": 0.0375
+        },
+        {
+          "blocks": 20,
+          "count": 34,
+          "rate": 0.425
+        },
+        {
+          "blocks": 30,
+          "count": 77,
+          "rate": 0.9625
+        },
+        {
+          "blocks": 40,
+          "count": 80,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 80,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 9,
+      "blockLatency": {
+        "p50": 22,
+        "p95": 30,
+        "p99": 31,
+        "max": 31
+      },
+      "chainSeconds": {
+        "p50": 10,
+        "p95": 15,
+        "p99": 16,
+        "max": 16
+      },
+      "wallSeconds": 151.6600043,
+      "observedMeanBlockMs": 490.85757987012994,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 1126,
+        "eth_getBlockByNumber": 652,
+        "eth_getTransactionCount": 160,
+        "eth_estimateGas": 80,
+        "eth_sendRawTransaction": 80,
+        "eth_getTransactionReceipt": 80
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "burst8-rpc50-repeat",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 50
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 29,
+      "observedTimestamp": 1789484281,
+      "completedRefunds": 0,
+      "within10Blocks": 3,
+      "within10BlocksRate": 0.375,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 3,
+          "rate": 0.375
+        },
+        {
+          "blocks": 20,
+          "count": 7,
+          "rate": 0.875
+        },
+        {
+          "blocks": 30,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 12,
+        "p95": 22,
+        "p99": 22,
+        "max": 22
+      },
+      "chainSeconds": {
+        "p50": 6,
+        "p95": 11,
+        "p99": 11,
+        "max": 11
+      },
+      "wallSeconds": 12.777970099999976,
+      "observedMeanBlockMs": 491.09792000000016,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 113,
+        "eth_getBlockByNumber": 73,
+        "eth_getTransactionCount": 16,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 7
+      },
+      "maxRpcInFlight": 8
+    },
+    {
+      "scenario": {
+        "name": "burst8-rpc100-repeat",
+        "count": 8,
+        "spacingMs": 0,
+        "rpcDelayMs": 100
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 8,
+      "fulfilled": 8,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 42,
+      "observedTimestamp": 1789484288,
+      "completedRefunds": 0,
+      "within10Blocks": 1,
+      "within10BlocksRate": 0.125,
+      "tenBlockGoalMet": false,
+      "targetCoverage": [
+        {
+          "blocks": 10,
+          "count": 1,
+          "rate": 0.125
+        },
+        {
+          "blocks": 20,
+          "count": 4,
+          "rate": 0.5
+        },
+        {
+          "blocks": 30,
+          "count": 6,
+          "rate": 0.75
+        },
+        {
+          "blocks": 40,
+          "count": 8,
+          "rate": 1
+        },
+        {
+          "blocks": 60,
+          "count": 8,
+          "rate": 1
+        }
+      ],
+      "maxPendingObservedFromBlocks": 8,
+      "blockLatency": {
+        "p50": 20,
+        "p95": 35,
+        "p99": 35,
+        "max": 35
+      },
+      "chainSeconds": {
+        "p50": 10,
+        "p95": 18,
+        "p99": 18,
+        "max": 18
+      },
+      "wallSeconds": 19.435492300000014,
+      "observedMeanBlockMs": 490.3825763157894,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 112,
+        "eth_getBlockByNumber": 71,
+        "eth_getTransactionCount": 16,
+        "eth_estimateGas": 8,
+        "eth_sendRawTransaction": 8,
+        "eth_getTransactionReceipt": 7
+      },
+      "maxRpcInFlight": 8
+    }
+  ]
+}

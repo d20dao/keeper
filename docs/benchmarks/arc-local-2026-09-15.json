@@ -1,0 +1,175 @@
+{
+  "generatedAt": "2026-09-15T14:45:40.079Z",
+  "environment": "LOCAL EDR approximation, not live Arc testnet",
+  "runtimeRevision": "78e66c2e41aa5d56dbd6b1483daa800f3005c1aa",
+  "benchmarkScriptSha256": "ff7956d96a754907f8b91f825ec85990ce6abb87843ae65b25c72a5d5fc63874",
+  "platform": "win32",
+  "architecture": "x64",
+  "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+  "logicalCpuCount": 32,
+  "build": "cargo release --locked",
+  "catalogFixture": "test/fixtures/snapshot-candidates-2026-09-15-r2.json",
+  "configurationHash": "0xddac7cd579055fd016eea0bd99231521bdfbf984846c70a4008b7bffa4ee0e82",
+  "reports": [
+    {
+      "scenario": {
+        "name": "steady-1rps",
+        "count": 20,
+        "spacingMs": 1000,
+        "rpcDelayMs": 0
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 20,
+      "fulfilled": 20,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 48,
+      "observedTimestamp": 1789483455,
+      "completedRefunds": 0,
+      "within10Blocks": 20,
+      "within10BlocksRate": 1,
+      "tenBlockGoalMet": true,
+      "blockLatency": {
+        "p50": 2,
+        "p95": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "chainSeconds": {
+        "p50": 1,
+        "p95": 1,
+        "p99": 1
+      },
+      "wallSeconds": 22.1197807,
+      "observedMeanBlockMs": 490.22023863636366,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 434,
+        "eth_getBlockByNumber": 381,
+        "eth_getTransactionCount": 57,
+        "eth_estimateGas": 20,
+        "eth_sendRawTransaction": 20,
+        "eth_getTransactionReceipt": 36
+      },
+      "maxRpcInFlight": 1
+    },
+    {
+      "scenario": {
+        "name": "burst-32",
+        "count": 32,
+        "spacingMs": 0,
+        "rpcDelayMs": 0
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 32,
+      "fulfilled": 32,
+      "expired": 0,
+      "pending": 0,
+      "observedBlock": 40,
+      "observedTimestamp": 1789483451,
+      "completedRefunds": 0,
+      "within10Blocks": 9,
+      "within10BlocksRate": 0.28125,
+      "tenBlockGoalMet": false,
+      "blockLatency": {
+        "p50": 17,
+        "p95": 32,
+        "p99": 33,
+        "max": 33
+      },
+      "chainSeconds": {
+        "p50": 9,
+        "p95": 16,
+        "p99": 17
+      },
+      "wallSeconds": 18.5137256,
+      "observedMeanBlockMs": 491.1226333333333,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 502,
+        "eth_getBlockByNumber": 375,
+        "eth_getTransactionCount": 91,
+        "eth_estimateGas": 32,
+        "eth_sendRawTransaction": 32,
+        "eth_getTransactionReceipt": 58
+      },
+      "maxRpcInFlight": 5
+    },
+    {
+      "scenario": {
+        "name": "burst-128-rpc25ms",
+        "count": 128,
+        "spacingMs": 0,
+        "rpcDelayMs": 25
+      },
+      "environment": "local EDR approximation; NOT Arc testnet benchmark",
+      "prover": "release Rust daemon",
+      "configuration": {
+        "targetBlockMs": 480,
+        "gasPerBlock": 30000000,
+        "baseFeeGwei": 20,
+        "pollMs": 250,
+        "deadlineSeconds": 60
+      },
+      "sent": 128,
+      "fulfilled": 58,
+      "expired": 70,
+      "pending": 0,
+      "observedBlock": 134,
+      "observedTimestamp": 1789483497,
+      "completedRefunds": 70,
+      "within10Blocks": 3,
+      "within10BlocksRate": 0.0234375,
+      "tenBlockGoalMet": false,
+      "blockLatency": {
+        "p50": 66,
+        "p95": 106,
+        "p99": 110,
+        "max": 110
+      },
+      "chainSeconds": {
+        "p50": 33,
+        "p95": 52,
+        "p99": 54
+      },
+      "wallSeconds": 64.59863750000001,
+      "observedMeanBlockMs": 489.21883282442747,
+      "rpcRequests": {
+        "eth_chainId": 1,
+        "eth_getCode": 1,
+        "eth_call": 1480,
+        "eth_getBlockByNumber": 726,
+        "eth_getTransactionCount": 119,
+        "eth_estimateGas": 59,
+        "eth_sendRawTransaction": 58,
+        "eth_getTransactionReceipt": 59
+      },
+      "maxRpcInFlight": 8
+    }
+  ],
+  "limitations": [
+    "Three single-run scenarios; not an SLA or capacity certification.",
+    "Percentiles use only fulfilled requests; expired/pending counts and within10BlocksRate use all included requests.",
+    "Fixed fee floor and block schedule; no Arc consensus, EWMA, public network congestion or provider quota emulation.",
+    "Refunds were submitted after the recorded observation head; completedRefunds verifies receipts and final refunded state.",
+    "No per-request Airnode calls; six archived real signed snapshot records."
+  ]
+}

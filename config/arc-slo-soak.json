@@ -1,0 +1,5 @@
+[
+  {"name":"soak-burst8-half-rps-rpc50", "count":80, "spacingMs":2000, "rpcDelayMs":50, "initialBurst":8},
+  {"name":"burst8-rpc50-repeat", "count":8, "spacingMs":0, "rpcDelayMs":50},
+  {"name":"burst8-rpc100-repeat", "count":8, "spacingMs":0, "rpcDelayMs":100}
+]

@@ -1,0 +1,131 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "stage": "public mainnet service",
+  "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+  "deployer": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+  "owner": "0xB57f656149749eff6b496dF090336491f977E744",
+  "feeRecipient": "0xB57f656149749eff6b496dF090336491f977E744",
+  "keeper": "0xA5496Bb35905Bfe0Bac7D23Ca18c008F5E6Eb13e",
+  "epochImplementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
+  "coordinatorImplementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+  "clientImplementation": "0xD20DA00A872acfDe3e4721Fc1051BD23CC84B66b",
+  "registry": "0xd20Da048C1A68fa3Bc0B5f5Bc454D1530062C82D",
+  "coordinator": "0xd20da057469C45928912d983F45790C41e290571",
+  "client": "0xD20da0048aED2BBb9f0e7078Bc452815D626D29d",
+  "epochImplementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
+  "coordinatorImplementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+  "clientImplementationCodeHash": "0xb30bd76592fc6def770bf8599a4dcfa827ce4fe1e951000d462c74d488b53e91",
+  "registryCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
+  "coordinatorCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
+  "clientCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
+  "protocolConfigurationHash": "0xa35effe9a9bd1d7c4463215946c65045191be602d92bcb221e8aecf0c8efb9cf",
+  "firstEpochStart": "21241660",
+  "publicKey": [
+    "106861217428123069638593390470684428889612858147734117576896967180093199754084",
+    "10897317540907659086234511645378516972993287419389220780878761731090049729846"
+  ],
+  "minFeeWei": "80000000000000000",
+  "feeMultiplier": 5,
+  "fulfillGasOverhead": 300000,
+  "refundBps": 10000,
+  "keeperFeeBps": 5000,
+  "initialKeeperFeeBps": 5000,
+  "contractSourceCommit": "de5f82e",
+  "deploymentScriptCommit": "f93895cabaa4e26ce8abc60103f45c8ef27c3bcc",
+  "createdAt": "2026-09-17T00:19:45.109Z",
+  "transactions": [
+    {
+      "contract": "epochImplementation",
+      "hash": "0x52365a9d8044acad4773a1976a51c0b0d931cae24da5c90b55fcd22921f1de91",
+      "block": 21241430,
+      "gasUsed": "2995102",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "63849773271190896"
+    },
+    {
+      "contract": "coordinatorImplementation",
+      "hash": "0x0ccdb4ce795b48fca5ddabfc65c3e3976ae47324d458d799b831d2801c0786fc",
+      "block": 21241440,
+      "gasUsed": "5259241",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "112116831222626568"
+    },
+    {
+      "contract": "clientImplementation",
+      "hash": "0x3e1080da57d592dc5de6ea2cf8caf3196c8cb9dee2566f5bf12ae3c79587127a",
+      "block": 21241450,
+      "gasUsed": "1046957",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "22319095334544936"
+    },
+    {
+      "contract": "registry",
+      "hash": "0x6fdb5aa0e64847e6cdc9209e8434e352192c9cfddf466c3b81a81759e7cb871f",
+      "block": 21241460,
+      "gasUsed": "319025",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "6800995063888200"
+    },
+    {
+      "contract": "coordinator",
+      "hash": "0x53d634103591f06898aa32a1ba2cea3c4e95c0d57840c938605b1f45d2831072",
+      "block": 21241470,
+      "gasUsed": "467435",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "9964808800841880"
+    },
+    {
+      "contract": "client",
+      "hash": "0xba709b44808bc9f82533def1d678ac5b67661f47bac04bcce8d76eac6fbc7e99",
+      "block": 21241480,
+      "gasUsed": "229814",
+      "gasPriceWei": "21318063048",
+      "gasCostWei": "4899189341313072"
+    }
+  ],
+  "configurationUpdates": [],
+  "implementationUpgrades": [
+    {
+      "contract": "registry",
+      "proxy": "0xd20Da048C1A68fa3Bc0B5f5Bc454D1530062C82D",
+      "previousImplementation": "0xD20Da0cf7Ddc6123f9A87c0C210F8ECB934CA7D5",
+      "previousImplementationCodeHash": "0xeb8c6ff3a703f40153d67729112228e6a02bd9745680ca8afeedf99bd1a40a09",
+      "implementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
+      "implementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
+      "contractSourceCommit": "de5f82e",
+      "deployment": {
+        "hash": "0x8f383d78ae9331595a84a1c2c8ec35f9181582a14a77576dc0ae2a2468e7b24c",
+        "block": 21405473
+      },
+      "reason": "Owner-managed recipe registry with data templates and backup committers",
+      "upgradedAt": "2026-09-17T23:37:59.613Z",
+      "upgrade": {
+        "hash": "0x513236865d253302e795ec53994e062947ceef5a9494ba48b00b5bcc1535f8a4",
+        "block": 21406486
+      }
+    },
+    {
+      "contract": "coordinator",
+      "proxy": "0xd20da057469C45928912d983F45790C41e290571",
+      "previousImplementation": "0xD20da0c375cEfCdA65703699A4090237057e9b68",
+      "previousImplementationCodeHash": "0x39360c272bc4806b66b6f3928f6f5f2bff240d186aba0e09cbbdc574c3c1622f",
+      "implementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+      "implementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+      "contractSourceCommit": "de5f82e",
+      "deployment": {
+        "hash": "0xf4878025161b60813fe6d6868183389974e651440ac2d1e9f2c947b0248fe830",
+        "block": 21405503
+      },
+      "reason": "Keeper share paid to the authorized wallet that submits the accepted proof",
+      "upgradedAt": "2026-09-17T23:37:59.614Z",
+      "upgrade": {
+        "hash": "0x513236865d253302e795ec53994e062947ceef5a9494ba48b00b5bcc1535f8a4",
+        "block": 21406486
+      }
+    }
+  ],
+  "consumerAccess": {
+    "mode": "public"
+  }
+}

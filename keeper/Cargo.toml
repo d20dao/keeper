@@ -1,0 +1,45 @@
+[package]
+name = "d20dao-keeper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+license = "MIT"
+publish = false
+
+[dependencies]
+alloy-consensus = "=2.4.2"
+alloy-eips = "=2.4.2"
+alloy-primitives = { version = "=1.7.3", features = ["serde", "k256"] }
+alloy-sol-types = "=1.7.3"
+alloy-signer = "=2.4.2"
+alloy-signer-local = { version = "=2.4.2", features = ["zeroize"] }
+anyhow = "1"
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+httpdate = "=1.0.3"
+k256 = { version = "=0.13.4", features = ["arithmetic", "ecdsa"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+ryu-js = "=1.0.3"
+sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tokio-postgres = { version = "=0.7.18", features = ["with-serde_json-1"] }
+tokio-postgres-rustls = { version = "=0.14.0", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "fs", "sync"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "__rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+overflow-checks = true
+strip = true
+lto = "thin"

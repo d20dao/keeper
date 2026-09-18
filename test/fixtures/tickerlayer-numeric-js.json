@@ -1,0 +1,186 @@
+{
+  "testOnly": true,
+  "canonical": "[\"lastTrade\",[[\"assetClass\",\"crypto\"],[\"symbol\",\"BTCUSD\"]]]",
+  "rows": [
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":0,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 0,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x961c803ef838e81c322e7758b938aa79ac0696070789c07d6c411decd19bd7a620415e4dcfc3ec8f9ae4ed450eb47cbf3a0c274adc90292d0e616e2899024e5f1c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":0,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 0,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x961c803ef838e81c322e7758b938aa79ac0696070789c07d6c411decd19bd7a620415e4dcfc3ec8f9ae4ed450eb47cbf3a0c274adc90292d0e616e2899024e5f1c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":1e-7,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 1e-7,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xe80745ef0c01721d35444b88979e7f8ddf69fe6b7174fd4fd0d1d4ca0ab20e3710279e095eea262640495aec407c1642a3e39e8a9af03816ea68c189c62e71961b"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":0.000001,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 0.000001,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xefb667d623780328ddafc04034ea49410426d6412a1ce8b9cba1842144debe9631bb989dfb866c22f69300bc3b9eb40e790c20ea4091ea5c84668193c7cabd971c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":0.00001,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 0.00001,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x69d79b7175c5e417b8746bf5ae423ba9b06494dcd9e86f74edb36fcddefbba96149145d264655dbce68aff5e43b63437a12b5b16a085fafffef21ec58fb4f0011b"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":6e-8,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 6e-8,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xf704248a7e3341e973fbb54975003b6c9138ba6e8f8123bb19b86e9776ae66b765b3c569334300dbadea70d3f3fa13f852385df388f3d08aa4d6cb03dce746c61c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":100000000000000000000,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 100000000000000000000,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x41e61e42cf1a21e462a5bdd6408191848eac09a701c1e163a9acad9a3c92e4c45b8d39f1119e6d1a39c3d4684264f378d09859a2c561a8f4297490b8f199f4571c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":1e+21,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 1e+21,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x22cce495ed5bdc93f821e5762d5ea9b808dc75de7a11e31fd90388d387067afa65e19165c11e7fc368ff88a7c53e6dbfaba37e8a22355934744a9f8264f854651c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":7.6349990000000005,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 7.6349990000000005,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xe52f960338db26839d67ca9acf118d6c54aca4c2ca586b57072f315537bb54dc64c2e1aa036144308451c10d3542c6b9d298ffbf8f14b218f7d49ef53d1eba0c1b"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":1.6200000147420003e-8,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 1.6200000147420003e-8,
+          "timestamp": 1789491295769
+        },
+        "signature": "0x10c312271daac826a0d2eee05c8c253a112bd221667ee4c62ab91c570478f70f4edc535d5cf85f72f112c0bd57a048ded923d643fe2f5b678d8ad03e0272f34e1b"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":9007199254740992,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 9007199254740992,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xa516895e86d8cb9b0b9e44c4c1b02614de242340a54631b9f3a8ce467386251833df33a57bf054ea3662d32be15efad54174f9c2b60fbef3932a3a159e26ff3f1c"
+      }
+    },
+    {
+      "exact": "{\"symbol\":\"BTCUSD\",\"price\":76439.99,\"size\":5e-324,\"timestamp\":1789491295769}",
+      "envelope": {
+        "airnode": "0x68E527780872cda0216Ba0d8fBD58b67a5D5e351",
+        "requestHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+        "timestamp": "1789491296",
+        "data": {
+          "symbol": "BTCUSD",
+          "price": 76439.99,
+          "size": 5e-324,
+          "timestamp": 1789491295769
+        },
+        "signature": "0xd8cc11ff2cd92959cd3beeb471151056dbf819ee3daa06146469ea8c877830ef188eb77fce81f7b80343b9f2e671417732a7b2c1572f2bc871b40c5035a9761c1b"
+      }
+    }
+  ]
+}

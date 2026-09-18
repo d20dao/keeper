@@ -1,0 +1,16 @@
+# Allowlist: only what deploy/docker/Dockerfile copies. Never send keys, env files, journals,
+# build outputs, web assets, SDK, .git or local research to a builder. Directory negations
+# such as !keeper/ would re-include whole trees, so only files and src/** are negated.
+**
+!keeper/Cargo.toml
+!keeper/Cargo.lock
+!keeper/explorer-schema.sql
+!keeper/src/**
+!deploy/docker/Dockerfile
+!deploy/docker/entrypoint.sh
+!deploy/docker/import-keys.sh
+!LICENSE
+# Explicit exclusions after the negations: build outputs, environment files and private keys.
+keeper/target/**
+**/*.env
+**/*.key

@@ -1,0 +1,46 @@
+name: d20dao
+# keeper.sh and keeper.ps1 set KEEPER_IMAGE, KEEPER_ENV_FILE, KEEPER_STATE_VOLUME, KEYS_VOLUME and TOKIO_WORKER_THREADS
+# for the selected KEEPER_INSTANCE. The defaults below are the single keeper's fixed names.
+services:
+  keeper:
+    image: ${KEEPER_IMAGE:-d20dao-keeper:local}
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    init: true
+    user: "10001:10001"
+    env_file: ${KEEPER_ENV_FILE:-keeper.env}
+    network_mode: ${KEEPER_NETWORK_MODE:-bridge}
+    environment:
+      TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-4}
+      TX_KEY_FILE: /run/keeper-keys/transaction.key
+      VRF_KEY_FILE: /run/keeper-keys/vrf.key
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Per instance, so a host running several keepers bounds each of them separately.
+    pids_limit: 128
+    mem_limit: 512m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    ulimits:
+      core: 0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - state:/var/lib/d20dao
+      - keys:/run/keeper-keys:ro
+# Fixed, externally created names prevent accidental new state on checkout/project rename.
+volumes:
+  state:
+    name: ${KEEPER_STATE_VOLUME:-d20dao-state-v1}
+    external: true
+  keys:
+    name: ${KEYS_VOLUME:-d20dao-keys-v1}
+    external: true

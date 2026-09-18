@@ -1,0 +1,3 @@
+[
+  {"name":"epoch-rotation-80", "count":80, "spacingMs":2000, "rpcDelayMs":50, "initialBurst":8, "epochApiDelayMs":1000}
+]

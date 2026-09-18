@@ -1,0 +1,33 @@
+# Deployment template. Install the reviewed Rust release binary and configure its service account first.
+[Unit]
+Description=VRF D20DAO outbound keeper
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=d20dao
+Group=d20dao
+WorkingDirectory=/opt/d20dao
+EnvironmentFile=/etc/d20dao/keeper.env
+# Rust holds journal and chain/wallet/coordinator scope locks under StateDirectory.
+# Do not wrap it in another lock on the same files, or delete lock files while running.
+ExecStart=/opt/d20dao/bin/d20dao-keeper run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=d20dao
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+LimitCORE=0
+ReadWritePaths=/var/lib/d20dao
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Enforced by systemd on supported Linux/cgroup setups; there is no application listening socket.
+SocketBindDeny=any
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,51 @@
+name: Contract checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+  rust-keeper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: public-local-test
+          POSTGRES_DB: explorer_test
+        ports:
+          - 55439:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: rustup toolchain install 1.96.1 --profile minimal --component rustfmt,clippy
+      - run: cargo +1.96.1 fmt --manifest-path keeper/Cargo.toml -- --check
+      - run: cargo +1.96.1 clippy --manifest-path keeper/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.96.1 test --manifest-path keeper/Cargo.toml --locked
+      - run: cargo +1.96.1 test --manifest-path keeper/Cargo.toml --locked postgres_batch_is_atomic_idempotent_and_reorg_safe -- --ignored
+      - run: cargo +1.96.1 test --manifest-path keeper/Cargo.toml --locked epoch_fanout_over_1024 -- --ignored
+      - run: cargo +1.96.1 build --manifest-path keeper/Cargo.toml --locked
+      - run: npm ci
+      - run: npm run demo
+        env:
+          DEMO_FIXTURE: 'true'
+      - run: npx hardhat run scripts/keeper-integration.ts

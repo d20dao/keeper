@@ -1,0 +1,334 @@
+{
+  "collectedAt": "2026-09-15T13:59:03.472Z",
+  "status": "candidate-only-not-deployed",
+  "records": [
+    {
+      "source": 2,
+      "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+      "canonicalRequest": "[\"candleSnapshot\",[[\"req\",[[\"coin\",\"BTC\"],[\"endTime\",1789473599999],[\"interval\",\"1h\"],[\"startTime\",1789470000000]]]],[[\"value\",\"/0/c\"]]]",
+      "attestation": {
+        "timestamp": "1789480743",
+        "data": "0x7b2276616c7565223a2237363930382e30227d",
+        "signature": "0xc61ac1ca7cd9b2deeb617bc8c36b6af5a5a38b40da840a65b411dc04216e2d79518c11c4b518658fc61af6d2e5b06bf213b921b2fce94946ff56c7b6fb1dfc841c"
+      }
+    },
+    {
+      "source": 3,
+      "airnode": "0x73a18EB34c771465c2cdC9fa098022DfE0C12326",
+      "canonicalRequest": "[\"randomNumbers\",[[\"length\",4],[\"size\",8],[\"type\",\"hex8\"]]]",
+      "attestation": {
+        "timestamp": "1789480744",
+        "data": "0x7b2273756363657373223a747275652c2274797065223a2268657838222c226c656e677468223a2234222c2264617461223a5b2262346231343230326430663639343364222c2231643336666166316162316464353335222c2263363437636435363666363039393337222c2231353134656338623738303935386234225d7d",
+        "signature": "0x964a3fd7a2f04c4d57d55723f488629a9e4fc8e49b3e44f78b33a60bb1acd3351e0ef4b42c03111df141a28ab8589e39eb629fe4fc788ed3a388dfec035eb79b1c"
+      }
+    },
+    {
+      "source": 5,
+      "airnode": "0x5aF744115e2577513D878D4263Db73b3E77E7630",
+      "canonicalRequest": "[\"countEvents\",[[\"endtime\",\"2025-01-02\"],[\"format\",\"geojson\"],[\"minmagnitude\",5],[\"starttime\",\"2025-01-01\"]]]",
+      "attestation": {
+        "timestamp": "1789480743",
+        "data": "0x7b22636f756e74223a372c226d6178416c6c6f776564223a32303030307d",
+        "signature": "0xb9da6d68d265e30a0d1580b93f000a56bc0bc040cd95445951d309245aee7cad3b21338c301806751d61dce830576412b834ef97ca24f9fb87e9d1c7d32bcef21b"
+      }
+    },
+    {
+      "source": 6,
+      "airnode": "0x230078619710911032BEF192918203359E7DB22f",
+      "canonicalRequest": "[\"getRate\",[[\"base\",\"EUR\"],[\"date\",\"2025-01-02\"],[\"quote\",\"USD\"]]]",
+      "attestation": {
+        "timestamp": "1789480743",
+        "data": "0x7b2264617465223a22323032352d30312d3032222c2262617365223a22455552222c2271756f7465223a22555344222c2272617465223a312e303336377d",
+        "signature": "0xcaef58730fa1bc7d35004ee0db1ea6575683b9cbbf161111668906e2a12782a219e88055084c2844df9a427c5e478866f5ff22b8d2348cd102a80548498d5fc41b"
+      }
+    },
+    {
+      "source": 8,
+      "airnode": "0xBeA7EB5366e0260664Ff8d96362588F0313e395F",
+      "canonicalRequest": "[\"cityDistance\",[[\"cityId\",\"Q60\"],[\"distanceUnit\",\"KM\"],[\"toCityId\",\"Q84\"]]]",
+      "attestation": {
+        "timestamp": "1789480743",
+        "data": "0x7b2264617461223a353537302e327d",
+        "signature": "0x664741e0c5eeafced223febacfb5f75f91e20dd0183d9da7646f427cbb1b0f3654261040ed6a6a941a9c699bf13d158dcf78ccb28527f7019778ae40f06ab6c51b"
+      }
+    },
+    {
+      "source": 9,
+      "airnode": "0xDaF9D3493e556e9f25b34A3c366795F81e90c6fe",
+      "canonicalRequest": "[\"eodPrices\",[[\"from\",\"2026-09-14\"],[\"period\",\"d\"],[\"ticker\",\"AAPL.US\"],[\"to\",\"2026-09-14\"]]]",
+      "attestation": {
+        "timestamp": "1789480744",
+        "data": "0x5b7b2264617465223a22323032362d30392d3134222c226f70656e223a3333342e37392c2268696768223a3333352e352c226c6f77223a3333312e33342c22636c6f7365223a3333332e30382c2261646a75737465645f636c6f7365223a3333332e30382c22766f6c756d65223a33393232333930307d5d",
+        "signature": "0x93df0605ab143485481042e4fe42b387086cd945e9c67e25e6f5f4cda940d1602776707057eb9da6a5bc60895a659750c79c3d4083e2f6018ed9e534671e0cd11c"
+      }
+    }
+  ],
+  "configurationHash": "0xddac7cd579055fd016eea0bd99231521bdfbf984846c70a4008b7bffa4ee0e82",
+  "results": [
+    {
+      "source": 0,
+      "airnode": "0x77fB6CdB9E9503a269EbB68cd4ea830CE690606A",
+      "endpoint": "https://airnode-customweather.fly.dev/",
+      "request": {
+        "operation": "dailyClimateHistory",
+        "parameters": {
+          "start_time": "2025-01-02T00:00:00",
+          "end_time": "2025-01-02T00:00:00",
+          "latitude": 41,
+          "longitude": 29,
+          "metric": true,
+          "language": "english"
+        },
+        "responseProjection": {
+          "value": "/report/location/observation/0/tmean"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    },
+    {
+      "source": 1,
+      "airnode": "0x01B7601B300ccfab2baCEAfDcea4Bace486a3e7B",
+      "endpoint": "https://airnode-pokeapi.fly.dev/",
+      "request": {
+        "operation": "getPokemonForm",
+        "parameters": {
+          "nameOrId": "25"
+        },
+        "responseProjection": {
+          "value": "/name"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    },
+    {
+      "source": 2,
+      "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+      "endpoint": "https://airnode-hyperliquid.fly.dev/",
+      "request": {
+        "operation": "candleSnapshot",
+        "parameters": {
+          "req": {
+            "coin": "BTC",
+            "interval": "1h",
+            "startTime": 1789470000000,
+            "endTime": 1789473599999
+          }
+        },
+        "responseProjection": {
+          "value": "/0/c"
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 2,
+        "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+        "canonicalRequest": "[\"candleSnapshot\",[[\"req\",[[\"coin\",\"BTC\"],[\"endTime\",1789473599999],[\"interval\",\"1h\"],[\"startTime\",1789470000000]]]],[[\"value\",\"/0/c\"]]]",
+        "attestation": {
+          "timestamp": "1789480743",
+          "data": "0x7b2276616c7565223a2237363930382e30227d",
+          "signature": "0xc61ac1ca7cd9b2deeb617bc8c36b6af5a5a38b40da840a65b411dc04216e2d79518c11c4b518658fc61af6d2e5b06bf213b921b2fce94946ff56c7b6fb1dfc841c"
+        }
+      }
+    },
+    {
+      "source": 3,
+      "airnode": "0x73a18EB34c771465c2cdC9fa098022DfE0C12326",
+      "endpoint": "https://airnode-anuqrng.fly.dev/",
+      "request": {
+        "operation": "randomNumbers",
+        "parameters": {
+          "type": "hex8",
+          "length": 4,
+          "size": 8
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 3,
+        "airnode": "0x73a18EB34c771465c2cdC9fa098022DfE0C12326",
+        "canonicalRequest": "[\"randomNumbers\",[[\"length\",4],[\"size\",8],[\"type\",\"hex8\"]]]",
+        "attestation": {
+          "timestamp": "1789480744",
+          "data": "0x7b2273756363657373223a747275652c2274797065223a2268657838222c226c656e677468223a2234222c2264617461223a5b2262346231343230326430663639343364222c2231643336666166316162316464353335222c2263363437636435363666363039393337222c2231353134656338623738303935386234225d7d",
+          "signature": "0x964a3fd7a2f04c4d57d55723f488629a9e4fc8e49b3e44f78b33a60bb1acd3351e0ef4b42c03111df141a28ab8589e39eb629fe4fc788ed3a388dfec035eb79b1c"
+        }
+      }
+    },
+    {
+      "source": 4,
+      "airnode": "0x84A69892825178Fb1602fb78412E21728efee6a6",
+      "endpoint": "https://airnode-eonet.fly.dev/",
+      "request": {
+        "operation": "getEvent",
+        "parameters": {
+          "id": "EONET_22386"
+        },
+        "responseProjection": {
+          "value": "/id"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    },
+    {
+      "source": 5,
+      "airnode": "0x5aF744115e2577513D878D4263Db73b3E77E7630",
+      "endpoint": "https://airnode-usgs.fly.dev/",
+      "request": {
+        "operation": "countEvents",
+        "parameters": {
+          "format": "geojson",
+          "starttime": "2025-01-01",
+          "endtime": "2025-01-02",
+          "minmagnitude": 5
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 5,
+        "airnode": "0x5aF744115e2577513D878D4263Db73b3E77E7630",
+        "canonicalRequest": "[\"countEvents\",[[\"endtime\",\"2025-01-02\"],[\"format\",\"geojson\"],[\"minmagnitude\",5],[\"starttime\",\"2025-01-01\"]]]",
+        "attestation": {
+          "timestamp": "1789480743",
+          "data": "0x7b22636f756e74223a372c226d6178416c6c6f776564223a32303030307d",
+          "signature": "0xb9da6d68d265e30a0d1580b93f000a56bc0bc040cd95445951d309245aee7cad3b21338c301806751d61dce830576412b834ef97ca24f9fb87e9d1c7d32bcef21b"
+        }
+      }
+    },
+    {
+      "source": 6,
+      "airnode": "0x230078619710911032BEF192918203359E7DB22f",
+      "endpoint": "https://airnode-frankfurter.fly.dev/",
+      "request": {
+        "operation": "getRate",
+        "parameters": {
+          "base": "EUR",
+          "quote": "USD",
+          "date": "2025-01-02"
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 6,
+        "airnode": "0x230078619710911032BEF192918203359E7DB22f",
+        "canonicalRequest": "[\"getRate\",[[\"base\",\"EUR\"],[\"date\",\"2025-01-02\"],[\"quote\",\"USD\"]]]",
+        "attestation": {
+          "timestamp": "1789480743",
+          "data": "0x7b2264617465223a22323032352d30312d3032222c2262617365223a22455552222c2271756f7465223a22555344222c2272617465223a312e303336377d",
+          "signature": "0xcaef58730fa1bc7d35004ee0db1ea6575683b9cbbf161111668906e2a12782a219e88055084c2844df9a427c5e478866f5ff22b8d2348cd102a80548498d5fc41b"
+        }
+      }
+    },
+    {
+      "source": 7,
+      "airnode": "0x157010094550213BDBa48d991943d22d9774b7f3",
+      "endpoint": "https://airnode-ecb.fly.dev/",
+      "request": {
+        "operation": "getData",
+        "parameters": {
+          "flowRef": "EXR",
+          "key": "D.USD.EUR.SP00.A",
+          "startPeriod": "2025-01-02",
+          "endPeriod": "2025-01-02",
+          "dimensionAtObservation": "AllDimensions",
+          "detail": "dataonly"
+        },
+        "responseProjection": {
+          "value": "/dataSets/0/observations/0:0:0:0:0:0/0"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    },
+    {
+      "source": 8,
+      "airnode": "0xBeA7EB5366e0260664Ff8d96362588F0313e395F",
+      "endpoint": "https://airnode-geodb.fly.dev/",
+      "request": {
+        "operation": "cityDistance",
+        "parameters": {
+          "cityId": "Q60",
+          "toCityId": "Q84",
+          "distanceUnit": "KM"
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 8,
+        "airnode": "0xBeA7EB5366e0260664Ff8d96362588F0313e395F",
+        "canonicalRequest": "[\"cityDistance\",[[\"cityId\",\"Q60\"],[\"distanceUnit\",\"KM\"],[\"toCityId\",\"Q84\"]]]",
+        "attestation": {
+          "timestamp": "1789480743",
+          "data": "0x7b2264617461223a353537302e327d",
+          "signature": "0x664741e0c5eeafced223febacfb5f75f91e20dd0183d9da7646f427cbb1b0f3654261040ed6a6a941a9c699bf13d158dcf78ccb28527f7019778ae40f06ab6c51b"
+        }
+      }
+    },
+    {
+      "source": 9,
+      "airnode": "0xDaF9D3493e556e9f25b34A3c366795F81e90c6fe",
+      "endpoint": "https://airnode-eodhd.fly.dev/",
+      "request": {
+        "operation": "eodPrices",
+        "parameters": {
+          "ticker": "AAPL.US",
+          "from": "2026-09-14",
+          "to": "2026-09-14",
+          "period": "d"
+        }
+      },
+      "admitted": true,
+      "record": {
+        "source": 9,
+        "airnode": "0xDaF9D3493e556e9f25b34A3c366795F81e90c6fe",
+        "canonicalRequest": "[\"eodPrices\",[[\"from\",\"2026-09-14\"],[\"period\",\"d\"],[\"ticker\",\"AAPL.US\"],[\"to\",\"2026-09-14\"]]]",
+        "attestation": {
+          "timestamp": "1789480744",
+          "data": "0x5b7b2264617465223a22323032362d30392d3134222c226f70656e223a3333342e37392c2268696768223a3333352e352c226c6f77223a3333312e33342c22636c6f7365223a3333332e30382c2261646a75737465645f636c6f7365223a3333332e30382c22766f6c756d65223a33393232333930307d5d",
+          "signature": "0x93df0605ab143485481042e4fe42b387086cd945e9c67e25e6f5f4cda940d1602776707057eb9da6a5bc60895a659750c79c3d4083e2f6018ed9e534671e0cd11c"
+        }
+      }
+    },
+    {
+      "source": 10,
+      "airnode": "0xd9D29FEDc3737aD5198611457fE04aB08a739C7b",
+      "endpoint": "https://airnode-pandascore.fly.dev/",
+      "request": {
+        "operation": "matchesPast",
+        "parameters": {
+          "per_page": 1,
+          "page": 1
+        },
+        "responseProjection": {
+          "value": "/0/id"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    },
+    {
+      "source": 11,
+      "airnode": "0x5101194A2FAa044723682d611cE74F8DC2C9901C",
+      "endpoint": "https://airnode-eurostat.fly.dev/",
+      "request": {
+        "operation": "getData",
+        "parameters": {
+          "dataset": "nama_10_gdp",
+          "freq": "A",
+          "geo": "DE",
+          "unit": "CP_MEUR",
+          "na_item": "B1GQ",
+          "time": "2024",
+          "lang": "EN"
+        },
+        "responseProjection": {
+          "value": "/value/0"
+        }
+      },
+      "admitted": false,
+      "error": "Provider/query/projection mismatch"
+    }
+  ]
+}

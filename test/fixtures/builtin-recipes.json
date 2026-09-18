@@ -1,0 +1,59 @@
+{
+  "note": "The recipes EpochEntropy registers itself, with exactly these ids. Provider and description are labels, not onchain data. Regenerate with node scripts/generate-recipe-fixtures.ts.",
+  "recipes": [
+    {
+      "id": 0,
+      "provider": "hyperliquid",
+      "description": "BTC daily notional volume",
+      "canonicalRequest": "[\"metaAndAssetCtxs\",[[\"dex\",\"\"]],[[\"symbol\",\"/0/universe/0/name\"],[\"value\",\"/1/0/dayNtlVlm\"]]]",
+      "queryHash": "0x4a63b4b7d869f583964baa3857fdb6f10aac80ee1349635a81c51ea57f12f746",
+      "template": "0x01197b2273796d626f6c223a22425443222c2276616c7565223a2203010102227d",
+      "body": "{\"operation\":\"metaAndAssetCtxs\",\"parameters\":{\"dex\":\"\"},\"responseProjection\":{\"symbol\":\"/0/universe/0/name\",\"value\":\"/1/0/dayNtlVlm\"}}"
+    },
+    {
+      "id": 1,
+      "provider": "drpc",
+      "description": "Ethereum mainnet block hash",
+      "canonicalRequest": "[\"jsonRpc\",[[\"method\",\"eth_call\"],[\"network\",\"ethereum\"],[\"params\",[[[\"data\",\"0x27e86d6e\"],[\"to\",\"0xcA11bde05977b3631167028862bE2a173976CA11\"]],\"latest\"]]]]",
+      "queryHash": "0xabe6d1ad9b60d0fb0a11fdb29f33b005bf366921961e833a62ba7f9c0098abda",
+      "template": "0x01277b226964223a6e756c6c2c226a736f6e727063223a22322e30222c22726573756c74223a22307802400102227d",
+      "body": "{\"operation\":\"jsonRpc\",\"parameters\":{\"network\":\"ethereum\",\"method\":\"eth_call\",\"params\":[{\"to\":\"0xcA11bde05977b3631167028862bE2a173976CA11\",\"data\":\"0x27e86d6e\"},\"latest\"]}}"
+    },
+    {
+      "id": 2,
+      "provider": "tickerlayer",
+      "description": "BTCUSD last trade",
+      "canonicalRequest": "[\"lastTrade\",[[\"assetClass\",\"crypto\"],[\"symbol\",\"BTCUSD\"]]]",
+      "queryHash": "0xdcace5d1afe273f04e34dcd4fc937d853c2d5b14e4454e2fb9127f43b502b674",
+      "template": "0x011b7b2273796d626f6c223a22425443555344222c227072696365223a030301082c2273697a65223a0303010d2c2274696d657374616d70223a04011001017d",
+      "body": "{\"operation\":\"lastTrade\",\"parameters\":{\"assetClass\":\"crypto\",\"symbol\":\"BTCUSD\"}}"
+    },
+    {
+      "id": 3,
+      "provider": "tickerlayer",
+      "description": "ETHUSD last trade",
+      "canonicalRequest": "[\"lastTrade\",[[\"assetClass\",\"crypto\"],[\"symbol\",\"ETHUSD\"]]]",
+      "queryHash": "0x57a2f0e8ddeb9571da25876fdb06c21d327e83f56b347d77be29dd3eae851d06",
+      "template": "0x011b7b2273796d626f6c223a22455448555344222c227072696365223a030301082c2273697a65223a0303010d2c2274696d657374616d70223a04011001017d",
+      "body": "{\"operation\":\"lastTrade\",\"parameters\":{\"assetClass\":\"crypto\",\"symbol\":\"ETHUSD\"}}"
+    },
+    {
+      "id": 4,
+      "provider": "nodary",
+      "description": "ETH/USD feed",
+      "canonicalRequest": "[\"latestFeeds\",[[\"name\",\"ETH/USD\"]]]",
+      "queryHash": "0x95f2f0aef992826cc93ff0632171cce8258cc98d8796d6141e7c20601c20e439",
+      "template": "0x01147b224554482f555344223a7b2276616c7565223a0303010d2c2274696d657374616d70223a040d0d01162c2263617465676f7279223a2263727970746f227d7d",
+      "body": "{\"operation\":\"latestFeeds\",\"parameters\":{\"name\":\"ETH/USD\"}}"
+    },
+    {
+      "id": 5,
+      "provider": "drpc",
+      "description": "Base block hash",
+      "canonicalRequest": "[\"jsonRpc\",[[\"method\",\"eth_call\"],[\"network\",\"base\"],[\"params\",[[[\"data\",\"0x27e86d6e\"],[\"to\",\"0xcA11bde05977b3631167028862bE2a173976CA11\"]],\"latest\"]]]]",
+      "queryHash": "0xd5ded9748ec365437d5a4c26278ebe75afd3e2644cb7f9ada57a01d3b3562e3d",
+      "template": "0x01277b226964223a6e756c6c2c226a736f6e727063223a22322e30222c22726573756c74223a22307802400102227d",
+      "body": "{\"operation\":\"jsonRpc\",\"parameters\":{\"network\":\"base\",\"method\":\"eth_call\",\"params\":[{\"to\":\"0xcA11bde05977b3631167028862bE2a173976CA11\",\"data\":\"0x27e86d6e\"},\"latest\"]}}"
+    }
+  ]
+}

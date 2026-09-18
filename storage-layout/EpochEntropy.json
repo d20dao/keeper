@@ -1,0 +1,377 @@
+{
+  "contract": "EpochEntropy",
+  "openzeppelin": "5.6.1",
+  "storage": [
+    {
+      "label": "hyperliquidSigner",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "ethereumBlockSigner",
+      "slot": "1",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "btcTradeSigner",
+      "slot": "2",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "ethTradeSigner",
+      "slot": "3",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "committer",
+      "slot": "4",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "firstEpochStart",
+      "slot": "4",
+      "offset": 20,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint64",
+        "numberOfBytes": "8"
+      }
+    },
+    {
+      "label": "catalogHash",
+      "slot": "5",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "bytes32",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "epochs",
+      "slot": "6",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint64 => struct EpochEntropy.Epoch)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint64",
+          "numberOfBytes": "8"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "struct EpochEntropy.Epoch",
+          "numberOfBytes": "288",
+          "members": [
+            {
+              "label": "epochHash",
+              "slot": "0",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "catalogHash",
+              "slot": "1",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "anchorHash",
+              "slot": "2",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "source",
+              "slot": "3",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint8",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "queryHash",
+              "slot": "4",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "dataHash",
+              "slot": "5",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "attestationHash",
+              "slot": "6",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "signedAt",
+              "slot": "7",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint256",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "committedBlock",
+              "slot": "8",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint64",
+                "numberOfBytes": "8"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "epochAnchors",
+      "slot": "7",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint64 => bytes32)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint64",
+          "numberOfBytes": "8"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "bytes32",
+          "numberOfBytes": "32"
+        }
+      }
+    },
+    {
+      "label": "__retiredCatalogVersions",
+      "slot": "8",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "catalogs",
+      "slot": "9",
+      "offset": 0,
+      "type": {
+        "encoding": "dynamic_array",
+        "label": "struct EpochEntropy.Catalog[]",
+        "numberOfBytes": "32",
+        "base": {
+          "encoding": "inplace",
+          "label": "struct EpochEntropy.Catalog",
+          "numberOfBytes": "128",
+          "members": [
+            {
+              "label": "fromEpoch",
+              "slot": "0",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint64",
+                "numberOfBytes": "8"
+              }
+            },
+            {
+              "label": "hash",
+              "slot": "1",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "recipes",
+              "slot": "2",
+              "offset": 0,
+              "type": {
+                "encoding": "dynamic_array",
+                "label": "uint8[]",
+                "numberOfBytes": "32",
+                "base": {
+                  "encoding": "inplace",
+                  "label": "uint8",
+                  "numberOfBytes": "1"
+                }
+              }
+            },
+            {
+              "label": "signers",
+              "slot": "3",
+              "offset": 0,
+              "type": {
+                "encoding": "dynamic_array",
+                "label": "address[]",
+                "numberOfBytes": "32",
+                "base": {
+                  "encoding": "inplace",
+                  "label": "address",
+                  "numberOfBytes": "20"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "registeredRecipes",
+      "slot": "10",
+      "offset": 0,
+      "type": {
+        "encoding": "dynamic_array",
+        "label": "struct EpochEntropy.Recipe[]",
+        "numberOfBytes": "32",
+        "base": {
+          "encoding": "inplace",
+          "label": "struct EpochEntropy.Recipe",
+          "numberOfBytes": "96",
+          "members": [
+            {
+              "label": "canonicalRequest",
+              "slot": "0",
+              "offset": 0,
+              "type": {
+                "encoding": "bytes",
+                "label": "string",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "template",
+              "slot": "1",
+              "offset": 0,
+              "type": {
+                "encoding": "bytes",
+                "label": "bytes",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "body",
+              "slot": "2",
+              "offset": 0,
+              "type": {
+                "encoding": "bytes",
+                "label": "string",
+                "numberOfBytes": "32"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "backupCommitters",
+      "slot": "11",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(address => bool)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "bool",
+          "numberOfBytes": "1"
+        }
+      }
+    },
+    {
+      "label": "backupCommitterCount",
+      "slot": "12",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "__gap",
+      "slot": "13",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256[35]",
+        "numberOfBytes": "1120",
+        "base": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "description": "Nodary BTC/USD feed: JSON number value, 13-digit millisecond timestamp, crypto category",
+  "signer": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+  "body": {
+    "operation": "latestFeeds",
+    "parameters": {
+      "name": "BTC/USD"
+    }
+  },
+  "template": [
+    {
+      "literal": "{\"BTC/USD\":{\"value\":"
+    },
+    {
+      "decimal": {
+        "fraction": true,
+        "exponent": true
+      }
+    },
+    {
+      "literal": ",\"timestamp\":"
+    },
+    {
+      "integer": {
+        "minDigits": 13,
+        "maxDigits": 13
+      }
+    },
+    {
+      "literal": ",\"category\":\"crypto\"}}"
+    }
+  ],
+  "sample": {
+    "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+    "requestHash": "0x7f86101e6bb48a9bae1b45885a13829a918b886df1b76076bb569f5cd50a1fc2",
+    "timestamp": "1789653418",
+    "data": {
+      "BTC/USD": {
+        "value": 76634.54000000001,
+        "timestamp": 1789653418094,
+        "category": "crypto"
+      }
+    },
+    "signature": "0xcf7efc0eb2a583ea581385db572697a990044224f18c618a85aa297a8c5ce04d573212f345de9684be4a158357985d2b69281f15d59cfbc1b9d8b7ebd6fbbcc41b"
+  }
+}
