@@ -38,6 +38,7 @@ sol! {
         function getRequest(uint256 id) external view returns (Request request);
         function epochRegistry() external view returns (address registry);
         function protocolConfigurationHash() external view returns (bytes32 hash);
+        function confirmationBlocks() external view returns (uint16 blocks);
         function getProofContext(uint256 id) external view returns (uint256 seed, uint64 deadline, bool fulfilled, bool refunded);
         function fulfillRandomness(uint256 id, VrfProof proof) external;
         function fulfillRandomnessBatch(uint256[] ids, VrfProof[] proofs) external;

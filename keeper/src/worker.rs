@@ -52,11 +52,15 @@ pub struct Worker {
     authorization_checked: std::sync::Mutex<(tokio::time::Instant, u64)>,
     /// The finalized block the last tick read. Work events above it keep the loop in its busy cadence.
     last_finalized: std::sync::atomic::AtomicU64,
+    /// The coordinator's confirmationBlocks, fixed at its initialization: a request's proof input is readable from
+    /// its target block plus this many blocks on.
+    confirmation_blocks: u64,
 }
-/// Without any send, the runtime pins are still re-verified this often, so an idle keeper without an event
-/// subscription notices a proxy upgrade within a minute. Every signature and broadcast verifies them immediately
-/// before it regardless, and an Upgraded event forces the check at the next tick.
-const PIN_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(60);
+/// Without any send, the runtime pins are still re-verified this often, so an idle keeper notices a proxy upgrade
+/// within about 15 seconds even when no Upgraded event reaches it (no subscription, or one whose log stream has
+/// stopped while blocks still arrive). Every signature and broadcast verifies them immediately before it regardless,
+/// and an Upgraded event forces the check at the next tick.
+const PIN_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(15);
 /// How old the publishing-right check may be when work is open, and when it is not. A role event forces it.
 const AUTHORIZATION_BUSY: std::time::Duration = std::time::Duration::from_secs(2);
 const AUTHORIZATION_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -223,34 +227,59 @@ fn batch_member_state(r: &Request, now: u64, kind: &str, status: u64) -> &'stati
 }
 /// The coordinator's CALLBACK_RESERVE: before each callback `_deliver` requires
 /// `gasleft() >= callbackGasLimit + callbackGasLimit / 63 + 140_000` and otherwise reverts the
-/// whole transaction with InsufficientCallbackGas.
+/// whole transaction with InsufficientCallbackGas. fulfillRandomnessBatch also budgets it once.
 const CALLBACK_RESERVE_GAS: u64 = 140_000;
-/// The coordinator's own per-member requirement: the whole callback gas limit, the 1/63 the caller
-/// keeps under EIP-150 and CALLBACK_RESERVE.
-fn callback_budget(limit: u32) -> u64 {
-    let limit = u64::from(limit);
-    limit + limit / 63 + CALLBACK_RESERVE_GAS
+/// The coordinator's BATCH_MEMBER_OVERHEAD: what fulfillRandomnessBatch budgets for each member it
+/// will serve besides the callback itself: the proof check, stored result, events and keeper
+/// payment, measured at up to about 355,000 for a transaction's first member, whose storage is
+/// cold, and 230,000 to 270,000 for the members after it.
+const MEMBER_OVERHEAD_GAS: u64 = 400_000;
+/// Upper bounds on what a fulfillment costs outside the coordinator's budget: intrinsic gas,
+/// calldata priced as if every byte were non-zero (a selector and the array heads, then a 32-byte
+/// id and a 416-byte proof per member), the call's dispatch, and the batch's read of every member
+/// before it serves any.
+const FULFILL_TX_GAS: u64 = 21_000 + 16 * 132 + 50_000;
+const FULFILL_MEMBER_TX_GAS: u64 = 16 * 448 + 20_000;
+/// What fulfillRandomnessBatch requires before it serves any of these members:
+/// CALLBACK_RESERVE + Σ(limit + limit / 63 + BATCH_MEMBER_OVERHEAD).
+fn guard_budget(limits: &[u32]) -> Option<u64> {
+    limits.iter().try_fold(CALLBACK_RESERVE_GAS, |gas, &limit| {
+        let limit = u64::from(limit);
+        gas.checked_add(limit + limit / 63 + MEMBER_OVERHEAD_GAS)
+    })
+}
+/// The least gas limit a fulfillment of these members is sent with: the guard's budget for them
+/// and the transaction's own cost around it, grown by a 63rd. The coordinator is a proxy, and its
+/// delegatecall keeps back a 64th of the gas left (EIP-150): the implementation receives 63/64 of
+/// what the transaction has left when the proxy calls it.
+fn fulfillment_floor(limits: &[u32]) -> Option<u64> {
+    let needed = FULFILL_MEMBER_TX_GAS
+        .checked_mul(u64::try_from(limits.len()).ok()?)?
+        .checked_add(FULFILL_TX_GAS)?
+        .checked_add(guard_budget(limits)?)?;
+    needed.checked_add(needed.div_ceil(63))
 }
 /// Gas limit for a fulfillment whose members have these callback gas limits.
 ///
 /// eth_estimateGas sees each callback only as expensive as it chooses to be in the simulation
 /// (Arc simulates with tx.gasprice == 0), and a callback can also read the results of earlier
-/// members, already stored in the same transaction. On chain it may then burn its whole limit,
-/// leaving a later member short of its own gas check, which reverts the whole batch. The limit
-/// therefore adds every member's full callback budget to the estimate, and never falls below the
-/// usual padding of the estimate. A single fulfillment follows the same rule.
+/// members, already stored in the same transaction. On chain it may then burn its whole limit.
+/// The limit therefore never falls below `fulfillment_floor`: with the guard's budget every member
+/// can burn its whole callback and the next still passes its own gas check, on a coordinator
+/// without the guard as on one with it, and an estimate that comes back short cannot make the
+/// guard revert. The guarded coordinator's estimate already contains that budget, so the padding
+/// covers only the rest of the estimate: a fifth of it, and at least 50,000. A single fulfillment
+/// follows the same rule.
 fn fulfillment_gas(estimate: u64, limits: &[u32]) -> Result<u64> {
+    ensure!(!limits.is_empty(), "A fulfillment has members");
+    let (Some(budget), Some(floor)) = (guard_budget(limits), fulfillment_floor(limits)) else {
+        bail!("Gas overflow");
+    };
+    let padding = (estimate.saturating_sub(budget) / 5).max(50_000);
     let padded = estimate
-        .checked_mul(12)
-        .map(|gas| gas / 10)
-        .and_then(|gas| gas.checked_add(50_000));
-    let reserved = limits.iter().try_fold(estimate, |gas, &limit| {
-        gas.checked_add(callback_budget(limit))
-    });
-    match (padded, reserved) {
-        (Some(padded), Some(reserved)) => Ok(padded.max(reserved)),
-        _ => bail!("Gas overflow"),
-    }
+        .checked_add(padding)
+        .ok_or_else(|| anyhow::anyhow!("Gas overflow"))?;
+    Ok(padded.max(floor))
 }
 /// The largest gas limit the configured caps allow at this price per gas: MAX_GAS, and
 /// MAX_TX_COST_WEI divided by the price.
@@ -260,9 +289,11 @@ fn gas_cap(max_gas: u64, max_cost: u128, fee: u128) -> u64 {
         None => max_gas,
     }
 }
-/// How many members, from the front of a batch, fit `cap` with every member's full callback
-/// budget, predicted from the estimate of the whole batch at an even share per member. The caller
-/// re-estimates the shorter batch and shrinks it again if the prediction was short.
+/// How many members, from the front of a batch, fit `cap`: the most whose gas limit does, at an
+/// estimate predicted from the whole batch's at an even share per member and never below their
+/// floor, which the guarded coordinator's estimate reaches. With no estimate yet (0) the floor
+/// alone predicts it. The caller re-estimates the shorter batch and shrinks it again if the
+/// prediction was short.
 fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
     let Some(share) = u64::try_from(limits.len())
         .ok()
@@ -273,17 +304,19 @@ fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
     };
     (1..=limits.len())
         .take_while(|&count| {
+            let members = &limits[..count];
             u64::try_from(count)
                 .ok()
                 .and_then(|count| share.checked_mul(count))
-                .and_then(|estimate| fulfillment_gas(estimate, &limits[..count]).ok())
+                .zip(fulfillment_floor(members))
+                .and_then(|(estimate, floor)| fulfillment_gas(estimate.max(floor), members).ok())
                 .is_some_and(|gas| gas <= cap)
         })
         .last()
         .unwrap_or(0)
 }
-/// A batch over a cap is shrunk to the members that fit at most this many times before the single
-/// path takes over.
+/// A batch is shrunk at most this many times, to the members that fit a cap or to half after an
+/// estimate the node refused without a revert, before the single path takes over.
 const MAX_BATCH_SHRINKS: u32 = 4;
 /// Journal state epoch work receives when its nonce resolves: the registry's record or the packet's
 /// own freshness wins; otherwise a successful nonce cancellation leaves the saved packet publishable,
@@ -339,8 +372,8 @@ fn batch_payload(members: &[Member]) -> String {
 enum BatchOutcome {
     /// A batch was signed, journaled and handed to broadcast.
     Sent,
-    /// Fewer than two members qualified, the node rejected the batch preflight, or fewer than
-    /// two members fit the caps with their full callback budgets: the single path serves this tick.
+    /// Fewer than two members qualified, the batch preflight reverted, or fewer than two members
+    /// fit the caps: the single path serves this tick.
     Single,
 }
 pub async fn live_lower_bound<F, Fut>(end: u64, now: u64, mut deadline: F) -> Result<u64>
@@ -752,14 +785,7 @@ async fn telegram_snapshot(
             }
         }
     };
-    let balance = rpc
-        .request("eth_getBalance", json!([wallet, "latest"]))
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| U256::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        });
+    let balance = rpc.balance(wallet).await.ok();
     let authorized = Some(authorize_wallet(rpc, registry, wallet, role).await.is_ok());
     let primary_alive: Option<String> =
         sqlx::query_scalar("SELECT value FROM meta WHERE key='keeper:primary_alive'")
@@ -816,6 +842,7 @@ impl Worker {
             crate::epoch::Publisher,
             crate::proxy::RuntimePins,
             Option<String>,
+            u64,
         );
         let startup: Result<Started> = async {
             let instance = journal
@@ -826,25 +853,30 @@ impl Worker {
             // Caps reload only through a restart, so a fee budget observation describes the
             // previous configuration. The next deferral under the reloaded caps re-raises it.
             crate::health::recovered(&journal, "fee_budget").await?;
+            // An endpoint that does not answer, rate limits or answers unusably is skipped and startup goes on with
+            // the others; a usable answer for another chain or other coordinator code still fails startup.
             let mut healthy = Vec::new();
             let mut limited = 0;
             for url in &cfg.rpc_urls {
                 let chain = match probe_rpc.at(url, "eth_chainId", json!([])).await {
-                    Ok(v) => v,
-                    Err(error) => {
+                    Err(error) if crate::rpc::is_delivery_failure(&error) => {
                         if crate::rpc::is_rate_limited(&error) {
                             limited += 1;
                         }
                         tracing::warn!("Skipping unreachable RPC during startup");
                         continue;
                     }
+                    chain => chain.and_then(|chain| quantity(&chain)),
                 };
-                ensure!(quantity(&chain)? == cfg.chain_id, "RPC chain mismatch");
+                let Ok(chain) = chain else {
+                    tracing::warn!("Skipping RPC with an unusable chain id answer during startup");
+                    continue;
+                };
+                ensure!(chain == cfg.chain_id, "RPC chain mismatch");
                 let code = match probe_rpc
                     .at(url, "eth_getCode", json!([cfg.coordinator, "latest"]))
                     .await
                 {
-                    Ok(code) => code,
                     Err(error) if crate::rpc::is_delivery_failure(&error) => {
                         if crate::rpc::is_rate_limited(&error) {
                             limited += 1;
@@ -852,9 +884,12 @@ impl Worker {
                         tracing::warn!("Skipping unreachable RPC code probe during startup");
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    code => code.and_then(|code| Ok(serde_json::from_value::<Bytes>(code)?)),
                 };
-                let code: Bytes = serde_json::from_value(code)?;
+                let Ok(code) = code else {
+                    tracing::warn!("Skipping RPC with an unusable code answer during startup");
+                    continue;
+                };
                 ensure!(!code.is_empty(), "Coordinator has no code");
                 if let Some(expected) = cfg.code_hash {
                     ensure!(
@@ -871,24 +906,43 @@ impl Worker {
                 ));
             }
             ensure!(!healthy.is_empty(), "No healthy verified RPC endpoint");
-            let rpc = Rpc::new(healthy)?;
+            let probed = Rpc::new(healthy)?;
             let approved = cfg.approved_next();
-            let pins=crate::proxy::RuntimePins::observe(&rpc,&cfg).await?;
+            let pins=crate::proxy::RuntimePins::observe(&probed,&cfg).await?;
             // Startup must not mix disagreeing endpoint implementation identities. While an approved upgrade
             // propagates, one endpoint can still serve the pinned implementation and another the approved next one;
-            // when this endpoint's own view is also one the pins accept, startup waits for them to agree.
-            for url in &rpc.urls {
+            // when this endpoint's own view is also one the pins accept, startup waits for them to agree. An endpoint
+            // whose view cannot be read (it does not answer, rate limits or answers unusably) is left out, as the
+            // probe above leaves out an unreachable one: every endpoint the keeper uses has served the pins.
+            let mut verified = Vec::new();
+            let mut limited = 0;
+            for url in &probed.urls {
                 let endpoint = Rpc::new(vec![url.clone()])?;
-                if let Err(error) = pins.verify(&endpoint, approved).await {
-                    if crate::proxy::approved_upgrade(&error).is_none()
-                        && !crate::rpc::is_delivery_failure(&error)
-                        && crate::proxy::RuntimePins::observe(&endpoint, &cfg).await.is_ok()
-                    {
-                        return Err(crate::proxy::EndpointsDisagree(error.to_string()).into());
+                match pins.verify(&endpoint, approved).await {
+                    Ok(()) => verified.push(url.clone()),
+                    Err(error) if crate::rpc::is_delivery_failure(&error) => {
+                        if crate::rpc::is_rate_limited(&error) {
+                            limited += 1;
+                        }
+                        tracing::warn!("Skipping RPC whose implementation identity could not be read during startup");
                     }
-                    return Err(error);
+                    Err(error) => {
+                        if crate::proxy::approved_upgrade(&error).is_none()
+                            && crate::proxy::RuntimePins::observe(&endpoint, &cfg).await.is_ok()
+                        {
+                            return Err(crate::proxy::EndpointsDisagree(error.to_string()).into());
+                        }
+                        return Err(error);
+                    }
                 }
             }
+            if verified.is_empty() && limited == probed.urls.len() {
+                return Err(crate::rpc::rate_limited_error(
+                    "No verified RPC endpoint: every endpoint is rate limiting",
+                ));
+            }
+            ensure!(!verified.is_empty(), "No healthy verified RPC endpoint");
+            let rpc = Rpc::new(verified)?;
             let pk = prover::public_key(&vrf_key);
             ensure!(
                 rpc.call(cfg.coordinator, C::publicKeyXCall {}).await? == pk[0]
@@ -896,6 +950,9 @@ impl Worker {
                 "VRF key does not match coordinator"
             );
             validate_configuration_pin(&rpc, &cfg).await?;
+            // Set once at initialization and bound into the configuration hash checked above.
+            let confirmations =
+                u64::from(rpc.call(cfg.coordinator, C::confirmationBlocksCall {}).await?);
             let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
             match wallet_status(&rpc, registry, tx_key.address(), cfg.role).await? {
                 WalletStatus::Misconfigured(reason) => bail!(reason),
@@ -948,10 +1005,16 @@ impl Worker {
             }
             sqlx::query("INSERT INTO meta(key,value) VALUES('runtime:pins',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
                 .bind(serde_json::to_string(&pins)?).execute(&journal.pool).await?;
-            Ok((rpc, epoch, pins, (!notices.is_empty()).then(|| notices.join("\n\n"))))
+            Ok((
+                rpc,
+                epoch,
+                pins,
+                (!notices.is_empty()).then(|| notices.join("\n\n")),
+                confirmations,
+            ))
         }
         .await;
-        let (rpc, epoch, runtime_pins, upgrade_notice) = match startup {
+        let (rpc, epoch, runtime_pins, upgrade_notice, confirmation_blocks) = match startup {
             Ok(rpc) => rpc,
             Err(error) => {
                 journal.pool.close().await;
@@ -988,6 +1051,7 @@ impl Worker {
             upgrade_notice,
             authorization_checked: std::sync::Mutex::new((tokio::time::Instant::now(), 0)),
             last_finalized: std::sync::atomic::AtomicU64::new(0),
+            confirmation_blocks,
         })
     }
     /// The approved implementation upgrade this process has seen, if any. Once set, the run loop exits with
@@ -1416,15 +1480,27 @@ impl Worker {
                     )
                 })
                 .collect();
-            for value in self.rpc.batch(&calls).await? {
-                let bytes: Bytes = serde_json::from_value(value)?;
-                out.push(C::getRequestCall::abi_decode_returns(&bytes)?);
-            }
+            // Decoded inside the read: an endpoint whose answer does not decode fails, and the next one answers.
+            let requests = self
+                .rpc
+                .batch_as(&calls, |values| {
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            let bytes: Bytes = serde_json::from_value(value)?;
+                            Ok(C::getRequestCall::abi_decode_returns(&bytes)?)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .await?;
+            out.extend(requests);
         }
         Ok(out)
     }
     /// The finalized head, and in the same batched read from the same endpoint the block this journal saved as
-    /// its finalized checkpoint, which must still be on the chain the endpoint serves.
+    /// its finalized checkpoint, which must still be on the chain the endpoint serves. An endpoint that answers
+    /// either block unusably (one that does not serve the finalized tag answers null) is passed over inside the
+    /// read; a usable checkpoint with another hash fails the tick.
     async fn finalized_head_checked(&self) -> Result<Head> {
         let saved: Option<(u64, String)> = self
             .journal
@@ -1432,18 +1508,11 @@ impl Worker {
             .await?
             .map(|saved| serde_json::from_str(&saved))
             .transpose()?;
-        let mut calls = vec![("eth_getBlockByNumber", json!(["finalized", false]))];
-        if let Some((number, _)) = &saved {
-            calls.push((
-                "eth_getBlockByNumber",
-                json!([format!("0x{number:x}"), false]),
-            ));
-        }
-        let blocks = self.rpc.batch(&calls).await?;
-        let head = Head::from_block(&blocks[0])?;
-        if let Some((number, hash)) = saved {
-            let block = Head::from_block(&blocks[1])?;
-            ensure!(block.number == number, "Unexpected block number");
+        let (head, checkpoint) = self
+            .rpc
+            .finalized_head_with(saved.as_ref().map(|(number, _)| *number))
+            .await?;
+        if let (Some((_, hash)), Some(block)) = (saved, checkpoint) {
             ensure!(
                 block.hash.to_string() == hash,
                 "Finalized chain checkpoint changed; preserve journal and investigate RPC/finality before resuming"
@@ -1836,6 +1905,7 @@ impl Worker {
             .await?;
         *attempted = jobs.iter().map(|job| job.id.clone()).collect();
         let policy = self.policy()?;
+        let head = &head;
         let outcomes = stream::iter(
             jobs.into_iter()
                 .filter(|job| {
@@ -1873,7 +1943,7 @@ impl Worker {
                 crate::health::now()?,
             )
             .await?;
-            match self.prepare(&job, request).await {
+            match self.prepare(&job, request, head).await {
                 Ok(true) => {
                     journaled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -1946,7 +2016,8 @@ impl Worker {
             // All URLs here passed startup chain/code verification. A stale success
             // does not trigger transport failover, so explicitly seek a fresh page.
             for url in &self.rpc.urls {
-                let value = match self
+                // An endpoint that does not answer, or answers with a page that does not decode, is passed over.
+                let Ok(candidate) = self
                     .rpc
                     .at(
                         url,
@@ -1954,13 +2025,13 @@ impl Worker {
                         json!([{"to":self.cfg.coordinator,"data":Bytes::from(call.abi_encode())},format!("0x{:x}",head.number)]),
                     )
                     .await
-                {
-                    Ok(value) => value,
-                    Err(error) if crate::rpc::is_delivery_failure(&error) => continue,
-                    Err(error) => return Err(error),
+                    .and_then(|value| {
+                        let bytes: Bytes = serde_json::from_value(value)?;
+                        Ok(C::getPendingRequestIdsCall::abi_decode_returns(&bytes)?)
+                    })
+                else {
+                    continue;
                 };
-                let bytes: Bytes = serde_json::from_value(value)?;
-                let candidate = C::getPendingRequestIdsCall::abi_decode_returns(&bytes)?;
                 let candidate_next: u64 = candidate.nextCursor.try_into()?;
                 if discovery_page_advances(cursor, candidate_next, &candidate.ids)? {
                     page = candidate;
@@ -1997,12 +2068,19 @@ impl Worker {
         self.journal.cursor(&next.to_string()).await?;
         Ok(())
     }
-    /// Returns whether this call journaled a new proof.
-    async fn prepare(&self, job: &Job, request: Request) -> Result<bool> {
+    /// Returns whether this call journaled a new proof. `request` is the request as of `head`.
+    async fn prepare(&self, job: &Job, request: Request, head: &Head) -> Result<bool> {
         if request.epochHash == B256::ZERO {
             return Ok(false);
         }
         if job.call.is_some() {
+            return Ok(false);
+        }
+        // The coordinator serves the proof input only from the target block plus confirmationBlocks
+        // on, and reverts before: asking earlier costs a revert on every endpoint. With the epoch
+        // published, the request read at `head` already names its target block.
+        if head.number < request.targetBlock.saturating_add(self.confirmation_blocks) {
+            tracing::debug!(request_id=%job.id,target_block=request.targetBlock,finalized=head.number,"Proof input not readable before the target block is confirmed");
             return Ok(false);
         }
         let id: U256 = job.id.parse()?;
@@ -2010,12 +2088,18 @@ impl Worker {
             .rpc
             .call(self.cfg.coordinator, C::getProofContextCall { id })
             .await?;
+        ensure!(
+            context.deadline == request.deadline,
+            "Proof context deadline does not match the request"
+        );
+        if context.fulfilled || context.refunded {
+            // Settled by another submitter since `head`: the next finalized read classifies it.
+            tracing::debug!(request_id=%job.id,"Request settled before its proof was prepared");
+            return Ok(false);
+        }
         let now = self.rpc.head().await?.timestamp;
         ensure!(
-            !context.fulfilled
-                && !context.refunded
-                && context.deadline == request.deadline
-                && now + self.cfg.margin < context.deadline,
+            now + self.cfg.margin < context.deadline,
             "No proof-generation time budget remains"
         );
         let key = self.vrf_key.clone();
@@ -2086,13 +2170,12 @@ impl Worker {
         }
         let estimate = self
             .rpc
-            .request(
-                "eth_estimateGas",
-                json!([{"from":self.tx_key.address(),"to":self.cfg.coordinator,"data":call}]),
+            .estimate_gas(
+                json!({"from":self.tx_key.address(),"to":self.cfg.coordinator,"data":call}),
             )
             .await;
         let gas = match estimate {
-            Ok(value) => quantity(&value)?,
+            Ok(gas) => gas,
             Err(error) if crate::rpc::is_delivery_failure(&error) => {
                 if crate::rpc::is_node_error_response(&error) {
                     // Another keeper or submitter may have settled the request since the finalized read:
@@ -2110,7 +2193,7 @@ impl Worker {
             Err(error) => return Err(error),
         };
         let used = gas;
-        // The callback's full budget is reserved: never under-provisioned to fit a cap.
+        // Never below the request's floor: never under-provisioned to fit a cap.
         let gas = fulfillment_gas(used, &[request.callbackGasLimit])?;
         if let Some(exceeded) = self.gas_over_budget(gas) {
             return Err(SendDeferred::budget(exceeded).into());
@@ -2158,8 +2241,9 @@ impl Worker {
     }
     /// One fulfillRandomnessBatch for the earliest-deadline prepared requests. Each member
     /// passes exactly the checks of send_prepared; the node's preflight then verifies every
-    /// proof at once. The gas limit reserves every member's full callback budget, and a batch
-    /// that then exceeds a gas or cost cap shrinks to the members that fit.
+    /// proof at once. The batch keeps the members whose floor fits the gas and cost caps before it
+    /// is estimated, and one that still exceeds a cap after its estimate shrinks to the members
+    /// that fit.
     async fn send_prepared_batch(&self, candidates: &[Job]) -> Result<BatchOutcome> {
         // Estimation is not a send: the pins are verified after it, immediately before signing.
         let (head, latest, pending) = tokio::try_join!(
@@ -2257,19 +2341,52 @@ impl Worker {
             })
             .into());
         }
+        // Every member's budget is known before the estimate: a batch whose floor cannot fit the
+        // caps is trimmed first, rather than estimated, refused by a node that will not estimate
+        // that much gas and sent one request at a time.
+        let cap = gas_cap(self.cfg.max_gas, self.cfg.max_cost, fee);
+        let limits: Vec<u32> = members.iter().map(|member| member.callback_gas).collect();
+        let fit = members_within(0, &limits, cap);
+        if fit < members.len() {
+            if fit < 2 {
+                tracing::warn!(
+                    members = members.len(),
+                    cap,
+                    "Batch members' callback budgets exceed a configured cap even for two; using the single path"
+                );
+                return Ok(BatchOutcome::Single);
+            }
+            tracing::info!(
+                members = members.len(),
+                next = fit,
+                cap,
+                "Batch trimmed to the members whose callback budgets fit the configured caps"
+            );
+            members.truncate(fit);
+        }
         let mut shrinks = 0;
         let (plan, now) = loop {
             let payload = batch_payload(&members);
             let estimate = self
                 .rpc
-                .request(
-                    "eth_estimateGas",
-                    json!([{"from":self.tx_key.address(),"to":self.cfg.coordinator,"data":payload}]),
+                .estimate_gas(
+                    json!({"from":self.tx_key.address(),"to":self.cfg.coordinator,"data":payload}),
                 )
                 .await;
             let gas = match estimate {
-                Ok(value) => quantity(&value)?,
+                Ok(gas) => gas,
                 Err(error) if crate::rpc::is_node_error_response(&error) => {
+                    // A node that refuses the estimate without a revert (a gas limit it does not
+                    // estimate, a request it does not take) may take half of the batch.
+                    if !crate::rpc::is_revert(&error)
+                        && members.len() >= 4
+                        && shrinks < MAX_BATCH_SHRINKS
+                    {
+                        shrinks += 1;
+                        tracing::warn!(members=members.len(),next=members.len()/2,error=%error,"Batch preflight refused by the node without a revert; halving the batch");
+                        members.truncate(members.len() / 2);
+                        continue;
+                    }
                     // One member's proof or readiness fails the whole call. The single path
                     // preflights each request on its own and backs off only the bad one.
                     tracing::warn!(members=members.len(),error=%error,"Batch preflight rejected by the node; falling back to single sends this tick");
@@ -2281,8 +2398,8 @@ impl Worker {
                 Err(error) => return Err(error),
             };
             let used = gas;
-            // Every member's full callback budget is reserved, so no callback can leave a later
-            // member short of the coordinator's gas check (see fulfillment_gas).
+            // Never below the members' floor, so no callback can leave a later member short of
+            // the coordinator's gas check (see fulfillment_gas).
             let limits: Vec<u32> = members.iter().map(|member| member.callback_gas).collect();
             let gas = fulfillment_gas(used, &limits)?;
             let plan = TxPlan {
@@ -2298,22 +2415,17 @@ impl Worker {
                 .or_else(|| self.over_budget(&plan))
             {
                 // A batch that does not fit is shrunk, never under-provisioned: it keeps the
-                // earliest members that fit the caps with their full budgets.
-                let fit = members_within(
-                    used,
-                    &limits,
-                    gas_cap(self.cfg.max_gas, self.cfg.max_cost, fee),
-                )
-                .min(members.len() - 1);
+                // earliest members that fit the caps above their floor.
+                let fit = members_within(used, &limits, cap).min(members.len() - 1);
                 if fit >= 2 && shrinks < MAX_BATCH_SHRINKS {
                     shrinks += 1;
-                    tracing::info!(members=members.len(),next=fit,exceeded=%exceeded,"Batch with full callback budgets exceeds a configured cap; shrinking it to the members that fit");
+                    tracing::info!(members=members.len(),next=fit,exceeded=%exceeded,"Batch exceeds a configured cap; shrinking it to the members that fit");
                     members.truncate(fit);
                     continue;
                 }
                 // The single path prices one request on its own and classifies its own budget
                 // deferral; no cap is bypassed either way.
-                tracing::warn!(members=members.len(),exceeded=%exceeded,"Batch with full callback budgets still exceeds a configured cap; using the single path");
+                tracing::warn!(members=members.len(),exceeded=%exceeded,"Batch still exceeds a configured cap; using the single path");
                 return Ok(BatchOutcome::Single);
             }
             // Recheck implementations and time after estimation; neither cached ABI nor old head authorizes a send.
@@ -2355,6 +2467,14 @@ impl Worker {
         self.sign_and_journal_members(&key, plan, now, &ids).await?;
         self.broadcast_latest(now).await?;
         Ok(BatchOutcome::Sent)
+    }
+    /// Every member's chain state at block `number`, in journal order.
+    async fn member_requests_at(&self, members: &[String], number: u64) -> Result<Vec<Request>> {
+        let ids = members
+            .iter()
+            .map(|id| id.parse())
+            .collect::<std::result::Result<Vec<U256>, _>>()?;
+        self.requests_in(&ids, &format!("0x{number:x}")).await
     }
     /// Current chain state of every member, in journal order.
     async fn member_requests(&self, members: &[String]) -> Result<Vec<Request>> {
@@ -2520,13 +2640,10 @@ impl Worker {
             .await?;
         let estimate = self
             .rpc
-            .request(
-                "eth_estimateGas",
-                json!([{"from":self.tx_key.address(),"to":epoch.registry,"data":payload}]),
-            )
+            .estimate_gas(json!({"from":self.tx_key.address(),"to":epoch.registry,"data":payload}))
             .await;
         let gas = match estimate {
-            Ok(value) => quantity(&value)?,
+            Ok(gas) => gas,
             Err(error) => {
                 if crate::rpc::is_node_error_response(&error)
                     && self.epoch_published_at_latest(work.epoch).await?
@@ -2535,9 +2652,8 @@ impl Worker {
                     tracing::info!(epoch_key=%work.key,role=self.cfg.role.name(),"Epoch already published by another committer; nothing to send");
                     return Ok(());
                 }
-                if !crate::rpc::is_delivery_failure(&error) {
-                    crate::epoch::state(&self.journal.pool, &work.key, "blocked").await?;
-                }
+                // Every failed estimate is an RPC failure, an unusable answer included: the packet stays publishable
+                // and the work retries after its back-off.
                 return Err(error);
             }
         }
@@ -2897,26 +3013,13 @@ impl Worker {
                 )
                 .await;
         }
-        let balance = self
-            .rpc
-            .request("eth_getBalance", json!([wallet, "latest"]))
-            .await?;
-        let balance = U256::from_str_radix(
-            balance
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid balance response"))?
-                .trim_start_matches("0x"),
-            16,
-        )?;
+        let balance = self.rpc.balance(wallet).await?;
         let gas = match self
             .rpc
-            .request(
-                "eth_estimateGas",
-                json!([{"from": wallet, "to": recipient, "value": "0x1"}]),
-            )
+            .estimate_gas(json!({"from": wallet, "to": recipient, "value": "0x1"}))
             .await
         {
-            Ok(value) => quantity(&value)?,
+            Ok(gas) => gas,
             Err(error) if crate::rpc::is_node_error_response(&error) => {
                 return self
                     .refuse_sweep(
@@ -3253,6 +3356,63 @@ impl Worker {
         .await?;
         Ok(())
     }
+    /// Resolve a single request's nonce from the finalized receipt of attempt `a` and announce what it served.
+    async fn settle_receipt(
+        &self,
+        a: &Attempt,
+        receipt: &serde_json::Value,
+        head: &Head,
+    ) -> Result<()> {
+        self.journal
+            .finalized_receipt(
+                &a.hash,
+                quantity(&receipt["blockNumber"])?,
+                receipt["blockHash"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
+                quantity(&receipt["status"])?,
+            )
+            .await?;
+        let status = quantity(&receipt["status"])?;
+        // Read at a fixed block no older than the receipt's: an endpoint that has not caught up with
+        // it fails the read instead of answering with the state from before the transaction.
+        let at = head.number.max(quantity(&receipt["blockNumber"])?);
+        let r = self.request_at(a.job.parse()?, at).await?;
+        if r.fulfilled && !r.delivered {
+            crate::audit::callback_failed(&self.journal.pool, &a.job).await?;
+        }
+        self.journal
+            .resolve_nonce_job(
+                a.nonce,
+                &a.job,
+                resolved_state(&r, head.timestamp, &a.kind, status),
+            )
+            .await?;
+        if status == 1
+            && a.kind == "fulfill"
+            && r.fulfilled
+            && let Some(notifier) = &self.telegram
+            && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
+        {
+            notifier.notify(crate::telegram::Event::Fulfilled {
+                request_id,
+                tx_hash,
+            });
+        }
+        tracing::info!(request_id=%a.job,tx_hash=%a.hash,status,"Receipt reconciled");
+        if status == 1 && a.kind == "fulfill" && r.fulfilled && self.cfg.role.is_follower() {
+            tracing::warn!(request_id=%a.job,tx_hash=%a.hash,"Follower served request {}",a.job);
+        }
+        if let Some(notifier) = &self.discord
+            && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
+            && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
+                status, &a.kind, request_id, tx_hash, &r,
+            )
+        {
+            notifier.notify(proof);
+        }
+        Ok(())
+    }
     async fn reconcile(&self, head: &Head) -> Result<bool> {
         let attempts = self.journal.unresolved().await?;
         if attempts.is_empty() {
@@ -3288,52 +3448,7 @@ impl Worker {
                 if !self.rpc.receipt_is_finalized(&a.hash, &receipt).await? {
                     return Ok(true);
                 }
-                self.journal
-                    .finalized_receipt(
-                        &a.hash,
-                        quantity(&receipt["blockNumber"])?,
-                        receipt["blockHash"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
-                        quantity(&receipt["status"])?,
-                    )
-                    .await?;
-                let status = quantity(&receipt["status"])?;
-                let r = self.request(a.job.parse()?).await?;
-                if r.fulfilled && !r.delivered {
-                    crate::audit::callback_failed(&self.journal.pool, &a.job).await?;
-                }
-                self.journal
-                    .resolve_nonce_job(
-                        a.nonce,
-                        &a.job,
-                        resolved_state(&r, head.timestamp, &a.kind, status),
-                    )
-                    .await?;
-                if status == 1
-                    && a.kind == "fulfill"
-                    && r.fulfilled
-                    && let Some(notifier) = &self.telegram
-                    && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
-                {
-                    notifier.notify(crate::telegram::Event::Fulfilled {
-                        request_id,
-                        tx_hash,
-                    });
-                }
-                tracing::info!(request_id=%a.job,tx_hash=%a.hash,status,"Receipt reconciled");
-                if status == 1 && a.kind == "fulfill" && r.fulfilled && self.cfg.role.is_follower()
-                {
-                    tracing::warn!(request_id=%a.job,tx_hash=%a.hash,"Follower served request {}",a.job);
-                }
-                if let Some(notifier) = &self.discord
-                    && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
-                    && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                        status, &a.kind, request_id, tx_hash, &r,
-                    )
-                {
-                    notifier.notify(proof);
-                }
+                self.settle_receipt(a, &receipt, head).await?;
                 return Ok(false);
             }
         }
@@ -3341,6 +3456,19 @@ impl Worker {
         let terminal_state = terminal(&r, head.timestamp);
         let chain_nonce = self.rpc.nonce(self.tx_key.address(), "finalized").await?;
         if chain_nonce > latest.nonce as u64 {
+            // The nonce is used, so one of its attempts is in a block: an endpoint that has not caught up with that
+            // block answers null, and another one may already serve the final receipt with its notices.
+            let hashes: Vec<String> = attempts.iter().map(|a| a.hash.clone()).collect();
+            if let Some((found, receipt)) = self.rpc.receipt_from_any(&hashes).await?
+                && self
+                    .rpc
+                    .receipt_is_finalized(&attempts[found].hash, &receipt)
+                    .await?
+            {
+                self.settle_receipt(&attempts[found], &receipt, head)
+                    .await?;
+                return Ok(false);
+            }
             // A missing receipt is not failure. Only a known terminal contract state can resolve it safely.
             if let Some(state) = terminal_state {
                 if r.fulfilled && !r.delivered {
@@ -3349,6 +3477,7 @@ impl Worker {
                 self.journal
                     .resolve_nonce_job(latest.nonce, &latest.job, state)
                     .await?;
+                tracing::info!(request_id=%latest.job,nonce=latest.nonce,state,"Used nonce resolved from chain state; no endpoint served its receipt");
                 return Ok(false);
             }
             if awaiting_receipt_visibility(head.timestamp, latest) {
@@ -3427,6 +3556,88 @@ impl Worker {
         }
         Ok(true)
     }
+    /// Resolve every member of a batch nonce from the finalized receipt of attempt `a` and announce
+    /// the members it served.
+    async fn settle_batch_receipt(
+        &self,
+        a: &Attempt,
+        receipt: &serde_json::Value,
+        members: &[String],
+        head: &Head,
+    ) -> Result<()> {
+        let key = a.job.as_str();
+        self.journal
+            .finalized_receipt(
+                &a.hash,
+                quantity(&receipt["blockNumber"])?,
+                receipt["blockHash"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
+                quantity(&receipt["status"])?,
+            )
+            .await?;
+        let status = quantity(&receipt["status"])?;
+        // Read at a fixed block no older than the receipt's, as for a single fulfillment.
+        let at = head.number.max(quantity(&receipt["blockNumber"])?);
+        let requests = self.member_requests_at(members, at).await?;
+        let mut states = Vec::with_capacity(members.len());
+        for (id, r) in members.iter().zip(&requests) {
+            if r.fulfilled && !r.delivered {
+                crate::audit::callback_failed(&self.journal.pool, id).await?;
+            }
+            states.push((
+                id.clone(),
+                batch_member_state(r, head.timestamp, &a.kind, status),
+            ));
+        }
+        // The journal returns a reverted batch's live members to `prepared`, out of later
+        // batches and due at once, in the same commit that resolves the nonce.
+        self.journal
+            .resolve_nonce_batch(a.nonce, key, &states)
+            .await?;
+        let resend = states
+            .iter()
+            .filter(|(_, state)| *state == "prepared")
+            .count();
+        if resend > 0 {
+            self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
+            tracing::warn!(batch_key=%key,tx_hash=%a.hash,members=members.len(),resend,"Batch reverted on chain; resending its live members one at a time");
+        }
+        // Notifications name only the members this receipt served. A member already
+        // fulfilled elsewhere is skipped on chain and has no RandomnessFulfilled log here.
+        let served = fulfilled_in_receipt(receipt, self.cfg.coordinator)?;
+        let mut notified = 0usize;
+        if status == 1 && a.kind == "fulfill_batch" {
+            for (id, r) in members.iter().zip(&requests) {
+                let (Ok(request_id), Ok(tx_hash)) = (id.parse::<U256>(), a.hash.parse::<B256>())
+                else {
+                    continue;
+                };
+                if !r.fulfilled || !served.contains(&request_id) {
+                    continue;
+                }
+                notified += 1;
+                if let Some(notifier) = &self.telegram {
+                    notifier.notify(crate::telegram::Event::Fulfilled {
+                        request_id,
+                        tx_hash,
+                    });
+                }
+                if let Some(notifier) = &self.discord
+                    && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
+                        status, &a.kind, request_id, tx_hash, r,
+                    )
+                {
+                    notifier.notify(proof);
+                }
+            }
+        }
+        tracing::info!(batch_key=%key,tx_hash=%a.hash,status,members=members.len(),served=served.len(),notified,"Batch receipt reconciled");
+        if notified > 0 && self.cfg.role.is_follower() {
+            tracing::warn!(batch_key=%key,tx_hash=%a.hash,served=notified,"Follower served {notified} requests in one batch");
+        }
+        Ok(())
+    }
     /// The single-request reconciliation applied to every member of one batch nonce. Chain
     /// state is read per member; the journal resolves all of them, or none, with the nonce.
     async fn reconcile_batch(&self, attempts: &[Attempt], head: &Head) -> Result<bool> {
@@ -3441,75 +3652,8 @@ impl Worker {
                 if !self.rpc.receipt_is_finalized(&a.hash, &receipt).await? {
                     return Ok(true);
                 }
-                self.journal
-                    .finalized_receipt(
-                        &a.hash,
-                        quantity(&receipt["blockNumber"])?,
-                        receipt["blockHash"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
-                        quantity(&receipt["status"])?,
-                    )
+                self.settle_batch_receipt(a, &receipt, &members, head)
                     .await?;
-                let status = quantity(&receipt["status"])?;
-                let requests = self.member_requests(&members).await?;
-                let mut states = Vec::with_capacity(members.len());
-                for (id, r) in members.iter().zip(&requests) {
-                    if r.fulfilled && !r.delivered {
-                        crate::audit::callback_failed(&self.journal.pool, id).await?;
-                    }
-                    states.push((
-                        id.clone(),
-                        batch_member_state(r, head.timestamp, &a.kind, status),
-                    ));
-                }
-                // The journal returns a reverted batch's live members to `prepared`, out of later
-                // batches and due at once, in the same commit that resolves the nonce.
-                self.journal
-                    .resolve_nonce_batch(a.nonce, key, &states)
-                    .await?;
-                let resend = states
-                    .iter()
-                    .filter(|(_, state)| *state == "prepared")
-                    .count();
-                if resend > 0 {
-                    self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
-                    tracing::warn!(batch_key=%key,tx_hash=%a.hash,members=members.len(),resend,"Batch reverted on chain; resending its live members one at a time");
-                }
-                // Notifications name only the members this receipt served. A member already
-                // fulfilled elsewhere is skipped on chain and has no RandomnessFulfilled log here.
-                let served = fulfilled_in_receipt(&receipt, self.cfg.coordinator)?;
-                let mut notified = 0usize;
-                if status == 1 && a.kind == "fulfill_batch" {
-                    for (id, r) in members.iter().zip(&requests) {
-                        let (Ok(request_id), Ok(tx_hash)) =
-                            (id.parse::<U256>(), a.hash.parse::<B256>())
-                        else {
-                            continue;
-                        };
-                        if !r.fulfilled || !served.contains(&request_id) {
-                            continue;
-                        }
-                        notified += 1;
-                        if let Some(notifier) = &self.telegram {
-                            notifier.notify(crate::telegram::Event::Fulfilled {
-                                request_id,
-                                tx_hash,
-                            });
-                        }
-                        if let Some(notifier) = &self.discord
-                            && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                                status, &a.kind, request_id, tx_hash, r,
-                            )
-                        {
-                            notifier.notify(proof);
-                        }
-                    }
-                }
-                tracing::info!(batch_key=%key,tx_hash=%a.hash,status,members=members.len(),served=served.len(),notified,"Batch receipt reconciled");
-                if notified > 0 && self.cfg.role.is_follower() {
-                    tracing::warn!(batch_key=%key,tx_hash=%a.hash,served=notified,"Follower served {notified} requests in one batch");
-                }
                 return Ok(false);
             }
         }
@@ -3522,6 +3666,19 @@ impl Worker {
             .any(|r| timely(r, head.timestamp, self.cfg.margin));
         let chain_nonce = self.rpc.nonce(self.tx_key.address(), "finalized").await?;
         if chain_nonce > latest.nonce as u64 {
+            // The nonce is used, so one of its attempts is in a block: an endpoint that has not caught up with that
+            // block answers null, and another one may already serve the final receipt with its notices.
+            let hashes: Vec<String> = attempts.iter().map(|a| a.hash.clone()).collect();
+            if let Some((found, receipt)) = self.rpc.receipt_from_any(&hashes).await?
+                && self
+                    .rpc
+                    .receipt_is_finalized(&attempts[found].hash, &receipt)
+                    .await?
+            {
+                self.settle_batch_receipt(&attempts[found], &receipt, &members, head)
+                    .await?;
+                return Ok(false);
+            }
             // A missing receipt is not failure. Only known terminal contract state for every
             // member can resolve the nonce safely; one live member leaves it for inspection.
             if all_terminal {
@@ -3538,6 +3695,7 @@ impl Worker {
                 self.journal
                     .resolve_nonce_batch(latest.nonce, key, &states)
                     .await?;
+                tracing::info!(batch_key=%key,nonce=latest.nonce,members=members.len(),"Used batch nonce resolved from chain state; no endpoint served its receipt");
                 return Ok(false);
             }
             if awaiting_receipt_visibility(head.timestamp, latest) {
@@ -4418,12 +4576,36 @@ mod tests {
         // The request's own single attempt reverting is what fails it permanently.
         assert_eq!(resolved_state(&live, 50, "fulfill", 0), "blocked");
     }
-    /// A gas model of fulfillRandomnessBatch: each member spends `before` gas up to its callback,
-    /// must pass the coordinator's check `gasleft() >= limit + limit / 63 + CALLBACK_RESERVE`
-    /// (InsufficientCallbackGas reverts the whole batch), burns at most its limit in the callback
-    /// and spends `after` once it returns. Whether the batch completes with `gas`.
-    fn batch_lands(gas: u64, members: &[(u64, u32, u64, u64)]) -> bool {
-        let mut left = gas;
+    /// The coordinator's check before each callback: `gasleft() >= limit + limit / 63 + CALLBACK_RESERVE`.
+    fn callback_budget(limit: u32) -> u64 {
+        let limit = u64::from(limit);
+        limit + limit / 63 + CALLBACK_RESERVE_GAS
+    }
+    /// A gas model of a fulfillment through the coordinator's proxy. The transaction spends `outer`
+    /// before the proxy's delegatecall (intrinsic gas, calldata, the proxy itself), which passes on
+    /// all but a 64th of what is left (EIP-150). The implementation spends `inner` before its first
+    /// member (dispatch and, on the guarded coordinator, its read of every member), and the guarded
+    /// coordinator then requires `guard_budget` before it serves any member. Each member spends
+    /// `before` gas up to its callback, must pass the coordinator's check
+    /// `gasleft() >= limit + limit / 63 + CALLBACK_RESERVE` (InsufficientCallbackGas reverts the
+    /// whole transaction), burns at most its limit in the callback and spends `after` once it
+    /// returns. Whether the fulfillment completes with `gas`.
+    fn lands(
+        gas: u64,
+        (outer, inner): (u64, u64),
+        guarded: bool,
+        members: &[(u64, u32, u64, u64)],
+    ) -> bool {
+        let Some(forwarded) = gas.checked_sub(outer) else {
+            return false;
+        };
+        let Some(mut left) = (forwarded - forwarded / 64).checked_sub(inner) else {
+            return false;
+        };
+        let limits: Vec<u32> = members.iter().map(|&(_, limit, _, _)| limit).collect();
+        if guarded && left < guard_budget(&limits).unwrap() {
+            return false;
+        }
         for &(before, limit, burn, after) in members {
             let Some(at_check) = left.checked_sub(before) else {
                 return false;
@@ -4439,11 +4621,11 @@ mod tests {
         true
     }
     /// What eth_estimateGas returns for the model: the least gas with which it completes.
-    fn estimated(members: &[(u64, u32, u64, u64)]) -> u64 {
+    fn estimated(overhead: (u64, u64), guarded: bool, members: &[(u64, u32, u64, u64)]) -> u64 {
         let (mut low, mut high) = (0u64, 100_000_000u64);
         while low < high {
             let mid = low + (high - low) / 2;
-            if batch_lands(mid, members) {
+            if lands(mid, overhead, guarded, members) {
                 high = mid
             } else {
                 low = mid + 1
@@ -4451,8 +4633,19 @@ mod tests {
         }
         low
     }
+    /// A fulfillment's cost outside the coordinator's budget, split at the proxy's delegatecall: as
+    /// transactions on Arc show it (about 32,000 and 14,000 per member in all), and as large as the
+    /// floor allows for (FULFILL_TX_GAS and FULFILL_MEMBER_TX_GAS per member).
+    fn overheads(members: usize) -> [(u64, u64); 2] {
+        let n = members as u64;
+        let outer = 21_000 + 3_000 + 16 * (132 + 448 * n);
+        [
+            (21_000 + 3_000 + 6_700 * n, 8_000 + 7_300 * n),
+            (outer, FULFILL_TX_GAS + FULFILL_MEMBER_TX_GAS * n - outer),
+        ]
+    }
     #[test]
-    fn a_callback_that_burns_its_budget_only_on_chain_cannot_abort_a_full_budget_batch() {
+    fn a_callback_that_burns_its_budget_only_on_chain_cannot_abort_a_batch_on_either_coordinator() {
         // The batch-abort issue: the draw, then two helpers with 1,000,000-gas callbacks that are cheap in
         // the unpriced simulation and, once the draw has lost, burn their whole limit on chain.
         let (before, after) = (180_000, 40_000);
@@ -4466,62 +4659,123 @@ mod tests {
             (before, 1_000_000, 1_000_000, after),
             (before, 1_000_000, 1_000_000, after),
         ];
-        let estimate = estimated(&simulated);
         let limits = [100_000, 1_000_000, 1_000_000];
-        // The previous sizing, estimate * 1.2 + 50,000: the second helper's check fails on chain.
-        assert!(!batch_lands(estimate * 12 / 10 + 50_000, &on_chain));
-        // Every member's full budget reserved: the batch lands with the draw's result in it.
-        assert!(batch_lands(
-            fulfillment_gas(estimate, &limits).unwrap(),
+        let [measured, _] = overheads(3);
+        let estimate = estimated(measured, false, &simulated);
+        // The sizing before the batch-abort fix, estimate * 1.2 + 50,000: on the coordinator without the
+        // guard the second helper's check fails on chain, after the draw's result was stored.
+        assert!(!lands(
+            estimate * 12 / 10 + 50_000,
+            measured,
+            false,
             &on_chain
         ));
-        // The same holds for any mix of limits and of simulated and on-chain burns: no member can
-        // starve a later one.
+        // Never below the floor: the batch lands with the draw's result in it, on that coordinator and,
+        // sent before an upgrade, on the guarded one.
+        let gas = fulfillment_gas(estimate, &limits).unwrap();
+        assert!(lands(gas, measured, false, &on_chain));
+        assert!(lands(gas, measured, true, &on_chain));
+        // On the guarded coordinator the estimate itself holds the guard's budget.
+        let guarded = estimated(measured, true, &simulated);
+        assert!(guarded >= measured.0 + measured.1 + guard_budget(&limits).unwrap());
+        assert!(lands(
+            fulfillment_gas(guarded, &limits).unwrap(),
+            measured,
+            true,
+            &on_chain
+        ));
+        // Eight 1,000,000-gas members that burn their limit: the budget and the transaction's cost
+        // without the 64th the proxy keeps back fall short of the guard, the floor does not.
+        let heavy = [1_000_000u32; 8];
+        let burning: Vec<_> = heavy
+            .iter()
+            .map(|&limit| (before, limit, u64::from(limit), after))
+            .collect();
+        let unproxied = guard_budget(&heavy).unwrap() + FULFILL_TX_GAS + 8 * FULFILL_MEMBER_TX_GAS;
+        assert!(!lands(unproxied, overheads(8)[0], true, &burning));
+        assert!(lands(
+            fulfillment_floor(&heavy).unwrap(),
+            overheads(8)[0],
+            true,
+            &burning
+        ));
+        // The same holds for any mix of limits, of simulated and on-chain burns, of member costs up to
+        // the most measured (355,000 outside the callback, a first member's with cold storage) and of
+        // transaction costs up to the bound, and for an estimate that comes back short: no member can
+        // starve a later one, and the guard never reverts.
         for count in 1..=16usize {
-            for limit in [30_000u32, 100_000, 250_000, 1_000_000] {
-                for simulated_burn in [0, 1_000, u64::from(limit) / 2, u64::from(limit)] {
-                    let limits = vec![limit; count];
-                    let simulated: Vec<_> = limits
-                        .iter()
-                        .map(|&limit| (before, limit, simulated_burn, after))
-                        .collect();
-                    let on_chain: Vec<_> = limits
-                        .iter()
-                        .map(|&limit| (before, limit, u64::from(limit), after))
-                        .collect();
-                    let gas = fulfillment_gas(estimated(&simulated), &limits).unwrap();
-                    assert!(
-                        batch_lands(gas, &on_chain),
-                        "{count} x {limit} burning {simulated_burn} in simulation"
-                    );
+            for overhead in overheads(count) {
+                for limit in [30_000u32, 100_000, 250_000, 1_000_000] {
+                    for (before, after) in [(180_000, 40_000), (315_000, 40_000)] {
+                        for simulated_burn in [0, 1_000, u64::from(limit) / 2, u64::from(limit)] {
+                            let limits = vec![limit; count];
+                            let simulated: Vec<_> = limits
+                                .iter()
+                                .map(|&limit| (before, limit, simulated_burn, after))
+                                .collect();
+                            let on_chain: Vec<_> = limits
+                                .iter()
+                                .map(|&limit| (before, limit, u64::from(limit), after))
+                                .collect();
+                            for guarded in [false, true] {
+                                for estimate in [estimated(overhead, guarded, &simulated), 0] {
+                                    let gas = fulfillment_gas(estimate, &limits).unwrap();
+                                    assert!(
+                                        lands(gas, overhead, guarded, &on_chain),
+                                        "{count} x {limit} costing {before}+{after} with {overhead:?} around them, burning {simulated_burn} in simulation, estimate {estimate}, guarded {guarded}"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
     #[test]
-    fn fulfillment_gas_reserves_every_callback_budget_above_the_padded_estimate() {
+    fn fulfillment_gas_pads_the_estimate_beyond_the_guard_budget_and_keeps_to_the_floor() {
         assert_eq!(callback_budget(100_000), 100_000 + 1_587 + 140_000);
-        assert_eq!(callback_budget(1_000_000), 1_000_000 + 15_873 + 140_000);
-        // A single: the budget on top of the estimate, never below the old padding.
         assert_eq!(
-            fulfillment_gas(300_000, &[100_000]).unwrap(),
-            300_000 + 241_587
+            guard_budget(&[100_000]),
+            Some(140_000 + 100_000 + 1_587 + 400_000)
         );
-        assert_eq!(fulfillment_gas(2_000_000, &[30_000]).unwrap(), 2_450_000);
-        assert_eq!(fulfillment_gas(1_000_000, &[]).unwrap(), 1_250_000);
-        // Sixteen 100,000-gas members at the Arc testnet batch estimate: about 8.2M.
+        assert_eq!(guard_budget(&[100_000; 16]), Some(140_000 + 16 * 501_587));
+        // The transaction's own cost around the budget, 73,112 and 27,168 per member, and a 63rd of
+        // both for the 64th the proxy keeps back.
+        let grown = |needed: u64| needed + needed.div_ceil(63);
         assert_eq!(
-            fulfillment_gas(4_300_000, &[100_000; 16]).unwrap(),
-            4_300_000 + 16 * 241_587
+            fulfillment_floor(&[100_000]),
+            Some(grown(641_587 + 73_112 + 27_168))
         );
-        // The worst single request the coordinator accepts (a 1,000,000-gas callback) fits 3M.
-        let worst_single_estimate = 21_000 + 7_300 + 180_000 + callback_budget(1_000_000);
-        assert!(fulfillment_gas(worst_single_estimate, &[1_000_000]).unwrap() <= 3_000_000);
+        assert_eq!(fulfillment_floor(&[100_000]), Some(753_643));
+        assert_eq!(
+            fulfillment_floor(&[100_000; 16]),
+            Some(grown(8_165_392 + 73_112 + 16 * 27_168))
+        );
+        // A single's estimate stays below its floor on either coordinator.
+        assert_eq!(fulfillment_gas(501_600, &[100_000]).unwrap(), 753_643);
+        // Sixteen 100,000-gas members at the guarded coordinator's estimate on Arc testnet: the floor,
+        // where adding every budget to the estimate asked for 12,438,113.
+        assert_eq!(
+            fulfillment_gas(8_572_721, &[100_000; 16]).unwrap(),
+            8_810_862
+        );
+        // An estimate beyond the budget is padded by a fifth of the excess, and at least 50,000.
+        assert_eq!(
+            fulfillment_gas(9_165_392, &[100_000; 16]).unwrap(),
+            9_165_392 + 200_000
+        );
+        assert_eq!(
+            fulfillment_gas(8_900_000, &[100_000; 16]).unwrap(),
+            8_900_000 + 146_921
+        );
+        // The worst single request the coordinator accepts (a 1,000,000-gas callback) fits the 3M default.
+        assert_eq!(fulfillment_gas(1_416_000, &[1_000_000]).unwrap(), 1_682_442);
         assert!(fulfillment_gas(u64::MAX, &[1]).is_err());
-        assert!(fulfillment_gas(u64::MAX / 10, &[]).is_err());
+        assert!(fulfillment_gas(1_000_000, &[]).is_err());
     }
     #[test]
-    fn an_over_cap_batch_shrinks_to_the_members_that_fit_with_full_budgets() {
+    fn a_batch_keeps_the_members_that_fit_a_cap_above_their_floor() {
         // MAX_TX_COST_WEI binds only when it allows less gas than MAX_GAS at this price.
         assert_eq!(
             gas_cap(6_000_000, 4 * 10u128.pow(18), 41_000_000_000),
@@ -4533,26 +4787,33 @@ mod tests {
         );
         assert_eq!(gas_cap(6_000_000, 4 * 10u128.pow(18), 0), 6_000_000);
         assert_eq!(gas_cap(6_000_000, 0, 1), 0);
-        // Sixteen 100,000-gas members estimated at 4.3M: eleven fit 6M, all sixteen fit 10M.
+        // Sixteen 100,000-gas members at the guarded coordinator's estimate: ten fit 6M and all sixteen
+        // the 13M of Arc mainnet. Before any estimate their floor alone predicts the same.
         let limits = [100_000u32; 16];
-        assert_eq!(members_within(4_300_000, &limits, 6_000_000), 11);
-        assert_eq!(members_within(4_300_000, &limits, 10_000_000), 16);
-        // 1,000,000-gas callbacks: four fit 6M.
-        assert_eq!(members_within(4_300_000, &[1_000_000; 16], 6_000_000), 4);
+        for estimate in [8_572_721, 0] {
+            assert_eq!(members_within(estimate, &limits, 6_000_000), 10);
+            assert_eq!(members_within(estimate, &limits, 13_000_000), 16);
+        }
+        // 1,000,000-gas callbacks: eight fit 13M.
+        assert_eq!(members_within(0, &[1_000_000; 16], 13_000_000), 8);
         // The prediction keeps the order: a heavy member in front limits the prefix.
         let mut mixed = [100_000u32; 8];
         mixed[1] = 1_000_000;
-        assert_eq!(members_within(2_200_000, &mixed, 3_000_000), 4);
+        assert_eq!(members_within(2_200_000, &mixed, 3_000_000), 3);
         assert_eq!(members_within(2_200_000, &mixed, 1_000_000), 1);
+        // An estimate above the members' floor predicts from its own share.
+        assert_eq!(members_within(16 * 800_000, &limits, 6_000_000), 7);
         // Nothing fits, or nothing to fit.
-        assert_eq!(members_within(4_300_000, &limits, 400_000), 0);
+        assert_eq!(members_within(8_572_721, &limits, 400_000), 0);
         assert_eq!(members_within(0, &[], 6_000_000), 0);
         // Whatever fits by the prediction is really within the cap at the predicted estimate.
-        for cap in (1_000_000..12_000_000).step_by(250_000) {
-            let fit = members_within(4_300_000, &limits, cap);
+        for cap in (1_000_000..14_000_000).step_by(250_000) {
+            let fit = members_within(8_572_721, &limits, cap);
             if fit > 0 {
-                let share = 4_300_000u64.div_ceil(16);
-                assert!(fulfillment_gas(share * fit as u64, &limits[..fit]).unwrap() <= cap);
+                let members = &limits[..fit];
+                let estimate = (8_572_721u64.div_ceil(16) * fit as u64)
+                    .max(fulfillment_floor(members).unwrap());
+                assert!(fulfillment_gas(estimate, members).unwrap() <= cap);
             }
         }
     }

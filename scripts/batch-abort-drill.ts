@@ -12,7 +12,11 @@
 // eth_estimateGas run unpriced, then sends it with one of two gas limits.
 //
 //   old sizing  = estimate * 1.2 + 50000            (the sizing that lets a later member's revert abort the batch)
-//   new sizing  = max(old, estimate + Sum(callbackGasLimit + callbackGasLimit/63 + 140000))   (worker::fulfillment_gas)
+//   new sizing  = max(estimate + max(50000, (estimate - guard) / 5), floor)                   (worker::fulfillment_gas)
+//
+// where guard = 140000 + Sum(callbackGasLimit + callbackGasLimit/63 + 400000) is the budget the guarded coordinator
+// requires before serving any member, and floor = (guard + 73112 + 27168 per member) * 64/63 adds a bound on the
+// transaction's own cost and the 64th of the gas the coordinator's proxy keeps back from the implementation.
 //
 // Each sizing is tried on a losing round (a winning draw disarms the helpers) in three settings:
 //
@@ -38,14 +42,15 @@ import {publicKey, makeProof} from "../test/helpers/proof.ts";
 import {EPOCH_TEST_SIGNERS, epochAttestation} from "../test/helpers/epoch.ts";
 import {deployProxy} from "../test/helpers/proxy.ts";
 
-const CALLBACK_RESERVE=140_000n;
-// The coordinator's per-member requirement: the whole callback budget, its 1/63 and CALLBACK_RESERVE.
-const callbackBudget=(limit:bigint)=>limit+limit/63n+CALLBACK_RESERVE;
 const oldSizing=(estimate:bigint)=>estimate*12n/10n+50_000n;
+// The guarded coordinator's budget for these members, and the keeper's floor around it (worker::fulfillment_floor).
+const guardBudget=(limits:bigint[])=>limits.reduce((need,limit)=>need+limit+limit/63n+400_000n,140_000n);
+const floorOf=(limits:bigint[])=>{const needed=guardBudget(limits)+73_112n+27_168n*BigInt(limits.length);return needed+(needed+62n)/63n;};
 const newSizing=(estimate:bigint,limits:bigint[])=>{
-  const reserved=limits.reduce((gas,limit)=>gas+callbackBudget(limit),estimate);
-  const padded=oldSizing(estimate);
-  return reserved>padded?reserved:padded;
+  const excess=estimate>guardBudget(limits)?estimate-guardBudget(limits):0n;
+  const padded=estimate+(excess/5n>50_000n?excess/5n:50_000n);
+  const floor=floorOf(limits);
+  return padded>floor?padded:floor;
 };
 const LIMITS=[100_000n,1_000_000n,1_000_000n];
 // A reverted batch that used less than this never reached the first member's callback: it stopped at the guard.
@@ -145,7 +150,7 @@ async function losingCase(setting:Setting,sizing:"old"|"new"){
       const estimate=await estimateUnpriced(rng,data);
       const gasLimit=sizing==="old"?oldSizing(estimate):newSizing(estimate,LIMITS);
       if(setting==="across upgrade")await (await rng.connect(owner).upgradeToAndCall(await guardedImplementation.getAddress(),"0x")).wait();
-      const guard=LIMITS.reduce((need,limit)=>need+limit+limit/63n+400_000n,140_000n);
+      const guard=guardBudget(LIMITS);
       const batch=await send(rng,data,gasLimit);
       const drawAfterBatch=(await rng.getRequest(ids[0])).fulfilled as boolean;
       const resent=batch.ok?[]:await resendSingly(rng,ids);

@@ -344,6 +344,11 @@ async fn session(
             *last_block = Some(last_block.map_or(number, |b| b.max(number)));
             signals.head(number);
         } else if params["subscription"] == logs {
+            // Endpoints do not all apply the subscription's address filter: a log from any other
+            // contract would wake an idle keeper and hold it in the busy cadence for nothing.
+            if !from_service(result, &addresses) {
+                continue;
+            }
             let topic: Option<B256> = result["topics"]
                 .get(0)
                 .and_then(|t| serde_json::from_value(t.clone()).ok());
@@ -351,6 +356,11 @@ async fn session(
             signals.saw(classify(topic.as_ref()), block);
         }
     }
+}
+/// Whether a log was emitted by one of the two service contracts.
+fn from_service(log: &Value, addresses: &[Address; 2]) -> bool {
+    serde_json::from_value::<Address>(log["address"].clone())
+        .is_ok_and(|address| addresses.contains(&address))
 }
 fn subscription_id(message: &Value) -> Result<Value> {
     let id = &message["result"];
@@ -399,6 +409,9 @@ async fn backfill(rpc: &Rpc, addresses: [Address; 2], signals: &Signals, last: u
             return;
         };
         for log in value.as_array().into_iter().flatten() {
+            if !from_service(log, &addresses) {
+                continue;
+            }
             let topic: Option<B256> = log["topics"]
                 .get(0)
                 .and_then(|t| serde_json::from_value(t.clone()).ok());
@@ -477,10 +490,15 @@ mod tests {
     fn head(number: u64) -> Value {
         json!({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xheads","result":{"number":format!("0x{number:x}")}}})
     }
+    /// A log pushed on the logs subscription, from the first service contract.
     fn log(signature: &str, block: u64) -> Value {
-        json!({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xlogs","result":{"topics":[topic(signature)],"blockNumber":format!("0x{block:x}")}}})
+        log_from(Address::repeat_byte(1), signature, block)
     }
-    /// An HTTP endpoint for the backfill: its head is block 0x40 and one role event sits at 0x30.
+    fn log_from(address: Address, signature: &str, block: u64) -> Value {
+        json!({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xlogs","result":{"address":address,"topics":[topic(signature)],"blockNumber":format!("0x{block:x}")}}})
+    }
+    /// An HTTP endpoint for the backfill: its head is block 0x40 and one role event of the registry sits at 0x30,
+    /// followed at 0x38 by one of another contract, which an endpoint that ignores the address filter returns too.
     async fn backfill_endpoint() -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -514,14 +532,17 @@ mod tests {
                     };
                     let result = match body["method"].as_str().unwrap() {
                         "eth_getBlockByNumber" => {
-                            json!({"number":"0x40","hash":B256::repeat_byte(1),"timestamp":"0x1"})
+                            json!({"number":"0x40","hash":B256::repeat_byte(1),"timestamp":"0x1","baseFeePerGas":"0x1"})
                         }
                         "eth_getLogs" => {
                             let from = quantity(&body["params"][0]["fromBlock"]).unwrap();
                             let to = quantity(&body["params"][0]["toBlock"]).unwrap();
                             assert!(to - from < BACKFILL_RANGE);
                             if (from..=to).contains(&0x30) {
-                                json!([{"topics":[topic("BackupCommitterSet(address,bool)")],"blockNumber":"0x30"}])
+                                json!([
+                                    {"address":Address::repeat_byte(2),"topics":[topic("BackupCommitterSet(address,bool)")],"blockNumber":"0x30"},
+                                    {"address":Address::repeat_byte(9),"topics":[topic("BackupCommitterSet(address,bool)")],"blockNumber":"0x38"}
+                                ])
                             } else {
                                 json!([])
                             }
@@ -571,6 +592,8 @@ mod tests {
                 vec![
                     head(0x10),
                     log("Upgraded(address)", 0x10),
+                    // Another contract's log, pushed by an endpoint that ignores the address filter.
+                    log_from(Address::repeat_byte(9), "Upgraded(address)", 0x20),
                     log("RandomnessRequested(uint256,address,bytes32,bytes32,uint64,uint32,uint256,address,uint64)", 0x11),
                     head(0x11),
                 ],
@@ -607,6 +630,8 @@ mod tests {
         })
         .await;
         eventually("second session pushed its head", || *heads.borrow() == 0x41).await;
+        // Neither the pushed nor the backfilled log of the other contract counted as work.
+        assert_eq!(signals.activity(), 0x30);
         drop(task);
         server.abort();
         backfill.abort();

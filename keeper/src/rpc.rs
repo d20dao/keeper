@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -23,16 +23,27 @@ struct DeliveryError {
     /// The node answered with a JSON-RPC error object (for eth_estimateGas, a revert),
     /// as opposed to transport, HTTP or timeout failures where no node answered at all.
     responded: bool,
+    /// That error said the call reverted: JSON-RPC code 3, or a message that says so.
+    reverted: bool,
     /// The endpoint refused the call for its request rate (HTTP 429 or an equivalent provider error).
     rate_limited: bool,
+    /// The endpoint answered a well-formed read with something the read could not use: no JSON-RPC answer, or a
+    /// result of the wrong shape (null, not hex, a missing field). That endpoint failed, not the request or the chain.
+    malformed: bool,
     detail: String,
 }
 impl std::fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RPC delivery uncertain: {}", self.detail)
+        if self.malformed {
+            write!(f, "RPC answer unusable: {}", self.detail)
+        } else {
+            write!(f, "RPC delivery uncertain: {}", self.detail)
+        }
     }
 }
 impl std::error::Error for DeliveryError {}
+/// No usable answer arrived: the endpoints did not answer, answered with a JSON-RPC error, rate limited, or (for a
+/// read) answered with something the read could not use. Not a verdict on the chain.
 pub fn is_delivery_failure(error: &anyhow::Error) -> bool {
     error.is::<DeliveryError>()
 }
@@ -100,6 +111,14 @@ pub fn is_node_error_response(error: &anyhow::Error) -> bool {
         .downcast_ref::<DeliveryError>()
         .is_some_and(|delivery| delivery.responded)
 }
+/// A node answered that the call reverted, as opposed to refusing it for another reason (a gas
+/// limit it does not estimate, a request it does not take). As with `is_node_error_response`,
+/// never proof that the call reverts on every endpoint.
+pub fn is_revert(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<DeliveryError>()
+        .is_some_and(|delivery| delivery.responded && delivery.reverted)
+}
 fn known_transaction(message: &str) -> (bool, Option<B256>) {
     let message = message.trim().to_ascii_lowercase();
     if matches!(message.as_str(), "already known" | "known transaction") {
@@ -150,8 +169,17 @@ fn uncertain(detail: impl Into<String>) -> DeliveryError {
         known: false,
         known_hash: None,
         responded: false,
+        reverted: false,
         rate_limited: false,
+        malformed: false,
         detail: detail.into(),
+    }
+}
+/// An answer a read could not use, as the failure of the endpoint that gave it.
+fn malformed(detail: impl Into<String>) -> DeliveryError {
+    DeliveryError {
+        malformed: true,
+        ..uncertain(detail)
     }
 }
 fn broadcast_result(result: Result<Value>, expected: B256) -> Result<BroadcastOutcome> {
@@ -187,6 +215,9 @@ fn broadcast_result(result: Result<Value>, expected: B256) -> Result<BroadcastOu
 
 /// Consecutive rate-limited answers from one endpoint and the end of the back-off they earned.
 type RateLimit = (u32, Option<tokio::time::Instant>);
+/// How long reconciliation waits for some endpoint to serve a used nonce's receipt before it resolves the nonce
+/// from contract state instead, as it did before it asked: a hung endpoint must not stretch a tick.
+const RECEIPT_SEARCH: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct Rpc {
     pub client: reqwest::Client,
@@ -209,31 +240,57 @@ pub struct Head {
     pub base_fee: u128,
 }
 impl Head {
-    /// A block object as eth_getBlockByNumber returns it.
+    /// A block object as eth_getBlockByNumber returns it. Every field is required: a null answer (an endpoint that
+    /// does not serve the tag) is no block, and a block without a base fee would price a send at its tip alone.
     pub fn from_block(v: &Value) -> Result<Self> {
+        ensure!(v.is_object(), "Expected a block object");
         Ok(Self {
-            number: quantity(&v["number"])?,
-            hash: serde_json::from_value(v["hash"].clone())?,
-            timestamp: quantity(&v["timestamp"])?,
-            base_fee: U256::from_str_radix(
-                v["baseFeePerGas"]
-                    .as_str()
-                    .unwrap_or("0x0")
-                    .trim_start_matches("0x"),
-                16,
-            )?
-            .try_into()?,
+            number: quantity(&v["number"]).context("Block number")?,
+            hash: serde_json::from_value(v["hash"].clone()).context("Block hash")?,
+            timestamp: quantity(&v["timestamp"]).context("Block timestamp")?,
+            base_fee: wide_quantity(&v["baseFeePerGas"])
+                .context("Block base fee")?
+                .try_into()
+                .context("Block base fee")?,
         })
     }
 }
+/// A JSON-RPC quantity: "0x" and 1 to 64 hex digits. Anything else (null, a number, "0x", digits without the
+/// prefix, separators) is an unusable answer, never a value such as zero.
+fn wide_quantity(v: &Value) -> Result<U256> {
+    let digits = v
+        .as_str()
+        .and_then(|s| s.strip_prefix("0x"))
+        .filter(|d| (1..=64).contains(&d.len()) && d.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("Expected RPC hex quantity"))?;
+    Ok(U256::from_str_radix(digits, 16)?)
+}
 pub fn quantity(v: &Value) -> Result<u64> {
-    Ok(U256::from_str_radix(
-        v.as_str()
-            .ok_or_else(|| anyhow::anyhow!("Expected RPC hex quantity"))?
-            .trim_start_matches("0x"),
-        16,
-    )?
-    .try_into()?)
+    Ok(wide_quantity(v)?.try_into()?)
+}
+/// An answer to eth_getTransactionReceipt for `expected`: `None` for null, a receipt of that transaction with the
+/// fields reconciliation reads, or unusable.
+fn usable_receipt(v: Value, expected: B256) -> Result<Option<Value>> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    let actual: B256 =
+        serde_json::from_value(v["transactionHash"].clone()).context("Receipt transaction hash")?;
+    ensure!(actual == expected, "Receipt of another transaction");
+    serde_json::from_value::<B256>(v["blockHash"].clone()).context("Receipt block hash")?;
+    quantity(&v["blockNumber"]).context("Receipt block number")?;
+    ensure!(
+        quantity(&v["status"]).context("Receipt status")? <= 1,
+        "Invalid receipt status"
+    );
+    Ok(Some(v))
+}
+/// The answer to a request for block `number`: that block. Null (a block the endpoint has not served yet) or any
+/// other block is unusable.
+fn numbered_block(v: &Value, number: u64) -> Result<Head> {
+    let block = Head::from_block(v)?;
+    ensure!(block.number == number, "Unexpected block number");
+    Ok(block)
 }
 impl Rpc {
     pub fn new(urls: Vec<String>) -> Result<Self> {
@@ -361,7 +418,9 @@ impl Rpc {
                 known: known_transaction(message).0,
                 known_hash: known_transaction(message).1,
                 responded: true,
+                reverted: code == 3 || message.to_ascii_lowercase().contains("revert"),
                 rate_limited: rate_limit_response(code, message),
+                malformed: false,
                 detail: format!("JSON-RPC code {code}"),
             }
             .into());
@@ -379,10 +438,22 @@ impl Rpc {
             .await?;
         Self::outcome(&body)
     }
+    /// One read, answered as-is by the first endpoint that answers: null and any other result are that answer.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.hedged(method, |i| {
-            let params = params.clone();
-            async move { self.at(&self.urls[i], method, params).await }
+        self.request_as(method, params, Ok).await
+    }
+    /// `request`, with the answer checked inside the read: an endpoint whose answer `parse` rejects (null where a
+    /// value belongs, not hex, a missing field) has failed like one that did not answer, so the read moves on to
+    /// the next endpoint and fails only when every endpoint has failed. `parse` checks shape only: a verdict on a
+    /// well-formed answer belongs to the caller, or a read would pass over an endpoint that disagrees for one
+    /// that agrees.
+    pub async fn request_as<T, P>(&self, method: &str, params: Value, parse: P) -> Result<T>
+    where
+        P: Fn(Value) -> Result<T>,
+    {
+        let (params, parse) = (&params, &parse);
+        self.hedged(method, move |i| async move {
+            parse(self.at(&self.urls[i], method, params.clone()).await?)
         })
         .await
     }
@@ -391,28 +462,30 @@ impl Rpc {
     /// endpoint that answers a batch with anything but a matching array is asked the same calls one by one from
     /// then on.
     pub async fn batch(&self, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
-        Ok(self.batch_from(calls).await?.1)
+        self.batch_as(calls, Ok).await
     }
-    /// `batch`, also naming the endpoint that answered, so that a follow-up read can ask that same endpoint.
-    pub async fn batch_from(&self, calls: &[(&str, Value)]) -> Result<(usize, Vec<Value>)> {
+    /// `batch`, with the answers checked inside the read as `request_as` checks one. Every value `parse` sees, and
+    /// so everything it returns, comes from one endpoint's answer.
+    pub async fn batch_as<T, P>(&self, calls: &[(&str, Value)], parse: P) -> Result<T>
+    where
+        P: Fn(Vec<Value>) -> Result<T>,
+    {
         ensure!(!calls.is_empty() && calls.len() <= 32, "RPC batch size");
-        let label = format!("{} batch", calls[0].0);
-        self.hedged(&label, |i| async move {
-            Ok((i, self.batch_at(i, calls).await?))
+        let parse = &parse;
+        self.hedged(&format!("{} batch", calls[0].0), move |i| async move {
+            parse(self.batch_at(i, calls).await?)
         })
         .await
     }
-    /// Calls sent to the one endpoint an earlier `batch_from` named, so a follow-up read shares that answer's view of
-    /// the chain. No other endpoint is tried.
-    pub async fn batch_on(&self, endpoint: usize, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
-        ensure!(
-            endpoint < self.urls.len() && !calls.is_empty() && calls.len() <= 32,
-            "RPC batch size"
-        );
-        self.batch_at(endpoint, calls).await
-    }
-    /// Run one idempotent read against the endpoints until one answers.
-    async fn hedged<T, F, Fut>(&self, label: &str, attempt: F) -> Result<T>
+    /// Run one idempotent read against the endpoints until an attempt succeeds. `attempt(i)` makes every call of
+    /// the read to endpoint `i` alone (`at`, `batch_at`), so whatever one attempt returns is one endpoint's view.
+    ///
+    /// An attempt fails when its endpoint does not answer, answers with a JSON-RPC error or rate limits, or
+    /// answers something the attempt cannot use: any error of the attempt's own that is not a delivery failure
+    /// counts as such an answer. That endpoint then moves last for a while, reads stop starting at it, and the
+    /// next endpoint answers the whole read afresh; the read fails only when every endpoint has failed, and then
+    /// as a delivery failure. Attempts check shape only: a verdict on a well-formed answer belongs after the read.
+    pub(crate) async fn hedged<T, F, Fut>(&self, label: &str, attempt: F) -> Result<T>
     where
         F: Fn(usize) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -427,7 +500,6 @@ impl Rpc {
         }
         let mut order = order.into_iter().peekable();
         let mut last_error = None;
-        let mut protocol_error = None;
         let mut last_limited = None;
         let mut limited_only = true;
         // Hedge instead of cancelling: a slow attempt keeps running while the next candidate
@@ -474,12 +546,16 @@ impl Rpc {
                                 continue;
                             }
                             limited_only = false;
-                            tracing::warn!(method=label,error=%e,"RPC attempt failed");
-                            if !is_delivery_failure(&e) {
-                                protocol_error = Some(e);
+                            let e = if is_delivery_failure(&e) {
+                                e
                             } else {
-                                last_error = Some(e);
-                            }
+                                // The endpoint answered, but with nothing this read can use (not JSON-RPC, null,
+                                // not hex, a missing field). It failed like one that did not answer.
+                                self.cool(i);
+                                malformed(format!("{label} answer: {e:#}")).into()
+                            };
+                            tracing::warn!(method=label,endpoint=i,error=%e,"RPC attempt failed");
+                            last_error = Some(e);
                         }
                     }
                 }
@@ -497,13 +573,14 @@ impl Rpc {
             return Err(Self::all_limited_error(label));
         }
         // A mix of failures reports a non-rate-limit one: the read did not fail only because of rate limits.
-        Err(protocol_error
-            .or(last_error)
+        Err(last_error
             .or(last_limited)
             .unwrap_or_else(|| anyhow::anyhow!("No configured RPC endpoints"))
             .context(format!("All configured RPC endpoints failed {label}")))
     }
-    async fn batch_at(&self, i: usize, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
+    /// `calls` sent to endpoint `i` alone: one JSON-RPC batch where the endpoint answers batches, otherwise one call
+    /// at a time. Results come back in call order.
+    pub(crate) async fn batch_at(&self, i: usize, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
         let url = &self.urls[i];
         if !self.unbatched.lock().expect("RPC batch mutex")[i] {
             let body: Vec<Value> = calls
@@ -551,57 +628,90 @@ impl Rpc {
     /// Only an attempt that consumed a full attempt budget proves a slow endpoint.
     fn cool_slow_attempts(&self, attempts: &[(usize, tokio::time::Instant)]) {
         for (i, began) in attempts {
-            if began.elapsed() < self.attempt_budget {
-                continue;
+            if began.elapsed() >= self.attempt_budget {
+                self.cool(*i);
             }
-            self.cooldowns.lock().expect("RPC cooldown mutex")[*i] =
-                Some(tokio::time::Instant::now() + Duration::from_secs(5));
-            self.active
-                .compare_exchange(
-                    *i,
-                    (*i + 1) % self.urls.len(),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .ok();
         }
+    }
+    /// A slow or unusable endpoint moves last in the read order for five seconds, and reads that would start at it
+    /// start at the next endpoint instead. It is never dropped: a single endpoint, or every endpoint cooling at
+    /// once, is still asked.
+    fn cool(&self, i: usize) {
+        self.cooldowns.lock().expect("RPC cooldown mutex")[i] =
+            Some(tokio::time::Instant::now() + Duration::from_secs(5));
+        self.active
+            .compare_exchange(
+                i,
+                (i + 1) % self.urls.len(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .ok();
     }
     pub async fn head(&self) -> Result<Head> {
         self.head_at("latest").await
     }
     /// Median of the per-block 50th-percentile tips over recent blocks (eth_feeHistory).
     pub async fn recent_priority_fee(&self, blocks: u64) -> Result<u128> {
-        let v = self
-            .request(
-                "eth_feeHistory",
-                json!([format!("0x{blocks:x}"), "latest", [50]]),
-            )
-            .await?;
-        let mut tips = v["reward"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row.get(0)?.as_str())
-            .map(|hex| u128::from_str_radix(hex.trim_start_matches("0x"), 16))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        ensure!(!tips.is_empty(), "Fee history returned no rewards");
-        tips.sort_unstable();
-        Ok(tips[tips.len() / 2])
+        self.request_as(
+            "eth_feeHistory",
+            json!([format!("0x{blocks:x}"), "latest", [50]]),
+            |v| {
+                let mut tips = v["reward"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row.get(0)?.as_str())
+                    .map(|hex| u128::from_str_radix(hex.trim_start_matches("0x"), 16))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                ensure!(!tips.is_empty(), "Fee history returned no rewards");
+                tips.sort_unstable();
+                Ok(tips[tips.len() / 2])
+            },
+        )
+        .await
     }
     pub async fn finalized_head(&self) -> Result<Head> {
         self.head_at("finalized").await
     }
+    /// The finalized head and, when `checkpoint` names a block number, that block, both from one endpoint's answer
+    /// to one batched read. An answer without a usable block for either (an endpoint that does not serve the
+    /// finalized tag answers null) fails that endpoint, and the next one answers the whole read.
+    pub async fn finalized_head_with(
+        &self,
+        checkpoint: Option<u64>,
+    ) -> Result<(Head, Option<Head>)> {
+        let mut calls = vec![("eth_getBlockByNumber", json!(["finalized", false]))];
+        if let Some(number) = checkpoint {
+            calls.push((
+                "eth_getBlockByNumber",
+                json!([format!("0x{number:x}"), false]),
+            ));
+        }
+        self.batch_as(&calls, |blocks| {
+            let head = Head::from_block(&blocks[0])?;
+            let block = match checkpoint {
+                Some(number) => Some(numbered_block(&blocks[1], number)?),
+                None => None,
+            };
+            Ok((head, block))
+        })
+        .await
+    }
     /// The block with this number, including its timestamp.
     pub async fn block(&self, number: u64) -> Result<Head> {
-        let block = self.head_at(&format!("0x{number:x}")).await?;
-        ensure!(block.number == number, "Unexpected block number");
-        Ok(block)
+        self.request_as(
+            "eth_getBlockByNumber",
+            json!([format!("0x{number:x}"), false]),
+            |v| numbered_block(&v, number),
+        )
+        .await
     }
     async fn head_at(&self, tag: &str) -> Result<Head> {
-        let v = self
-            .request("eth_getBlockByNumber", json!([tag, false]))
-            .await?;
-        Head::from_block(&v)
+        self.request_as("eth_getBlockByNumber", json!([tag, false]), |v| {
+            Head::from_block(&v)
+        })
+        .await
     }
     pub async fn call<C: SolCall>(&self, to: Address, call: C) -> Result<C::Return> {
         self.call_tag(to, call, "finalized").await
@@ -615,40 +725,97 @@ impl Rpc {
         self.call_tag(to, call, &format!("0x{number:x}")).await
     }
     async fn call_tag<C: SolCall>(&self, to: Address, call: C, tag: &str) -> Result<C::Return> {
-        let v = self
-            .request(
-                "eth_call",
-                json!([{"to":to,"data":Bytes::from(call.abi_encode())},tag]),
-            )
-            .await?;
-        let bytes: Bytes = serde_json::from_value(v)?;
-        Ok(C::abi_decode_returns(&bytes)?)
+        self.request_as(
+            "eth_call",
+            json!([{"to":to,"data":Bytes::from(call.abi_encode())},tag]),
+            |v| {
+                let bytes: Bytes = serde_json::from_value(v)?;
+                Ok(C::abi_decode_returns(&bytes)?)
+            },
+        )
+        .await
     }
     pub async fn nonce(&self, address: Address, tag: &str) -> Result<u64> {
-        quantity(
-            &self
-                .request("eth_getTransactionCount", json!([address, tag]))
-                .await?,
-        )
+        self.request_as("eth_getTransactionCount", json!([address, tag]), |v| {
+            quantity(&v)
+        })
+        .await
     }
+    /// The latest balance of `address`.
+    pub async fn balance(&self, address: Address) -> Result<U256> {
+        self.request_as("eth_getBalance", json!([address, "latest"]), |v| {
+            wide_quantity(&v)
+        })
+        .await
+    }
+    /// The gas `tx` needs. A revert is an error a node answered (`is_node_error_response`).
+    pub async fn estimate_gas(&self, tx: Value) -> Result<u64> {
+        self.request_as("eth_estimateGas", json!([tx]), |v| quantity(&v))
+            .await
+    }
+    /// The receipt of transaction `hash`, or `None` while the endpoint has none. A receipt is usable only for this
+    /// transaction and with the fields reconciliation reads; any other answer fails the endpoint.
     pub async fn receipt(&self, hash: &str) -> Result<Option<Value>> {
-        let v = self
-            .request("eth_getTransactionReceipt", json!([hash]))
-            .await?;
-        Ok(if v.is_null() { None } else { Some(v) })
+        let expected: B256 = hash.parse()?;
+        self.request_as("eth_getTransactionReceipt", json!([hash]), |v| {
+            usable_receipt(v, expected)
+        })
+        .await
+    }
+    /// A receipt of any of `hashes` (one nonce's attempts) from any endpoint that serves one, with the index of its
+    /// hash. `receipt` takes the first endpoint's answer, and an endpoint that has not caught up with a new block
+    /// answers null; this asks every endpoint not backing off a rate limit at once, for every hash in one batch, and
+    /// waits at most RECEIPT_SEARCH. Nulls, failures and unusable answers are passed over. `None` when no endpoint
+    /// served a receipt in time.
+    pub async fn receipt_from_any(&self, hashes: &[String]) -> Result<Option<(usize, Value)>> {
+        let expected = hashes
+            .iter()
+            .map(|hash| hash.parse::<B256>())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let calls: Vec<(&str, Value)> = hashes
+            .iter()
+            .map(|hash| ("eth_getTransactionReceipt", json!([hash])))
+            .collect();
+        let (calls, expected) = (&calls, &expected);
+        let mut answers: futures_util::stream::FuturesUnordered<_> =
+            self.read_order()
+                .into_iter()
+                .map(|i| async move {
+                    let answer = self.batch_at(i, calls).await;
+                    self.note_rate_limit(i, answer.as_ref().err().is_some_and(is_rate_limited));
+                    answer.ok().and_then(|values| {
+                        values.into_iter().zip(expected).enumerate().find_map(
+                            |(k, (value, hash))| {
+                                usable_receipt(value, *hash).ok().flatten().map(|v| (k, v))
+                            },
+                        )
+                    })
+                })
+                .collect();
+        let found = tokio::time::timeout(self.attempt_budget.min(RECEIPT_SEARCH), async {
+            while let Some(answer) = futures_util::StreamExt::next(&mut answers).await {
+                if answer.is_some() {
+                    return answer;
+                }
+            }
+            None
+        })
+        .await;
+        Ok(found.ok().flatten())
     }
     pub async fn block_hash(&self, number: u64) -> Result<B256> {
-        let block = self
-            .request(
-                "eth_getBlockByNumber",
-                json!([format!("0x{number:x}"), false]),
-            )
-            .await?;
-        ensure!(
-            quantity(&block["number"])? == number,
-            "Unexpected block number"
-        );
-        Ok(serde_json::from_value(block["hash"].clone())?)
+        self.request_as(
+            "eth_getBlockByNumber",
+            json!([format!("0x{number:x}"), false]),
+            |block| {
+                ensure!(
+                    quantity(&block["number"])? == number,
+                    "Unexpected block number"
+                );
+                Ok(serde_json::from_value(block["hash"].clone())?)
+            },
+        )
+        .await
     }
     pub async fn receipt_is_finalized(&self, hash: &str, receipt: &Value) -> Result<bool> {
         let actual: B256 = serde_json::from_value(receipt["transactionHash"].clone())?;
@@ -755,7 +922,28 @@ mod tests {
             .unwrap_err();
         assert!(is_delivery_failure(&reverted));
         assert!(is_node_error_response(&reverted));
+        assert!(is_revert(&reverted));
         server.abort();
+        // A node that says a call reverted with code 3 and no wording, and one that refuses an estimate for its gas
+        // without a revert.
+        for (answer, reverts) in [
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"0x"}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"gas required exceeds allowance (16777216)"}}"#,
+                false,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let rpc = Rpc::new(vec![format!("http://{}", listener.local_addr().unwrap())]).unwrap();
+            let server = tokio::spawn(serve(listener, Duration::ZERO, answer));
+            let error = rpc.estimate_gas(json!({})).await.unwrap_err();
+            assert!(is_node_error_response(&error));
+            assert_eq!(is_revert(&error), reverts, "{answer}");
+            server.abort();
+        }
         // Nobody answered on a closed port: still a delivery failure, but no node response.
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", closed.local_addr().unwrap());
@@ -1039,7 +1227,9 @@ mod tests {
                         known: false,
                         known_hash: None,
                         responded: true,
+                        reverted: false,
                         rate_limited: false,
+                        malformed: false,
                         detail: "node rejection".into()
                     }
                     .into()),
@@ -1076,7 +1266,9 @@ mod tests {
                     known: true,
                     known_hash: Some(hash),
                     responded: true,
+                    reverted: false,
                     rate_limited: false,
+                    malformed: false,
                     detail: "JSON-RPC code -32000".into(),
                 }
                 .into()),
@@ -1095,7 +1287,9 @@ mod tests {
                     known: true,
                     known_hash: None,
                     responded: true,
+                    reverted: false,
                     rate_limited: false,
+                    malformed: false,
                     detail: "JSON-RPC code -32000".into()
                 }
                 .into()),
@@ -1173,6 +1367,231 @@ mod tests {
     }
     fn result(call: &Value, result: Value) -> Value {
         json!({"jsonrpc":"2.0","id":call["id"],"result":result})
+    }
+    /// An endpoint answering every call, alone or in a batch, with the result `answer` gives it. Hits count HTTP
+    /// requests, so a batch is one.
+    async fn answering(
+        answer: impl Fn(&Value) -> Value + Send + Sync + 'static,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let answer = Arc::new(answer);
+        endpoint(Arc::new(move |body| {
+            let reply = |call: &Value| result(call, answer(call));
+            match body.as_array() {
+                Some(calls) => (200, Value::Array(calls.iter().map(reply).collect())),
+                None => (200, reply(body)),
+            }
+        }))
+        .await
+    }
+    fn block(number: u64, hash: u8) -> Value {
+        json!({"number":format!("0x{number:x}"),"hash":B256::repeat_byte(hash),"timestamp":"0x64","baseFeePerGas":"0x7"})
+    }
+    #[test]
+    fn blocks_need_every_field_and_quantities_need_hex_digits() {
+        let head = Head::from_block(&block(16, 1)).unwrap();
+        assert_eq!((head.number, head.timestamp, head.base_fee), (16, 100, 7));
+        // A missing base fee is no base fee, not zero: a send priced from zero would carry its tip alone.
+        for field in ["number", "hash", "timestamp", "baseFeePerGas"] {
+            let mut partial = block(16, 1);
+            partial.as_object_mut().unwrap().remove(field);
+            assert!(Head::from_block(&partial).is_err(), "{field}");
+        }
+        assert!(Head::from_block(&Value::Null).is_err());
+        for (hex, value) in [("0x0", 0), ("0x1", 1), ("0x01", 1), ("0xfF", 255)] {
+            assert_eq!(quantity(&json!(hex)).unwrap(), value);
+        }
+        for garbage in [
+            json!(null),
+            json!(16),
+            json!(""),
+            json!("0x"),
+            json!("10"),
+            json!("0xzz"),
+            json!("0x1_0"),
+            json!(" 0x1"),
+            json!("0X1"),
+            json!(format!("0x{}", "0".repeat(65))),
+            json!("0x10000000000000000"),
+        ] {
+            assert!(quantity(&garbage).is_err(), "{garbage}");
+        }
+    }
+    #[tokio::test]
+    async fn an_unusable_answer_fails_its_endpoint_and_the_read_moves_on() {
+        // Well-formed JSON-RPC with unusable results: null at the finalized tag, as an endpoint that does not serve
+        // that tag answers, "0x" nonces, a latest block without its base fee and a null gas estimate.
+        let (unusable, unusable_hits, a) = answering(|call| {
+            match (call["method"].as_str().unwrap(), call["params"][0].as_str()) {
+                ("eth_getBlockByNumber", Some("finalized")) => Value::Null,
+                ("eth_getBlockByNumber", _) => {
+                    json!({"number":"0x9","hash":B256::repeat_byte(9),"timestamp":"0x64"})
+                }
+                ("eth_getTransactionCount", _) => json!("0x"),
+                _ => Value::Null,
+            }
+        })
+        .await;
+        let (healthy, _, b) = answering(|call| match call["method"].as_str().unwrap() {
+            "eth_getBlockByNumber" => block(8, 8),
+            "eth_getTransactionCount" => json!("0x5"),
+            "eth_estimateGas" => json!("0x5208"),
+            _ => Value::Null,
+        })
+        .await;
+        let fresh = || Rpc::new(vec![unusable.clone(), healthy.clone()]).unwrap();
+        let rpc = fresh();
+        assert_eq!(rpc.finalized_head().await.unwrap().number, 8);
+        // The endpoint that answered null is cooled, and reads now start at the one that answered.
+        assert_eq!(rpc.active.load(Ordering::Relaxed), 1);
+        assert!(
+            rpc.cooldowns.lock().unwrap()[0]
+                .is_some_and(|until| until > tokio::time::Instant::now())
+        );
+        for _ in 0..3 {
+            assert_eq!(rpc.finalized_head().await.unwrap().number, 8);
+        }
+        assert_eq!(unusable_hits.load(Ordering::SeqCst), 1);
+        // Every typed read moves on the same way; each fresh client asks the unusable endpoint first.
+        assert_eq!(fresh().nonce(Address::ZERO, "latest").await.unwrap(), 5);
+        assert_eq!(fresh().head().await.unwrap().base_fee, 7);
+        assert_eq!(fresh().estimate_gas(json!({})).await.unwrap(), 21_000);
+        assert_eq!(unusable_hits.load(Ordering::SeqCst), 4);
+        // With only unusable answers the read fails as a delivery failure, neither a rate limit nor an error a node
+        // answered: the caller tries again later and judges nothing about the chain from it.
+        let only = Rpc::new(vec![unusable.clone()]).unwrap();
+        for error in [
+            only.finalized_head().await.unwrap_err(),
+            only.nonce(Address::ZERO, "latest").await.unwrap_err(),
+            only.head().await.unwrap_err(),
+        ] {
+            assert!(
+                is_delivery_failure(&error)
+                    && !is_rate_limited(&error)
+                    && !is_node_error_response(&error),
+                "{error:#}"
+            );
+            assert!(
+                format!("{error:#}").contains("RPC answer unusable"),
+                "{error:#}"
+            );
+        }
+        // Beside a rate-limited endpoint an unusable one still fails the read as a fault, not as a rate limit.
+        let (limited, _, c) = endpoint(Arc::new(|_| (429, json!({})))).await;
+        let error = Rpc::new(vec![limited, unusable])
+            .unwrap()
+            .finalized_head()
+            .await
+            .unwrap_err();
+        assert!(is_delivery_failure(&error) && !is_rate_limited(&error));
+        for task in [a, b, c] {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn a_receipt_the_first_endpoint_does_not_serve_yet_comes_from_another() {
+        let hash = B256::repeat_byte(7);
+        let receipt = json!({"transactionHash":hash,"blockHash":B256::repeat_byte(3),"blockNumber":"0x9","status":"0x1"});
+        // The first endpoint has not caught up with the receipt's block, the second answers with another
+        // transaction's receipt, and the third serves it.
+        let (behind, _, a) = answering(|_| Value::Null).await;
+        let (other, _, b) = answering(|_| {
+            json!({"transactionHash":B256::repeat_byte(8),"blockHash":B256::repeat_byte(3),"blockNumber":"0x9","status":"0x1"})
+        })
+        .await;
+        // It knows only `hash`: every other transaction's receipt is null there.
+        let served = receipt.clone();
+        let (current, current_hits, c) = answering(move |call| {
+            if call["params"][0] == json!(hash) {
+                served.clone()
+            } else {
+                Value::Null
+            }
+        })
+        .await;
+        let rpc = Rpc::new(vec![behind.clone(), other.clone(), current]).unwrap();
+        // A read takes the first endpoint's null as its answer.
+        assert_eq!(rpc.receipt(&hash.to_string()).await.unwrap(), None);
+        // Every attempt of a nonce is asked for at once: one batch per endpoint, and the index of the
+        // attempt whose receipt was found.
+        let attempts = [B256::repeat_byte(6).to_string(), hash.to_string()];
+        assert_eq!(
+            rpc.receipt_from_any(&attempts).await.unwrap(),
+            Some((1, receipt))
+        );
+        assert_eq!(current_hits.load(Ordering::SeqCst), 1);
+        // No endpoint serving a receipt is no receipt, not a failure.
+        let none = Rpc::new(vec![behind, other]).unwrap();
+        assert_eq!(none.receipt_from_any(&attempts).await.unwrap(), None);
+        // An endpoint that does not answer is waited for only RECEIPT_SEARCH.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hung = format!("http://{}", listener.local_addr().unwrap());
+        let d = tokio::spawn(serve(
+            listener,
+            Duration::from_secs(30),
+            r#"{"jsonrpc":"2.0","id":0,"result":null}"#,
+        ));
+        let began = tokio::time::Instant::now();
+        assert_eq!(
+            Rpc::new(vec![hung])
+                .unwrap()
+                .receipt_from_any(&attempts)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(began.elapsed() < RECEIPT_SEARCH + Duration::from_millis(500));
+        for task in [a, b, c, d] {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn the_finalized_head_and_its_checkpoint_come_from_one_usable_answer() {
+        // Each endpoint answers the checkpoint block with its own hash. The first does not serve the finalized tag,
+        // the second has not served the checkpoint block yet, the third answers it with another block.
+        let (unfinalized, unfinalized_hits, a) =
+            answering(|call| match call["params"][0].as_str() {
+                Some("finalized") => Value::Null,
+                _ => block(5, 0xbb),
+            })
+            .await;
+        let (lagging, lagging_hits, b) = answering(|call| match call["params"][0].as_str() {
+            Some("finalized") => block(4, 0xcc),
+            _ => Value::Null,
+        })
+        .await;
+        let (confused, confused_hits, c) = answering(|call| match call["params"][0].as_str() {
+            Some("finalized") => block(8, 0xdd),
+            _ => block(6, 0xdd),
+        })
+        .await;
+        let (healthy, healthy_hits, d) = answering(|call| match call["params"][0].as_str() {
+            Some("finalized") => block(8, 0x88),
+            _ => block(5, 0xaa),
+        })
+        .await;
+        let rpc = Rpc::new(vec![
+            unfinalized.clone(),
+            lagging,
+            confused,
+            healthy.clone(),
+        ])
+        .unwrap();
+        let (head, checkpoint) = rpc.finalized_head_with(Some(5)).await.unwrap();
+        // Both blocks are the healthy endpoint's: no other endpoint's checkpoint is combined with its head.
+        assert_eq!((head.number, head.hash), (8, B256::repeat_byte(0x88)));
+        assert_eq!(checkpoint.unwrap().hash, B256::repeat_byte(0xaa));
+        for hits in [unfinalized_hits, lagging_hits, confused_hits, healthy_hits] {
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "one batched request each");
+        }
+        let (head, checkpoint) = Rpc::new(vec![unfinalized, healthy])
+            .unwrap()
+            .finalized_head_with(None)
+            .await
+            .unwrap();
+        assert_eq!((head.number, checkpoint.is_none()), (8, true));
+        for task in [a, b, c, d] {
+            task.abort();
+        }
     }
     #[test]
     fn rate_limits_are_recognized_by_code_or_wording_only() {

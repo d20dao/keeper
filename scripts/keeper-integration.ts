@@ -49,6 +49,21 @@ let hangPrimary=false,primaryCalls=0,fallbackCalls=0,proofContextDelayMs=0,rpcRa
 let sweepRecipient="",holdSweepSend=false,sweepSendEntered:(()=>void)|undefined;
 let holdBatchSend=false,batchSendEntered:(()=>void)|undefined,beforeBatchSend:((tx:ReturnType<typeof ethers.Transaction.from>)=>Promise<void>)|undefined;
 let holdSendsFrom=""; // A wallet whose signed transactions the fixture RPC accepts but never forwards: a dead keeper.
+// /unusable answers well-formed JSON-RPC whose results nothing can use. "finalized": null for every read at the finalized
+// tag, as an endpoint that does not serve that tag answers, and "0x" for every nonce. "pins": null for the proxy
+// implementation slots. "receipts": null for every receipt, as an endpoint that has not caught up with the receipt's
+// block answers. Every other call, and every call while no mode is set, is answered as /rpc answers it.
+let unusableMode:""|"finalized"|"pins"|"receipts"="",unusableCalls=0,unusableAnswers=0;
+function unusableAnswer(body:{method:string,params?:unknown[]}):unknown{
+  if(unusableMode==="finalized"&&body.method==="eth_getTransactionCount")return "0x";
+  if(unusableMode==="finalized"&&(body.params??[]).includes("finalized"))return null;
+  if(unusableMode==="pins"&&body.method==="eth_getStorageAt")return null;
+  if(unusableMode==="receipts"&&body.method==="eth_getTransactionReceipt")return null;
+  return undefined;
+}
+// A node that estimates no fulfillment batch of more than this many members and refuses larger ones without a revert,
+// as a node refuses more gas than it estimates (0: no limit).
+let batchEstimateLimit=0,refusedBatchEstimates=0;
 const slowProofIds=new Set<string>();
 const server=createServer(async(req,res)=>{
   const reply=(value:unknown,status=200)=>{res.writeHead(status,{"Content-Type":"application/json"});res.end(JSON.stringify(value));};
@@ -84,7 +99,7 @@ const server=createServer(async(req,res)=>{
       const airnode=signerFor(selection.airnode),signature=await airnode.signMessage(ethers.getBytes(digest));
       reply({airnode:airnode.address,requestHash,timestamp:String(timestamp),data,signature});return;
     }
-    assert.ok(req.url==="/rpc"||req.url==="/primary");
+    assert.ok(req.url==="/rpc"||req.url==="/primary"||req.url==="/unusable");
     if(rpcRateLimit){reply({jsonrpc:"2.0",id:null,error:{code:429,message:"rate limit exceeded"}},429);return;}
     // A JSON-RPC batch is answered element by element through this same endpoint, in order, so every hold,
     // fault and count applies to each call exactly as it would to a single request.
@@ -94,7 +109,12 @@ const server=createServer(async(req,res)=>{
       if(failed){reply(failed.value??{error:"batch element failed"},failed.status);return;}
       reply(answers.map(a=>a.value));return;
     }
-    if(req.url==="/primary"){primaryCalls++;if(hangPrimary)return;}else{fallbackCalls++;}
+    if(req.url==="/primary"){primaryCalls++;if(hangPrimary)return;}
+    else if(req.url==="/unusable"){
+      unusableCalls++;const unusable=unusableAnswer(body);
+      if(unusable!==undefined){unusableAnswers++;reply({jsonrpc:"2.0",id:body.id,result:unusable});return;}
+    }
+    else{fallbackCalls++;}
     if(rpcDelayMs>0)await new Promise(resolve=>setTimeout(resolve,rpcDelayMs));let name=body.method;
     if(name==="eth_call") {const data=body.params[0].data;const iface=body.params[0].to.toLowerCase()===(await registry.getAddress()).toLowerCase()?registry.interface:rng.interface;name+=":"+(iface.getFunction(data.slice(0,10))?.name??data.slice(0,10));}
     counts[name]=(counts[name]??0)+1;
@@ -102,6 +122,10 @@ const server=createServer(async(req,res)=>{
     if(name==="eth_call:getProofContext"&&proofContextDelayMs>0)await new Promise(resolve=>setTimeout(resolve,proofContextDelayMs));
     if(body.method==="eth_estimateGas"&&body.params[0].to.toLowerCase()===(await registry.getAddress()).toLowerCase()) {
       epochEstimateCalls++;if(stallEpochEstimate)return;
+    }
+    if(batchEstimateLimit>0&&body.method==="eth_estimateGas"&&String(body.params[0].data??"").startsWith(batchSelector)
+      &&(rng.interface.decodeFunctionData("fulfillRandomnessBatch",body.params[0].data)[0] as bigint[]).length>batchEstimateLimit){
+      refusedBatchEstimates++;reply({jsonrpc:"2.0",id:body.id,error:{code:-32000,message:"gas required exceeds allowance (16777216)"}});return;
     }
     if(body.method==="eth_estimateGas"&&body.params[0].to.toLowerCase()===(await rng.getAddress()).toLowerCase()&&holdProofEstimate){
       proofEstimateEntered?.();await new Promise<void>(resolve=>{releaseProofEstimate=resolve;});
@@ -157,6 +181,7 @@ async function request(label:string){
 }
 function rows(sql:string,db="keeper.sqlite"){const sqlite=new DatabaseSync(join(dir,db),{readOnly:true});try{return sqlite.prepare(sql).all();}finally{sqlite.close();}}
 async function preparedEpoch(n:number){await until(async()=>rows(`SELECT api FROM epoch_work WHERE epoch=${n}`).some(r=>r.api!==null),`epoch ${n} packet missing`);}
+async function requests(label:string,count:number){const ids:bigint[]=[];for(let n=0;n<count;n++)ids.push(await request(`${label}-${n}`));return ids;}
 async function advanceTarget(id:bigint){const r=await rng.getRequest(id);if(r.targetBlock>0n)await mineTo(r.targetBlock+await rng.confirmationBlocks());}
 async function settle(id:bigint,overrides:NodeJS.ProcessEnv={},db?:string){let last="";for(let attempt=0;attempt<8;attempt++){await advanceTarget(id);last=(await run(overrides,undefined,db)).err;if((await rng.getRequest(id)).fulfilled){await run(overrides,undefined,db);return;}await new Promise(r=>setTimeout(r,300));}throw Error(`Request ${id} did not settle: ${last}`);}
 try {
@@ -206,6 +231,51 @@ try {
     assert.equal((await rng.getRequest(id)).delivered,true);assert(fallbackCalls>beforeFallback);
     await until(async()=>rows("SELECT COUNT(*) n FROM txs WHERE state IN ('signed','submitted')")[0].n===0,"Failover receipt not reconciled");
   } finally {hangPrimary=false;failover.child.kill("SIGKILL");await failover.exit;}
+
+  // RPC_URLS[0] turns unusable while the daemon reads from it: null for every finalized read and "0x" for every nonce.
+  // Each read moves on to the next endpoint, so no tick fails: the daemon outlives MAX_TICK_FAILURES and keeps serving.
+  const unusableDaemon=start({RPC_URLS:`${base}/unusable,${base}/rpc`,MAX_TICK_FAILURES:"2"},["run"]);
+  let unusableLog="";
+  try {
+    const warmed=unusableCalls;
+    await until(async()=>unusableCalls>warmed+20,"Daemon did not start reading from RPC_URLS[0]");
+    unusableMode="finalized";const answeredBefore=unusableAnswers;
+    const id=await request("served-past-an-unusable-first-endpoint");
+    await until(async()=>(await rng.getRequest(id)).fulfilled,"Daemon did not serve past an unusable RPC_URLS[0]",25000);
+    assert.equal((await rng.getRequest(id)).delivered,true);
+    assert(unusableAnswers>answeredBefore,"RPC_URLS[0] was not asked once it turned unusable");
+    await new Promise(resolve=>setTimeout(resolve,3000)); // Further ticks, well past MAX_TICK_FAILURES=2.
+    assert.equal(unusableDaemon.child.exitCode,null,"The daemon exited on an unusable endpoint");
+    await until(async()=>rows("SELECT COUNT(*) n FROM txs WHERE state IN ('signed','submitted')")[0].n===0,"Receipt not reconciled past an unusable endpoint");
+  } finally {unusableMode="";unusableDaemon.child.kill("SIGKILL");unusableLog=(await unusableDaemon.exit).err;}
+  assert.match(unusableLog,/RPC answer unusable/);
+  assert.doesNotMatch(unusableLog,/Keeper tick failed/,"An unusable endpoint failed a tick");
+  // Unusable from startup on: RPC_URLS[0] answers the implementation slots with null and is left out, or answers every
+  // finalized read with null. Startup completes either way and every run serves.
+  for(const mode of ["pins","finalized"] as const){
+    unusableMode=mode;const answeredBefore=unusableAnswers;
+    try {
+      const id=await request(`served-with-an-unusable-first-endpoint-from-startup-${mode}`);
+      await settle(id,{RPC_URLS:`${base}/unusable,${base}/rpc`});
+    } finally {unusableMode="";}
+    assert(unusableAnswers>answeredBefore,`RPC_URLS[0] was not asked in ${mode} mode`);
+  }
+  // RPC_URLS[0] has not caught up with the receipts' blocks and answers null for them. The nonce is used, so the keeper
+  // asks every endpoint before it resolves the nonce from contract state alone, and reconciles the receipt with its
+  // notices, for a single fulfillment and for a batch.
+  for(const [members,reconciled] of [[1,/Receipt reconciled/],[2,/Batch receipt reconciled/]] as const){
+    const ids=await requests(`receipt-behind-first-endpoint-${members}`,members);
+    const behindEnv={RPC_URLS:`${base}/unusable,${base}/rpc`,RUST_LOG:"d20dao_keeper=info"};
+    let log="";unusableMode="receipts";const answeredBefore=unusableAnswers;
+    try {
+      for(let attempt=0;attempt<8&&!reconciled.test(log);attempt++){for(const id of ids)await advanceTarget(id);log+=(await run(behindEnv)).err;}
+    } finally {unusableMode="";}
+    assert(unusableAnswers>answeredBefore,"RPC_URLS[0] was not asked for a receipt");
+    assert.match(log,reconciled,"A receipt another endpoint served was not reconciled");
+    assert.doesNotMatch(log,/no endpoint served its receipt/);
+    for(const id of ids)assert.equal((await rng.getRequest(id)).delivered,true);
+    assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE state IN ('signed','submitted')")[0].n,0);
+  }
 
   // Rate limits are not faults. While every endpoint answers 429 the daemon defers its ticks without counting them
   // toward MAX_TICK_FAILURES, reports rpc_rate_limited as degraded health, and resumes by itself when they end.
@@ -568,9 +638,9 @@ try {
     console.log(JSON.stringify({providerCircuitBreaker:{provider:downProvider,trippedAfter:3,skippedEpoch:String(skipped),requestsToOpenGateway:0,fallbackAttempt:1}}));
   }
 
-  // Batched fulfillment. On the guarded coordinator the estimate already budgets every served member and the keeper
-  // reserves each callback's budget on top, about 1M gas per 200,000-gas member, so MAX_GAS=13000000 lets eight
-  // members fit one transaction.
+  // Batched fulfillment. On the guarded coordinator the estimate already budgets every served member, and the keeper's
+  // floor adds only the transaction's own cost: about 630k gas per 200,000-gas member, so MAX_GAS=13000000 carries a
+  // full batch.
   const batchEpoch=await registry.epochForBlock(await ethers.provider.getBlockNumber())+1n;
   const batchDb="migrated.sqlite",batchEnv={...reviewedPins,MAX_GAS:"13000000"};
   const toCoordinator=(hex:string,selector:string)=>{const tx=ethers.Transaction.from(hex);return tx.to?.toLowerCase()===coordinatorAddress.toLowerCase()&&tx.data.startsWith(selector);};
@@ -588,7 +658,6 @@ try {
     }
     throw Error(`Requests ${ids.join(",")} did not settle: ${last}`);
   }
-  async function requests(label:string,count:number){const ids:bigint[]=[];for(let n=0;n<count;n++)ids.push(await request(`${label}-${n}`));return ids;}
   await mineTo(await registry.epochStart(batchEpoch));await run({...batchEnv,SEND_TRANSACTIONS:"false"},undefined,batchDb);
   await until(async()=>rows(`SELECT api FROM epoch_work WHERE epoch=${batchEpoch}`,batchDb).some(r=>r.api!==null),`epoch ${batchEpoch} packet missing`);
   await rng.setKeeperFeeBps(5000);
@@ -648,6 +717,18 @@ try {
   assert.equal(rows(`SELECT COUNT(*) n FROM meta WHERE key='batch_exclude:${corrupt}'`,batchDb)[0].n,1);
   await networkHelpers.time.increaseTo((await rng.getRequest(corrupt)).deadline+1n);await run(batchEnv,undefined,batchDb);
   assert.equal(jobState(corrupt),"expired");await rng.refundRequest(corrupt);
+  // A node that estimates no batch of more than three members refuses a larger one without a revert: the batch is
+  // halved and sent as batches, never one request at a time.
+  const refusedIds=await requests("batch-refused-estimate",6),rawBeforeRefused=raw.length,refusedBefore=refusedBatchEstimates;
+  batchEstimateLimit=3;
+  try {await settleAll(refusedIds);} finally {batchEstimateLimit=0;}
+  assert.ok(refusedBatchEstimates>refusedBefore,"The node never refused a batch estimate");
+  const refusedRaws=raw.slice(rawBeforeRefused);
+  assert.equal(refusedRaws.filter(isSingleRaw).length,0,"A batch estimate refused without a revert fell back to single sends");
+  const refusedSizes=refusedRaws.filter(isBatchRaw).map(hex=>(rng.interface.decodeFunctionData("fulfillRandomnessBatch",ethers.Transaction.from(hex).data)[0] as bigint[]).length);
+  assert.ok(refusedSizes.length>=2&&refusedSizes.every(n=>n>=2&&n<=3),`Refused batches were not halved: ${refusedSizes}`);
+  for(const id of refusedIds){assert.equal((await rng.getRequest(id)).delivered,true);assert.equal(jobState(id),"served");}
+  console.log(JSON.stringify({refusedBatchEstimate:{members:6,estimateLimit:3,refused:refusedBatchEstimates-refusedBefore,batchSizes:refusedSizes}}));
   // A crash after a batch is signed but before its receipt: the restart rebroadcasts the identical bytes on the
   // same nonce and resolves every member.
   const crashIds=await requests("batch-crash",3);await run({...batchEnv,SEND_TRANSACTIONS:"false"},undefined,batchDb);
@@ -967,7 +1048,7 @@ try {
       workingPrimaryNotJoinedEarly:{waitedPast:16,servedAt:youngAge},idlePrimaryNotDead:true,deadPrimary:{servedAt:orphanAge},restartedFollower:{servedAt:restartAge},
       primaryDiedMidBurst:{orphaned:orphaned.length,takeoverSeconds},bothUp:{requests:both.length,primaryTransactions:primaryShare,followerTransactions:followerShare},refusedAfterRemoval:true}}));
   }
-  console.log(JSON.stringify({hungPrimaryFailover:true,epochSourceFallback:true,boundedPreparation:true,recoveryAfterFourApiFailures:true,feeBudgetDeferral:true,blockedEpochDemandAlarm:true,
+  console.log(JSON.stringify({hungPrimaryFailover:true,unusableFirstEndpointFailover:true,epochSourceFallback:true,boundedPreparation:true,recoveryAfterFourApiFailures:true,feeBudgetDeferral:true,blockedEpochDemandAlarm:true,
     batchedFulfillment:{members:batchIds.length,oneTransaction:true,thirdPartyMemberSkipped:true,corruptMemberFallsBackToSingles:true,crashRestartIdenticalBytes:true,batchMaxOneIsSinglePath:true}}));
   assert.deepEqual(unexpectedApiBodies,[]);assert.ok(CATALOG.every(recipe=>apiBodiesByRecipe[recipe]>0),"The keeper did not request every catalog recipe");
   // Epoch 1 was published under the initial catalog and later epochs under the scheduled one.

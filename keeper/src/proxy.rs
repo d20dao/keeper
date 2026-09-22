@@ -3,7 +3,7 @@ use crate::{abi::Coordinator as C, config::Config, rpc::Rpc};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub const IMPLEMENTATION_SLOT: &str =
     "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -156,21 +156,31 @@ fn implementation_address(word: &[u8]) -> Result<Address> {
     );
     Ok(address)
 }
+/// A storage word as eth_getStorageAt returns it: exactly 32 bytes of hex data. Anything else is an unusable answer,
+/// not a slot value.
+fn storage_word(value: Value) -> Result<B256> {
+    let word: Bytes = serde_json::from_value(value)?;
+    ensure!(word.len() == 32, "Storage word is not 32 bytes");
+    Ok(B256::from_slice(&word))
+}
+/// Runtime code as eth_getCode returns it: hex data, possibly empty. Anything else is an unusable answer.
+fn runtime_code(value: Value) -> Result<Bytes> {
+    Ok(serde_json::from_value(value)?)
+}
 async fn implementation(rpc: &Rpc, proxy: Address) -> Result<Address> {
-    let word: Bytes = serde_json::from_value(
-        rpc.request(
+    let word = rpc
+        .request_as(
             "eth_getStorageAt",
             json!([proxy, IMPLEMENTATION_SLOT, "latest"]),
+            storage_word,
         )
-        .await?,
-    )?;
-    implementation_address(&word)
+        .await?;
+    implementation_address(word.as_slice())
 }
 async fn code_hash(rpc: &Rpc, address: Address) -> Result<B256> {
-    let code: Bytes = serde_json::from_value(
-        rpc.request("eth_getCode", json!([address, "latest"]))
-            .await?,
-    )?;
+    let code = rpc
+        .request_as("eth_getCode", json!([address, "latest"]), runtime_code)
+        .await?;
     ensure!(!code.is_empty(), "Pinned service address has no code");
     Ok(keccak256(code))
 }
@@ -288,6 +298,11 @@ impl RuntimePins {
     /// from one endpoint, so the check costs one request and never mixes two endpoints' views of the chain. A moved
     /// slot costs one more read, from the same endpoint, only when that proxy has an approved next implementation.
     ///
+    /// An endpoint whose answer is unusable (null, not hex, a storage word that is not 32 bytes), in the batch or in
+    /// the follow-up read, fails like one that did not answer, and the next endpoint answers the whole check afresh.
+    /// A usable view is judged only once it is read and never retried elsewhere: an endpoint that shows a change is
+    /// not passed over for one that does not.
+    ///
     /// Any change other than a move to the approved next implementation fails as a plain error, as it always has. A
     /// move to it, with every other pin intact, fails as an `ApprovedUpgrade`: the caller stops for a verified restart.
     pub async fn verify(&self, rpc: &Rpc, approved: ApprovedNext) -> Result<()> {
@@ -304,35 +319,48 @@ impl RuntimePins {
             calls.push(("eth_getCode", json!([pin.proxy, "latest"])));
             calls.push(("eth_getCode", json!([pin.implementation, "latest"])));
         }
-        let (endpoint, values) = rpc.batch_from(&calls).await?;
+        let calls = &calls;
+        let views = rpc
+            .hedged("eth_getStorageAt batch", move |endpoint| async move {
+                let values = rpc.batch_at(endpoint, calls).await?;
+                let mut views = Vec::with_capacity(services.len());
+                for ((service, pin), values) in services.into_iter().zip(values.chunks(3)) {
+                    let word = storage_word(values[0].clone())?;
+                    let proxy_code = runtime_code(values[1].clone())?;
+                    let implementation_code = runtime_code(values[2].clone())?;
+                    let moved_code = match implementation_address(word.as_slice()) {
+                        Ok(moved)
+                            if moved != pin.implementation && approved.get(service).is_some() =>
+                        {
+                            let mut code = rpc
+                                .batch_at(endpoint, &[("eth_getCode", json!([moved, "latest"]))])
+                                .await?;
+                            Some(runtime_code(code.swap_remove(0))?)
+                        }
+                        _ => None,
+                    };
+                    views.push((word, proxy_code, implementation_code, moved_code));
+                }
+                Ok(views)
+            })
+            .await?;
         let mut upgrade = None;
-        for ((service, pin), values) in services.into_iter().zip(values.chunks(3)) {
-            let word: Bytes = serde_json::from_value(values[0].clone())?;
-            let proxy_code: Bytes = serde_json::from_value(values[1].clone())?;
-            let implementation_code: Bytes = serde_json::from_value(values[2].clone())?;
+        for ((service, pin), (word, proxy_code, implementation_code, moved_code)) in
+            services.into_iter().zip(views)
+        {
             ensure!(
                 !proxy_code.is_empty() && !implementation_code.is_empty(),
                 "Pinned service address has no code"
             );
-            let implementation = implementation_address(&word)?;
-            let next = approved.get(service);
-            let implementation_hash = if implementation != pin.implementation && next.is_some() {
-                let mut code = rpc
-                    .batch_on(
-                        endpoint,
-                        &[("eth_getCode", json!([implementation, "latest"]))],
-                    )
-                    .await?;
-                keccak256(serde_json::from_value::<Bytes>(code.swap_remove(0))?)
-            } else {
-                keccak256(implementation_code)
-            };
+            let implementation = implementation_address(word.as_slice())?;
+            // The code at a moved slot is read only for a proxy with an approved next implementation.
+            let implementation_hash = keccak256(moved_code.unwrap_or(implementation_code));
             if let Some(moved) = pin.classify(
                 service,
                 implementation,
                 keccak256(proxy_code),
                 implementation_hash,
-                next,
+                approved.get(service),
             )? {
                 upgrade.get_or_insert(moved);
             }
@@ -517,9 +545,16 @@ pub(crate) mod tests {
         code: std::collections::HashMap<Address, Vec<u8>>,
         down: bool,
         requests: usize,
+        /// Replaces the result of every call it returns a value for: an endpoint answering well-formed JSON-RPC
+        /// with a result nothing can use.
+        pub(crate) spoil: Option<Spoil>,
     }
+    pub(crate) type Spoil = Box<dyn Fn(&Value) -> Option<Value> + Send>;
     pub(crate) type Shared = std::sync::Arc<std::sync::Mutex<Chain>>;
     fn answer(chain: &Chain, call: &serde_json::Value) -> serde_json::Value {
+        if let Some(spoiled) = chain.spoil.as_ref().and_then(|spoil| spoil(call)) {
+            return json!({"jsonrpc":"2.0","id":call["id"],"result":spoiled});
+        }
         let address = |index: usize| -> Address {
             serde_json::from_value(call["params"][index].clone()).unwrap()
         };
@@ -601,6 +636,11 @@ pub(crate) mod tests {
         }
     }
     pub(crate) async fn local_chain() -> (Shared, Rpc) {
+        let (shared, url) = served_chain().await;
+        (shared, Rpc::new(vec![url]).unwrap())
+    }
+    /// The chain `local_chain` serves, on an endpoint of its own.
+    pub(crate) async fn served_chain() -> (Shared, String) {
         let pins = pins();
         let mut chain = Chain::default();
         for pin in [pins.coordinator, pins.registry] {
@@ -621,9 +661,9 @@ pub(crate) mod tests {
             .insert(Address::repeat_byte(0xc4), OTHER_CODE.to_vec());
         let shared: Shared = std::sync::Arc::new(std::sync::Mutex::new(chain));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rpc = Rpc::new(vec![format!("http://{}", listener.local_addr().unwrap())]).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(serve(shared.clone(), listener));
-        (shared, rpc)
+        (shared, url)
     }
 
     #[tokio::test]
@@ -807,5 +847,113 @@ pub(crate) mod tests {
         );
         let error = pins.verify(&rpc, approved).await.unwrap_err();
         assert!(approved_upgrade(&error).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unusable_pin_answer_moves_the_whole_check_to_the_next_endpoint() {
+        let pins = pins();
+        let approved = ApprovedNext {
+            coordinator: Some(hash(NEXT_CODE)),
+            registry: None,
+        };
+        let accepted = Accepted {
+            pin: Some(hash(OLD_CODE)),
+            next: Some(hash(NEXT_CODE)),
+        };
+        let (bad, bad_url) = served_chain().await;
+        let (good, good_url) = served_chain().await;
+        let both = || Rpc::new(vec![bad_url.clone(), good_url.clone()]).unwrap();
+        let requests = |chain: &Shared| chain.lock().unwrap().requests;
+        // Null, non-hex and wrongly sized answers for the implementation slots and for runtime code.
+        for (method, spoiled) in [
+            ("eth_getStorageAt", json!(null)),
+            ("eth_getStorageAt", json!("0x1234")),
+            ("eth_getStorageAt", json!("latest")),
+            ("eth_getCode", json!(null)),
+            ("eth_getCode", json!("0xzz")),
+            ("eth_getCode", json!(7)),
+        ] {
+            let answer = spoiled.clone();
+            bad.lock().unwrap().spoil = Some(Box::new(move |call: &Value| {
+                (call["method"] == method).then(|| answer.clone())
+            }));
+            // The whole batch moves to the second endpoint: one request to each.
+            let before = (requests(&bad), requests(&good));
+            pins.verify(&both(), approved).await.unwrap();
+            assert_eq!(
+                (requests(&bad), requests(&good)),
+                (before.0 + 1, before.1 + 1),
+                "{method} {spoiled}"
+            );
+            // Startup's observation moves on the same way.
+            assert_eq!(
+                ProxyPin::observe(
+                    &both(),
+                    pins.coordinator.proxy,
+                    Some(hash(PROXY_CODE)),
+                    accepted
+                )
+                .await
+                .unwrap(),
+                pins.coordinator
+            );
+            // With nothing else to ask, the check fails as an RPC failure, never as a changed implementation.
+            let error = pins
+                .verify(&Rpc::new(vec![bad_url.clone()]).unwrap(), approved)
+                .await
+                .unwrap_err();
+            assert!(
+                crate::rpc::is_delivery_failure(&error),
+                "{method} {spoiled}: {error:#}"
+            );
+            assert!(approved_upgrade(&error).is_none() && !upgrade_in_progress(&error));
+        }
+        // The approved next implementation's code is read in the same attempt as the batch. The first endpoint
+        // shows the coordinator moved to it but answers that code unusably; the second has not seen the move. The
+        // check is the second endpoint's view alone, unchanged, never the first one's slot with the second one's code.
+        let moved = Address::repeat_byte(0xc3);
+        {
+            let mut chain = bad.lock().unwrap();
+            chain.slots.insert(pins.coordinator.proxy, moved);
+            chain.spoil = Some(Box::new(move |call: &Value| {
+                (call["method"] == "eth_getCode" && call["params"][0] == json!(moved))
+                    .then_some(Value::Null)
+            }));
+        }
+        pins.verify(&both(), approved).await.unwrap();
+        // Once the second endpoint shows the move as well, the approved upgrade is reported from its own view.
+        good.lock()
+            .unwrap()
+            .slots
+            .insert(pins.coordinator.proxy, moved);
+        let error = pins.verify(&both(), approved).await.unwrap_err();
+        assert_eq!(
+            approved_upgrade(&error).expect("an approved upgrade").to,
+            moved
+        );
+        // A usable view is never passed over: an endpoint that shows an unapproved move fails the check, and the
+        // unchanged endpoint after it is not asked.
+        good.lock()
+            .unwrap()
+            .slots
+            .insert(pins.coordinator.proxy, pins.coordinator.implementation);
+        {
+            let mut chain = bad.lock().unwrap();
+            chain.spoil = None;
+            chain
+                .slots
+                .insert(pins.coordinator.proxy, Address::repeat_byte(0xc4));
+        }
+        let before = requests(&good);
+        let error = pins.verify(&both(), approved).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Proxy implementation changed; review and update pins before restarting"
+        );
+        assert_eq!(
+            requests(&good),
+            before,
+            "the unchanged endpoint was never asked"
+        );
     }
 }

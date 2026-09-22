@@ -1566,6 +1566,35 @@ mod tests {
         }
         server.abort();
     }
+    #[tokio::test]
+    async fn an_unusable_pin_answer_is_an_rpc_failure_and_a_changed_pin_still_needs_review() {
+        use crate::proxy::tests as chain;
+        let (state, rpc) = chain::local_chain().await;
+        let pins = chain::pins();
+        verify_pins(&rpc, pins, ApprovedNext::default())
+            .await
+            .unwrap();
+        // An endpoint that answers the pin reads with nothing usable has failed; nothing needs review.
+        state.lock().unwrap().spoil = Some(Box::new(|call: &Value| {
+            (call["method"] == "eth_getCode").then_some(Value::Null)
+        }));
+        let error = verify_pins(&rpc, pins, ApprovedNext::default())
+            .await
+            .unwrap_err();
+        assert_eq!(Cause::of(&error), Cause::Rpc, "{error:#}");
+        // A usable answer showing another implementation still does.
+        {
+            let mut chain = state.lock().unwrap();
+            chain.spoil = None;
+            chain
+                .slots
+                .insert(pins.coordinator.proxy, Address::repeat_byte(0xc4));
+        }
+        let error = verify_pins(&rpc, pins, ApprovedNext::default())
+            .await
+            .unwrap_err();
+        assert_eq!(Cause::of(&error), Cause::Review);
+    }
     fn test_status() -> StatusSource {
         StatusSource {
             db: std::path::PathBuf::from("unused-status.sqlite"),
