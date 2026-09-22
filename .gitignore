@@ -26,3 +26,6 @@ art/
 
 __pycache__/
 *.pyc
+
+# Local operator notes and one-off scripts; never committed.
+operator/

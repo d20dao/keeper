@@ -176,6 +176,10 @@ pub struct Config {
     pub protocol_hash: Option<B256>,
     pub implementation_code_hash: Option<B256>,
     pub registry_implementation_code_hash: Option<B256>,
+    /// Runtime code hashes of implementations approved ahead of an in-place upgrade. Startup accepts either the pin or
+    /// this hash; a running keeper that sees its proxy move to this hash exits for a verified restart.
+    pub approved_next_implementation_code_hash: Option<B256>,
+    pub approved_next_registry_implementation_code_hash: Option<B256>,
     pub api_override: Option<String>,
     pub api_endpoints: crate::epoch::ApiEndpoints,
 }
@@ -250,6 +254,18 @@ impl Config {
                     && registry_implementation_code_hash.is_some()),
             "Nonlocal networks require proxy, both implementation, and protocol configuration hashes"
         );
+        let approved_next_implementation_code_hash = approved_next(
+            "APPROVED_NEXT_IMPLEMENTATION_CODE_HASH",
+            env::var("APPROVED_NEXT_IMPLEMENTATION_CODE_HASH")
+                .ok()
+                .as_deref(),
+        )?;
+        let approved_next_registry_implementation_code_hash = approved_next(
+            "APPROVED_NEXT_REGISTRY_IMPLEMENTATION_CODE_HASH",
+            env::var("APPROVED_NEXT_REGISTRY_IMPLEMENTATION_CODE_HASH")
+                .ok()
+                .as_deref(),
+        )?;
         let api_override = env::var("TEST_API_BASE").ok();
         if let Some(url) = &api_override {
             ensure!(
@@ -317,7 +333,9 @@ impl Config {
             max_tick_failures: number("MAX_TICK_FAILURES", "5")?,
             tick_timeout_seconds: number("TICK_TIMEOUT_SECONDS", "20")?,
             margin,
-            max_gas: number("MAX_GAS", "2000000")?,
+            // A fulfillment reserves its callbacks' full gas limits (worker::fulfillment_gas): one request
+            // with the coordinator's largest callback limit needs about 2.5M, so the default carries it.
+            max_gas: number("MAX_GAS", "3000000")?,
             max_fee: number("MAX_FEE_PER_GAS_WEI", "100000000000")?,
             cancel_max_fee: required("CANCEL_MAX_FEE_PER_GAS_WEI")?
                 .parse()
@@ -333,6 +351,8 @@ impl Config {
             protocol_hash,
             implementation_code_hash,
             registry_implementation_code_hash,
+            approved_next_implementation_code_hash,
+            approved_next_registry_implementation_code_hash,
             api_override,
             api_endpoints,
         };
@@ -364,6 +384,30 @@ impl Config {
         );
         Ok(result)
     }
+    /// The implementations approved ahead of an in-place upgrade, per proxy.
+    pub fn approved_next(&self) -> crate::proxy::ApprovedNext {
+        crate::proxy::ApprovedNext {
+            coordinator: self.approved_next_implementation_code_hash,
+            registry: self.approved_next_registry_implementation_code_hash,
+        }
+    }
+}
+
+/// An optional approved next implementation: the runtime code hash an operator reviewed before an in-place upgrade.
+/// Unset or empty approves nothing. Every environment variable the keeper does not read is ignored, so a keeper
+/// release without this setting runs unchanged beside it.
+fn approved_next(name: &str, value: Option<&str>) -> Result<Option<B256>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let hash: B256 = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid {name}: expected a 32-byte runtime code hash"))?;
+    ensure!(
+        !hash.is_zero(),
+        "{name} must be the approved implementation's runtime code hash, not a placeholder"
+    );
+    Ok(Some(hash))
 }
 
 /// The coordinator rejects more than MAX_FULFILL_BATCH members; 1 disables batching entirely.
@@ -534,6 +578,34 @@ mod tests {
         // A send margin that leaves no room for a fulfillment round inside the safety age is refused.
         assert!(Role::parse(Some("follower"), none, 11).is_err());
         assert_eq!(follower(20, 150, 10, 0, 1).name(), "follower");
+    }
+    #[test]
+    fn approved_next_implementations_are_optional_exact_code_hashes() {
+        let name = "APPROVED_NEXT_IMPLEMENTATION_CODE_HASH";
+        let hash = "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c";
+        // Unset or empty approves nothing, so the setting can be cleared in place after an upgrade.
+        assert_eq!(approved_next(name, None).unwrap(), None);
+        assert_eq!(approved_next(name, Some("")).unwrap(), None);
+        assert_eq!(approved_next(name, Some("  ")).unwrap(), None);
+        assert_eq!(
+            approved_next(name, Some(hash)).unwrap(),
+            Some(hash.parse().unwrap())
+        );
+        assert_eq!(
+            approved_next(name, Some(&format!(" {hash}\t"))).unwrap(),
+            Some(hash.parse().unwrap())
+        );
+        // A malformed value or a placeholder is refused, naming the setting.
+        for invalid in [
+            "0x1234",
+            "not-a-hash",
+            &hash[..65],
+            &format!("{hash}00"),
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let error = approved_next(name, Some(invalid)).unwrap_err().to_string();
+            assert!(error.contains(name), "{invalid}: {error}");
+        }
     }
     #[test]
     fn recovery_requires_explicit_affordable_premium() {

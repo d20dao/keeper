@@ -1,7 +1,7 @@
 //! Optional public chain-log index. Database work never participates in nonce ownership or signing.
 use crate::{
     abi::{Coordinator as C, EpochRegistry as E},
-    proxy::{IMPLEMENTATION_SLOT, ProxyPin, RuntimePins},
+    proxy::{ApprovedNext, IMPLEMENTATION_SLOT, ProxyPin, RuntimePins},
     rpc::{Rpc, quantity},
 };
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -204,6 +204,10 @@ struct Contention(&'static str);
 struct ChainMoving(&'static str);
 #[derive(Debug)]
 struct Review(String);
+/// A proxy moved to its approved next implementation. Nothing needs review: the keeper exits, and its restart
+/// registers the new implementation and indexes the blocks after the move.
+#[derive(Debug)]
+struct Upgrading(String);
 #[derive(Debug)]
 struct Timeout(&'static str);
 macro_rules! class_error {
@@ -216,7 +220,7 @@ macro_rules! class_error {
         impl std::error::Error for $t {}
     )*};
 }
-class_error!(Contention, ChainMoving, Review, Timeout);
+class_error!(Contention, ChainMoving, Review, Upgrading, Timeout);
 /// Why a round did not complete. Only this class is logged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cause {
@@ -234,6 +238,8 @@ enum Cause {
     Contention,
     /// A persistent condition needing operator review: a configuration or implementation change.
     Review,
+    /// A proxy moved to its approved next implementation; the keeper's restart takes over the index. Transient.
+    Upgrade,
     /// The round exceeded ROUND_DEADLINE, or connecting exceeded CONNECT_DEADLINE.
     Timeout,
     Other,
@@ -261,6 +267,9 @@ impl Cause {
             if cause.is::<Review>() {
                 return Self::Review;
             }
+            if cause.is::<Upgrading>() {
+                return Self::Upgrade;
+            }
             if cause.is::<Timeout>() {
                 return Self::Timeout;
             }
@@ -282,6 +291,7 @@ impl Cause {
             Self::ChainMoving => "chain_not_ready",
             Self::Contention => "cursor_contention",
             Self::Review => "review_required",
+            Self::Upgrade => "approved_upgrade",
             Self::Timeout => "timeout",
             Self::Other => "other",
         }
@@ -434,12 +444,13 @@ pub fn spawn(
     settings: Option<Settings>,
     rpc: Rpc,
     pins: RuntimePins,
+    next: ApprovedNext,
     chain_id: u64,
     status: StatusSource,
 ) -> Option<Task> {
     let settings = settings?;
     Some(Task(tokio::spawn(
-        Indexer::new(settings, rpc, pins, chain_id, status).run(),
+        Indexer::new(settings, rpc, pins, next, chain_id, status).run(),
     )))
 }
 /// What one successful round did: the cursor after it and whether the index reached the chain head.
@@ -484,6 +495,7 @@ struct Indexer {
     settings: Settings,
     rpc: Rpc,
     pins: RuntimePins,
+    next: ApprovedNext,
     chain_id: u64,
     status: StatusSource,
     session: Option<Session>,
@@ -499,6 +511,7 @@ impl Indexer {
         settings: Settings,
         rpc: Rpc,
         pins: RuntimePins,
+        next: ApprovedNext,
         chain_id: u64,
         status: StatusSource,
     ) -> Self {
@@ -510,6 +523,7 @@ impl Indexer {
             settings,
             rpc,
             pins,
+            next,
             chain_id,
             status,
             session: None,
@@ -594,6 +608,7 @@ impl Indexer {
             registered,
             rpc,
             pins,
+            next,
             chain_id,
             span,
             follower,
@@ -604,7 +619,7 @@ impl Indexer {
         let pool = &mut session.client;
         if registered.is_none() {
             pool.batch_execute(SCHEMA).await?;
-            *registered = Some(register(pool, rpc, *pins, *chain_id).await?);
+            *registered = Some(register(pool, rpc, *pins, *next, *chain_id).await?);
         }
         let deployment = registered.as_ref().context("Explorer registration")?;
         let before = match follower.as_mut() {
@@ -743,15 +758,19 @@ async fn header(rpc: &Rpc, number: u64) -> Result<Header> {
 struct Deployment {
     first: u64,
     key_hash: B256,
+    /// Every implementation identity keepers started with, from the deployment row: history is attributed from it.
     approved: Vec<RuntimePins>,
+    /// This keeper's approved next implementations: blocks after a move to one of them wait for its restart.
+    next: ApprovedNext,
 }
 async fn register(
     pool: &mut Client,
     rpc: &Rpc,
     pins: RuntimePins,
+    next: ApprovedNext,
     chain: u64,
 ) -> Result<Deployment> {
-    verify_pins(rpc, pins).await?;
+    verify_pins(rpc, pins, next).await?;
     let head = rpc.finalized_head().await?;
     let c = pins.coordinator.proxy;
     let r = pins.registry.proxy;
@@ -808,6 +827,7 @@ async fn register(
         first,
         key_hash,
         approved,
+        next,
     })
 }
 #[derive(Clone)]
@@ -840,11 +860,14 @@ fn log(value: Value) -> Result<Log> {
         data: serde_json::from_value(value["data"].clone())?,
     })
 }
+/// The implementation identity a keeper started with that was active at block `n`. A block after a move to this
+/// keeper's approved next implementation (`next`) is not a review case: it waits for the restart that registers it.
 async fn reviewed_pin(
     rpc: &Rpc,
     proxy: Address,
     n: u64,
     approved: &[RuntimePins],
+    next: Option<B256>,
 ) -> Result<ProxyPin> {
     let tag = format!("0x{n:x}");
     let word: Bytes = serde_json::from_value(
@@ -856,15 +879,28 @@ async fn reviewed_pin(
         "Invalid implementation slot"
     );
     let implementation = Address::from_slice(&word[12..]);
-    let pin = approved
+    let Some(pin) = approved
         .iter()
         .flat_map(|p| [p.coordinator, p.registry])
         .find(|p| p.proxy == proxy && p.implementation == implementation)
-        .ok_or_else(|| {
-            Review(format!(
-                "Unreviewed historical implementation at block {n}: {proxy} -> {implementation}"
-            ))
-        })?;
+    else {
+        if let Some(next) = next {
+            let code: Bytes = serde_json::from_value(
+                rpc.request("eth_getCode", json!([implementation, tag]))
+                    .await?,
+            )?;
+            if keccak256(code) == next {
+                return Err(Upgrading(format!(
+                    "Approved next implementation at block {n}: {proxy} -> {implementation}; indexed after the keeper restarts"
+                ))
+                .into());
+            }
+        }
+        return Err(Review(format!(
+            "Unreviewed historical implementation at block {n}: {proxy} -> {implementation}"
+        ))
+        .into());
+    };
     let (implementation_code, proxy_code) = tokio::try_join!(
         rpc.request("eth_getCode", json!([implementation, tag])),
         rpc.request("eth_getCode", json!([proxy, tag]))
@@ -1038,7 +1074,16 @@ async fn scan(
         if let std::collections::btree_map::Entry::Vacant(entry) =
             reviewed.entry((l.address, l.block))
         {
-            entry.insert(reviewed_pin(rpc, l.address, l.block, &deployment.approved).await?);
+            entry.insert(
+                reviewed_pin(
+                    rpc,
+                    l.address,
+                    l.block,
+                    &deployment.approved,
+                    deployment.next.for_proxy(&pins, l.address),
+                )
+                .await?,
+            );
         }
         let evidence = receipt(l, h, reviewed[&(l.address, l.block)]);
         if l.address == pins.registry.proxy && topic == EpochCommitted::SIGNATURE_HASH {
@@ -1087,7 +1132,14 @@ async fn scan(
     merge_old(&mut refs, old, start, &by_number)?;
     ensure!(refs.len() <= MAX_REQUESTS, "Explorer request batch limit");
     if !refs.is_empty() {
-        reviewed_pin(rpc, pins.coordinator.proxy, end, &deployment.approved).await?;
+        reviewed_pin(
+            rpc,
+            pins.coordinator.proxy,
+            end,
+            &deployment.approved,
+            deployment.next.coordinator,
+        )
+        .await?;
     }
     if reorg || !published.is_empty() {
         let identity = refresh::Identity {
@@ -1101,7 +1153,14 @@ async fn scan(
         let mut deferred = BTreeMap::new();
         merge_old(&mut deferred, page.rows, start, &by_number)?;
         if !deferred.is_empty() {
-            reviewed_pin(rpc, pins.coordinator.proxy, end, &deployment.approved).await?;
+            reviewed_pin(
+                rpc,
+                pins.coordinator.proxy,
+                end,
+                &deployment.approved,
+                deployment.next.coordinator,
+            )
+            .await?;
         }
         let rows = read_requests(rpc, pins, &chain, &c, deployment, end, deferred).await?;
         let records = rows
@@ -1135,7 +1194,7 @@ async fn scan(
     }
     // Once per round, just before the commit: an implementation change anywhere before this point is caught
     // here, and each log was already checked against the implementation active at its own block.
-    verify_pins(rpc, pins).await?;
+    verify_pins(rpc, pins, deployment.next).await?;
     persist(
         pool,
         pins,
@@ -1159,11 +1218,14 @@ async fn scan(
     })
 }
 /// The current implementations must still be the pinned ones. A mismatch needs a reviewed restart; an RPC
-/// failure is only an RPC failure.
-async fn verify_pins(rpc: &Rpc, pins: RuntimePins) -> Result<()> {
-    pins.verify(rpc).await.map_err(|error| {
+/// failure is only an RPC failure. A move to an approved next implementation needs no review: the keeper restarts on
+/// it, and the restarted keeper registers it and indexes on.
+async fn verify_pins(rpc: &Rpc, pins: RuntimePins, next: ApprovedNext) -> Result<()> {
+    pins.verify(rpc, next).await.map_err(|error| {
         if crate::rpc::is_delivery_failure(&error) {
             error
+        } else if let Some(upgrade) = crate::proxy::approved_upgrade(&error) {
+            Upgrading(format!("Explorer pins: {upgrade}")).into()
         } else {
             Review(format!("Explorer pins: {error}")).into()
         }
@@ -1332,7 +1394,7 @@ pub async fn index_once(
     chain_id: u64,
 ) -> Result<()> {
     pool.batch_execute(SCHEMA).await?;
-    let deployment = register(pool, rpc, pins, chain_id).await?;
+    let deployment = register(pool, rpc, pins, ApprovedNext::default(), chain_id).await?;
     scan(pool, rpc, pins, chain_id, &deployment, MAX_BLOCKS).await?;
     Ok(())
 }
@@ -1428,12 +1490,81 @@ mod tests {
             Cause::ChainMoving
         );
         assert_eq!(classify(Review("changed".into()).into()), Cause::Review);
+        assert_eq!(classify(Upgrading("moved".into()).into()), Cause::Upgrade);
         assert_eq!(classify(Timeout("Explorer round").into()), Cause::Timeout);
         // Text that merely mentions a class is not that class.
         assert_eq!(
             classify(anyhow::anyhow!("Explorer cursor changed; retry batch")),
             Cause::Other
         );
+    }
+    #[tokio::test]
+    async fn approved_upgrades_never_need_review_and_each_block_keeps_its_implementation() {
+        // The head is past block 1_010, where the proxy will move.
+        let chain = MockChain::new(2_000, Duration::ZERO);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rpc = Rpc::new(vec![format!("http://{}", listener.local_addr().unwrap())]).unwrap();
+        let server = tokio::spawn(chain.clone().serve(listener));
+        let before = mock_pins();
+        let proxy = before.coordinator.proxy;
+        let next = ApprovedNext {
+            coordinator: Some(keccak256(NEXT_CODE)),
+            registry: None,
+        };
+        verify_pins(&rpc, before, next).await.unwrap();
+        // The proxy moves to the approved next implementation at block 1_010.
+        let moved = Address::repeat_byte(0xc3);
+        *chain.moved.lock().unwrap() = Some((proxy, moved, 1_010));
+        // The keeper still running on the previous identity indexes the blocks before the move as before, and the
+        // move itself is transient, since that keeper restarts: never a review.
+        let history = [before];
+        assert_eq!(
+            reviewed_pin(&rpc, proxy, 1_009, &history, next.coordinator)
+                .await
+                .unwrap(),
+            before.coordinator
+        );
+        let after = reviewed_pin(&rpc, proxy, 1_010, &history, next.coordinator)
+            .await
+            .unwrap_err();
+        assert_eq!(Cause::of(&after), Cause::Upgrade);
+        let current = verify_pins(&rpc, before, next).await.unwrap_err();
+        assert_eq!(Cause::of(&current), Cause::Upgrade);
+        // The same move without an approval is a review case, as before.
+        let unapproved = reviewed_pin(&rpc, proxy, 1_010, &history, None)
+            .await
+            .unwrap_err();
+        assert_eq!(Cause::of(&unapproved), Cause::Review);
+        let unapproved = verify_pins(&rpc, before, ApprovedNext::default())
+            .await
+            .unwrap_err();
+        assert_eq!(Cause::of(&unapproved), Cause::Review);
+        // The restarted keeper adds its identity to the deployment row: each block is attributed to its own.
+        let upgraded = RuntimePins {
+            coordinator: ProxyPin {
+                implementation: moved,
+                implementation_code_hash: keccak256(NEXT_CODE),
+                ..before.coordinator
+            },
+            ..before
+        };
+        verify_pins(&rpc, upgraded, next).await.unwrap();
+        let history = [before, upgraded];
+        for approval in [next.coordinator, None] {
+            assert_eq!(
+                reviewed_pin(&rpc, proxy, 1_009, &history, approval)
+                    .await
+                    .unwrap(),
+                before.coordinator
+            );
+            assert_eq!(
+                reviewed_pin(&rpc, proxy, 1_010, &history, approval)
+                    .await
+                    .unwrap(),
+                upgraded.coordinator
+            );
+        }
+        server.abort();
     }
     fn test_status() -> StatusSource {
         StatusSource {
@@ -1446,7 +1577,17 @@ mod tests {
     async fn disabled_feature_creates_no_task_or_rpc() {
         assert!(Settings::parse(None).unwrap().is_none());
         let rpc = Rpc::new(vec!["http://127.0.0.1:1".into()]).unwrap();
-        assert!(spawn(None, rpc, RuntimePins::default(), 31337, test_status()).is_none());
+        assert!(
+            spawn(
+                None,
+                rpc,
+                RuntimePins::default(),
+                ApprovedNext::default(),
+                31337,
+                test_status()
+            )
+            .is_none()
+        );
         assert!(
             Settings::parse(Some("not-a-connection-secret".into()))
                 .err()
@@ -1538,6 +1679,7 @@ mod tests {
             Some(Settings(options)),
             Rpc::new(vec!["http://127.0.0.1:1".into()]).unwrap(),
             RuntimePins::default(),
+            ApprovedNext::default(),
             31337,
             test_status(),
         )
@@ -1841,10 +1983,13 @@ mod tests {
         pub limited_until: std::sync::Mutex<Option<tokio::time::Instant>>,
         pub registrations: std::sync::atomic::AtomicUsize,
         pub requests: std::sync::atomic::AtomicUsize,
+        /// An upgrade: from this block on, this proxy's slot names this implementation, whose code is NEXT_CODE.
+        pub moved: std::sync::Mutex<Option<(Address, Address, u64)>>,
     }
     const BLOCK_MS: u64 = 500;
     const PROXY_CODE: [u8; 2] = [0x60, 0x01];
     const IMPLEMENTATION_CODE: [u8; 2] = [0x60, 0x02];
+    const NEXT_CODE: [u8; 2] = [0x60, 0x03];
     pub(super) fn mock_pins() -> RuntimePins {
         let pin = |proxy: u8, implementation: u8| ProxyPin {
             proxy: Address::repeat_byte(proxy),
@@ -1868,6 +2013,7 @@ mod tests {
                 limited_until: std::sync::Mutex::new(None),
                 registrations: 0.into(),
                 requests: 0.into(),
+                moved: std::sync::Mutex::new(None),
             })
         }
         pub fn head(&self) -> u64 {
@@ -1906,18 +2052,29 @@ mod tests {
                 "eth_getStorageAt" => {
                     let proxy: Address = serde_json::from_value(params[0].clone()).unwrap();
                     let pins = mock_pins();
-                    let implementation = if proxy == pins.coordinator.proxy {
-                        pins.coordinator.implementation
-                    } else {
-                        pins.registry.implementation
+                    let block = u64::from_str_radix(
+                        params[2]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim_start_matches("0x"),
+                        16,
+                    )
+                    .unwrap_or_else(|_| self.head());
+                    let implementation = match *self.moved.lock().unwrap() {
+                        Some((moved, to, from)) if moved == proxy && block >= from => to,
+                        _ if proxy == pins.coordinator.proxy => pins.coordinator.implementation,
+                        _ => pins.registry.implementation,
                     };
                     json!(format!("0x{:0>64}", hex::encode(implementation)))
                 }
                 "eth_getCode" => {
                     let address: Address = serde_json::from_value(params[0].clone()).unwrap();
                     let pins = mock_pins();
+                    let moved = self.moved.lock().unwrap().map(|(_, to, _)| to);
                     if address == pins.coordinator.proxy || address == pins.registry.proxy {
                         json!(format!("0x{}", hex::encode(PROXY_CODE)))
+                    } else if moved == Some(address) {
+                        json!(format!("0x{}", hex::encode(NEXT_CODE)))
                     } else {
                         json!(format!("0x{}", hex::encode(IMPLEMENTATION_CODE)))
                     }
@@ -2118,6 +2275,7 @@ mod tests {
             Some(settings),
             Rpc::new(vec![rpc_url]).unwrap(),
             mock_pins(),
+            ApprovedNext::default(),
             chain_id,
             StatusSource {
                 db: db.clone(),

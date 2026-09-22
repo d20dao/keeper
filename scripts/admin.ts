@@ -101,7 +101,7 @@ async function main(){
       details={previousImplementation:implementation,implementation:next,runtimeCodeHash,initializer:data==="0x"?null:"initializeRecipeRegistry()",
         registersRecipes:data==="0x"?[]:BUILTIN_EPOCH_RECIPES.map(r=>({id:r.id,provider:r.provider,description:r.description,canonicalRequest:r.canonicalRequest})),
         keeperPin:{EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH:runtimeCodeHash},manifestUpdate:{epochImplementation:next,epochImplementationCodeHash:runtimeCodeHash}};
-      note="Keepers pinned to the previous implementation stop sending once this executes: set EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH and restart them with the matching keeper image. "+
+      note="A keeper recreated beforehand with APPROVED_NEXT_REGISTRY_IMPLEMENTATION_CODE_HASH set to this hash keeps sending until this executes, then exits with status 75 for its supervisor to restart it on the new code; move the hash into EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH afterwards. Without that preparation, keepers pinned to the previous implementation stop sending once this executes: set EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH and restart them with the matching keeper image. "+
         "On mainnet this is the first transaction of the Safe batch: upgrade-coordinator, schedule-catalog and any backup-committer follow it, because the coordinator's keeper-share path reads isAuthorizedCommitter on this implementation.";
     } else if(action==="upgrade-coordinator"){
       if(!values.implementation)throw new Stop("Provide --implementation <address>");
@@ -120,7 +120,7 @@ async function main(){
         keeperPin:{EXPECTED_IMPLEMENTATION_CODE_HASH:runtimeCodeHash},manifestUpdate:{coordinatorImplementation:next,coordinatorImplementationCodeHash:runtimeCodeHash}};
       note="Each accepted proof pays its keeper share to the submitting wallet when the registry authorizes it (the committer or an allowed backup committer) and to committer() otherwise. Requests, refunds, retries, the treasury share and the permissionless submission rule are unchanged. "+
         (registryReady?"":"Place this transaction after the registry upgradeToAndCall in the same Safe batch of the two upgrades: until the registry answers isAuthorizedCommitter, every share falls back to committer(). ")+
-        "Keepers pinned to the previous implementation stop sending once this executes: set EXPECTED_IMPLEMENTATION_CODE_HASH and restart them with the matching keeper image.";
+        "A keeper recreated beforehand with APPROVED_NEXT_IMPLEMENTATION_CODE_HASH set to this hash keeps sending until this executes, then exits with status 75 for its supervisor to restart it on the new code; move the hash into EXPECTED_IMPLEMENTATION_CODE_HASH afterwards. Without that preparation, keepers pinned to the previous implementation stop sending once this executes: set EXPECTED_IMPLEMENTATION_CODE_HASH and restart them with the matching keeper image.";
     } else if(action==="register-recipe"){
       if(!values.file)throw new Stop("Provide --file <recipe.json>");
       let checked;

@@ -427,8 +427,13 @@ impl Journal {
             .await?;
         Ok(())
     }
-    pub async fn batch_excluded(&self, id: &str) -> Result<bool> {
-        Ok(self.meta(&format!("batch_exclude:{id}")).await?.is_some())
+    /// Every prepared request left out of batches, in one read.
+    pub async fn batch_excluded_prepared(&self) -> Result<std::collections::HashSet<String>> {
+        Ok(sqlx::query_scalar("SELECT jobs.id FROM jobs JOIN meta ON meta.key='batch_exclude:'||jobs.id WHERE jobs.state='prepared' AND jobs.call IS NOT NULL")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .collect())
     }
     /// Ordered member request IDs of a batch job; empty when the key is unknown.
     pub async fn batch_members(&self, job: &str) -> Result<Vec<String>> {
@@ -705,8 +710,12 @@ impl Journal {
         Ok(())
     }
     /// Receipt outcome for a batch nonce: every attempt of the nonce, the nonce floor and
-    /// each member's terminal state commit together. The caller must account for exactly
-    /// the journaled member list; a partial resolution is refused.
+    /// each member's state commit together. The caller must account for exactly the journaled
+    /// member list; a partial resolution is refused. A member resolved to `prepared` (a live
+    /// member of a reverted batch) keeps its journaled single calldata, is left out of later
+    /// batches and loses its preflight backoff in the same commit, so it is resent one at a time
+    /// at once and never re-enters a batch; one without calldata returns to `pending` to be
+    /// proven again.
     pub async fn resolve_nonce_batch(
         &self,
         nonce: i64,
@@ -734,15 +743,32 @@ impl Journal {
         sqlx::query("INSERT INTO meta(key,value) VALUES('nonce_floor',?) ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(meta.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)")
             .bind(next.to_string()).execute(&mut *tx).await?;
         for (id, state) in states {
-            let updated = sqlx::query("UPDATE jobs SET state=? WHERE id=?")
-                .bind(state)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            let updated = if *state == "prepared" {
+                sqlx::query("UPDATE jobs SET state=CASE WHEN call IS NULL THEN 'pending' ELSE 'prepared' END WHERE id=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?
+            } else {
+                sqlx::query("UPDATE jobs SET state=? WHERE id=?")
+                    .bind(state)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?
+            };
             ensure!(
                 updated.rows_affected() == 1,
                 "Batch member {id} missing from journal"
             );
+            if *state == "prepared" {
+                sqlx::query("INSERT OR IGNORE INTO meta(key,value) VALUES(?,'1')")
+                    .bind(format!("batch_exclude:{id}"))
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM meta WHERE key=?")
+                    .bind(format!("preflight_retry:{id}"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         tx.commit().await?;
         Ok(())
@@ -1535,6 +1561,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bodies, 0);
+        j.pool.close().await;
+    }
+    #[tokio::test]
+    async fn a_reverted_batch_returns_its_live_members_for_single_resends_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch-revert.sqlite");
+        let j = Journal::open(&path, "scope").await.unwrap();
+        for id in ["1", "2", "3", "4"] {
+            j.discovered(id, 100, "5").await.unwrap();
+            j.prepared(id, "proof", "call").await.unwrap();
+        }
+        let members = ids(&["1", "2", "3"]);
+        let key = batch_key(&members).unwrap();
+        j.preflight_backoff_many(&members, 50).await.unwrap();
+        j.signed_batch(&batch_attempt(&key, 7, "h1", "fulfill_batch"), &members)
+            .await
+            .unwrap();
+        // Member 3 lost its calldata (it can only happen by hand): it is proven again instead.
+        sqlx::query("UPDATE jobs SET call=NULL WHERE id='3'")
+            .execute(&j.pool)
+            .await
+            .unwrap();
+        let outcome = vec![
+            ("1".to_string(), "served"),
+            ("2".to_string(), "prepared"),
+            ("3".to_string(), "prepared"),
+        ];
+        // A crash on the last write leaves the batch live and nothing excluded.
+        sqlx::raw_sql("CREATE TRIGGER refuse_exclusion BEFORE INSERT ON meta WHEN NEW.key='batch_exclude:3' BEGIN SELECT RAISE(ABORT,'injected crash'); END;")
+            .execute(&j.pool).await.unwrap();
+        assert!(j.resolve_nonce_batch(7, &key, &outcome).await.is_err());
+        j.pool.close().await;
+        let j = Journal::open(&path, "scope").await.unwrap();
+        assert_eq!(j.unresolved().await.unwrap().len(), 1);
+        assert_eq!(j.job("2").await.unwrap().unwrap().state, "signed");
+        assert!(j.batch_excluded_prepared().await.unwrap().is_empty());
+        assert!(j.meta("batch_exclude:2").await.unwrap().is_none());
+        sqlx::query("DROP TRIGGER refuse_exclusion")
+            .execute(&j.pool)
+            .await
+            .unwrap();
+        j.resolve_nonce_batch(7, &key, &outcome).await.unwrap();
+        j.pool.close().await;
+        let j = Journal::open(&path, "scope").await.unwrap();
+        assert!(j.unresolved().await.unwrap().is_empty());
+        assert_eq!(j.nonce_floor().await.unwrap(), 8);
+        assert_eq!(j.job("1").await.unwrap().unwrap().state, "served");
+        let resent = j.job("2").await.unwrap().unwrap();
+        assert_eq!(
+            (resent.state.as_str(), resent.call.as_deref()),
+            ("prepared", Some("call"))
+        );
+        assert_eq!(j.job("3").await.unwrap().unwrap().state, "pending");
+        // Both stay out of batches; the resend is due at once, ahead of the batch's own backoff.
+        assert!(j.meta("batch_exclude:2").await.unwrap().is_some());
+        assert!(j.meta("batch_exclude:3").await.unwrap().is_some());
+        assert_eq!(
+            j.batch_excluded_prepared().await.unwrap(),
+            ["2".to_string()].into()
+        );
+        let due: Vec<String> = j
+            .prepared_due(0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|job| job.id)
+            .collect();
+        assert_eq!(due, ["2", "4"]);
+        assert_eq!(
+            j.meta("preflight_retry:1").await.unwrap().as_deref(),
+            Some("50")
+        );
+        // The resend takes its own nonce; the old batch never counts as live for it.
+        j.signed(&batch_attempt("2", 8, "single", "fulfill"))
+            .await
+            .unwrap();
+        assert_eq!(j.job("2").await.unwrap().unwrap().state, "signed");
         j.pool.close().await;
     }
     #[tokio::test]

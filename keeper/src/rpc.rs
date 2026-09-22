@@ -391,9 +391,25 @@ impl Rpc {
     /// endpoint that answers a batch with anything but a matching array is asked the same calls one by one from
     /// then on.
     pub async fn batch(&self, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
+        Ok(self.batch_from(calls).await?.1)
+    }
+    /// `batch`, also naming the endpoint that answered, so that a follow-up read can ask that same endpoint.
+    pub async fn batch_from(&self, calls: &[(&str, Value)]) -> Result<(usize, Vec<Value>)> {
         ensure!(!calls.is_empty() && calls.len() <= 32, "RPC batch size");
         let label = format!("{} batch", calls[0].0);
-        self.hedged(&label, |i| self.batch_at(i, calls)).await
+        self.hedged(&label, |i| async move {
+            Ok((i, self.batch_at(i, calls).await?))
+        })
+        .await
+    }
+    /// Calls sent to the one endpoint an earlier `batch_from` named, so a follow-up read shares that answer's view of
+    /// the chain. No other endpoint is tried.
+    pub async fn batch_on(&self, endpoint: usize, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
+        ensure!(
+            endpoint < self.urls.len() && !calls.is_empty() && calls.len() <= 32,
+            "RPC batch size"
+        );
+        self.batch_at(endpoint, calls).await
     }
     /// Run one idempotent read against the endpoints until one answers.
     async fn hedged<T, F, Fut>(&self, label: &str, attempt: F) -> Result<T>

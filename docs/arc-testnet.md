@@ -31,7 +31,7 @@ The deploy mode prints a plan by default. Its transactions are priced from curre
 
 ## Arc mainnet
 
-Every mainnet command requires `--mainnet`. `prepare` and `deploy` also require `DAO_TREASURY` in the env file to equal the `arc-mainnet` owner in chains.json and that owner to have code (the DAO treasury Safe). The Safe becomes owner and fee recipient of every proxy, and the 5,000 bps keeper share splits each fee evenly between the keeper and the treasury. Use a separate operator directory so mainnet keeper and VRF keys never mix with testnet ones, and back it up before deploying.
+Every mainnet command requires `--mainnet`. `prepare` and `deploy` also require `DAO_TREASURY` in the env file to equal the `arc-mainnet` owner in chains.json and that owner to have code (the DAO treasury Safe). The Safe becomes owner and fee recipient of every proxy. Deployment sets a 5,000 bps keeper share. Since 2026-09-18 Arc Mainnet pays 6,000 bps: 60% of each fee to the keeper and 40% to the treasury (`configurationUpdates` in deployments/arc-mainnet.json). Use a separate operator directory so mainnet keeper and VRF keys never mix with testnet ones, and back it up before deploying.
 
 ```sh
 node scripts/create2-deploy.ts prepare --chain arc-mainnet --mainnet --env /secure/deployer.env --operator-directory ~/.config/d20dao-arc-mainnet --new-operator

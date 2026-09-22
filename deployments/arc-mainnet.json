@@ -8,13 +8,13 @@
   "feeRecipient": "0xB57f656149749eff6b496dF090336491f977E744",
   "keeper": "0xA5496Bb35905Bfe0Bac7D23Ca18c008F5E6Eb13e",
   "epochImplementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
-  "coordinatorImplementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+  "coordinatorImplementation": "0xD20da000125643B4db5A6A36A3b853c17745DF44",
   "clientImplementation": "0xD20DA00A872acfDe3e4721Fc1051BD23CC84B66b",
   "registry": "0xd20Da048C1A68fa3Bc0B5f5Bc454D1530062C82D",
   "coordinator": "0xd20da057469C45928912d983F45790C41e290571",
   "client": "0xD20da0048aED2BBb9f0e7078Bc452815D626D29d",
   "epochImplementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
-  "coordinatorImplementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+  "coordinatorImplementationCodeHash": "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c",
   "clientImplementationCodeHash": "0xb30bd76592fc6def770bf8599a4dcfa827ce4fe1e951000d462c74d488b53e91",
   "registryCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
   "coordinatorCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
@@ -25,13 +25,14 @@
     "106861217428123069638593390470684428889612858147734117576896967180093199754084",
     "10897317540907659086234511645378516972993287419389220780878761731090049729846"
   ],
-  "minFeeWei": "80000000000000000",
-  "feeMultiplier": 5,
+  "minFeeWei": "20000000000000000",
+  "feeMultiplier": 3,
   "fulfillGasOverhead": 300000,
   "refundBps": 10000,
-  "keeperFeeBps": 5000,
+  "keeperFeeBps": 6000,
   "initialKeeperFeeBps": 5000,
-  "contractSourceCommit": "de5f82e",
+  "initialMinFeeWei": "80000000000000000",
+  "contractSourceCommit": "f38aaf8",
   "deploymentScriptCommit": "f93895cabaa4e26ce8abc60103f45c8ef27c3bcc",
   "createdAt": "2026-09-17T00:19:45.109Z",
   "transactions": [
@@ -84,7 +85,30 @@
       "gasCostWei": "4899189341313072"
     }
   ],
-  "configurationUpdates": [],
+  "configurationUpdates": [
+    {
+      "contract": "coordinator",
+      "proxy": "0xd20da057469C45928912d983F45790C41e290571",
+      "previous": {
+        "minFeeWei": "80000000000000000",
+        "feeMultiplier": 5,
+        "fulfillGasOverhead": 300000,
+        "keeperFeeBps": 5000
+      },
+      "new": {
+        "minFeeWei": "20000000000000000",
+        "feeMultiplier": 3,
+        "fulfillGasOverhead": 300000,
+        "keeperFeeBps": 6000
+      },
+      "reason": "Mainnet repricing: minimum fee 0.02 USDC, multiplier 3, keeper share 60%",
+      "updatedAt": "2026-09-18T16:46:38.000Z",
+      "update": {
+        "hash": "0xaf6a4f5a5e0f5618334ff62a3f0b44e75a4dafdd8f5774c0561e053aa8dd9ab9",
+        "block": 21528601
+      }
+    }
+  ],
   "implementationUpgrades": [
     {
       "contract": "registry",
@@ -122,6 +146,25 @@
       "upgrade": {
         "hash": "0x513236865d253302e795ec53994e062947ceef5a9494ba48b00b5bcc1535f8a4",
         "block": 21406486
+      }
+    },
+    {
+      "contract": "coordinator",
+      "proxy": "0xd20da057469C45928912d983F45790C41e290571",
+      "previousImplementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+      "previousImplementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+      "implementation": "0xD20da000125643B4db5A6A36A3b853c17745DF44",
+      "implementationCodeHash": "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c",
+      "contractSourceCommit": "f38aaf8",
+      "deployment": {
+        "hash": "0x04d58f8c032911d8a189c24370664040030e710584d13ea8ef4e1e51639a0106",
+        "block": 22204468
+      },
+      "reason": "Batch gas guard: fulfillRandomnessBatch budgets every served member's callback before revealing any result; setPricing rejects a zero minimum fee with a zero multiplier",
+      "upgradedAt": "2026-09-22T16:36:18.000Z",
+      "upgrade": {
+        "hash": "0x60d733c4b7bb2f515155ebc3e5b1f3154f78a00cbf2bd96f990548f3f0988703",
+        "block": 22206935
       }
     }
   ],

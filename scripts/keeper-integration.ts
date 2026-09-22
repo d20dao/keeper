@@ -568,9 +568,11 @@ try {
     console.log(JSON.stringify({providerCircuitBreaker:{provider:downProvider,trippedAfter:3,skippedEpoch:String(skipped),requestsToOpenGateway:0,fallbackAttempt:1}}));
   }
 
-  // Batched fulfillment. MAX_GAS uses the documented mainnet value so eight members fit one transaction.
+  // Batched fulfillment. On the guarded coordinator the estimate already budgets every served member and the keeper
+  // reserves each callback's budget on top, about 1M gas per 200,000-gas member, so MAX_GAS=13000000 lets eight
+  // members fit one transaction.
   const batchEpoch=await registry.epochForBlock(await ethers.provider.getBlockNumber())+1n;
-  const batchDb="migrated.sqlite",batchEnv={...reviewedPins,MAX_GAS:"6000000"};
+  const batchDb="migrated.sqlite",batchEnv={...reviewedPins,MAX_GAS:"13000000"};
   const toCoordinator=(hex:string,selector:string)=>{const tx=ethers.Transaction.from(hex);return tx.to?.toLowerCase()===coordinatorAddress.toLowerCase()&&tx.data.startsWith(selector);};
   const isBatchRaw=(hex:string)=>toCoordinator(hex,batchSelector),isSingleRaw=(hex:string)=>toCoordinator(hex,singleSelector);
   const coordinatorEvents=(receipt:{logs:readonly {address:string;topics:readonly string[];data:string}[]},name:string)=>receipt.logs.filter(l=>l.address.toLowerCase()===coordinatorAddress.toLowerCase()).map(l=>rng.interface.parseLog(l)).filter(e=>e?.name===name).map(e=>e!);

@@ -83,15 +83,20 @@ describe("Base-fee pricing",()=>{
   it("bounds pricing parameters, restricts the setter to the owner and never changes the protocol configuration hash",async()=>{
     const c=await networkHelpers.loadFixture(fixture),configuration=await c.rng.protocolConfigurationHash();
     await expect(c.rng.connect(c.user).setPricing(MIN,5,300000)).to.be.revertedWithCustomError(c.rng,"OwnableUnauthorizedAccount").withArgs(c.user.address);
-    for(const [fee,multiplier,overhead] of [[10n**19n+1n,5,300000],[MIN,21,300000],[MIN,5,99_999],[MIN,5,2_000_001]] as const)
+    // A zero minimum fee with a zero multiplier would make requests free.
+    for(const [fee,multiplier,overhead] of [[10n**19n+1n,5,300000],[MIN,21,300000],[MIN,5,99_999],[MIN,5,2_000_001],[0n,0,100_000],[0n,0,300_000]] as const)
       await expect(c.rng.setPricing(fee,multiplier,overhead)).to.be.revertedWithCustomError(c.rng,"InvalidConfig");
+    expect(Array.from(await c.rng.pricing())).to.deep.equal([MIN,5n,300000n]);
     await expect(c.rng.setPricing(10n**19n,20,2_000_000)).to.emit(c.rng,"PricingChanged").withArgs(10n**19n,20,2_000_000);
     expect(Array.from(await c.rng.pricing())).to.deep.equal([10n**19n,20n,2000000n]);
     expect(await c.rng.quoteFeeAt(1_000_000,BASE)).to.equal(20n*BASE*3_000_000n);
-    await expect(c.rng.setPricing(0n,0,100_000)).to.emit(c.rng,"PricingChanged").withArgs(0n,0,100_000);
-    expect(Array.from(await c.rng.pricing())).to.deep.equal([0n,0n,100000n]);
-    expect(await c.rng.quoteFeeAt(GAS,BASE)).to.equal(0n);
-    expect(await c.rng.minFee()).to.equal(0n);expect(await c.rng.initialMinFee()).to.equal(MIN);
+    // The lowest accepted pricing: no minimum, multiplier 1 over the base fee; a flat fee needs a nonzero minimum.
+    await expect(c.rng.setPricing(0n,1,100_000)).to.emit(c.rng,"PricingChanged").withArgs(0n,1,100_000);
+    expect(Array.from(await c.rng.pricing())).to.deep.equal([0n,1n,100000n]);
+    expect(await c.rng.quoteFeeAt(GAS,BASE)).to.equal(BASE*(100_000n+BigInt(GAS)));
+    await expect(c.rng.setPricing(1n,0,100_000)).to.emit(c.rng,"PricingChanged").withArgs(1n,0,100_000);
+    expect(await c.rng.quoteFeeAt(GAS,BASE)).to.equal(1n);
+    expect(await c.rng.minFee()).to.equal(1n);expect(await c.rng.initialMinFee()).to.equal(MIN);
     expect(await c.rng.protocolConfigurationHash()).to.equal(configuration);
   });
 });

@@ -26,6 +26,8 @@ contract D20VRFCoordinator is VRF, ReentrancyGuard, ID20VRF, Ownable2StepUpgrade
     uint32 public constant MAX_FULFILL_GAS_OVERHEAD = 2_000_000;
     uint16 public constant MIN_REFUND_BPS = 5000;
     uint256 private constant CALLBACK_RESERVE = 140_000;
+    // Budget per batch member outside its callback (measured: ~0.2M typical, ~0.27M worst case); the rest is headroom.
+    uint256 private constant BATCH_MEMBER_OVERHEAD = 400_000;
     bytes32 public constant SEED_DOMAIN = keccak256("D20_VRF_SEED");
     bytes32 public constant TRANSCRIPT_DOMAIN = keccak256("D20_VRF_TRANSCRIPT");
     bytes32 public constant CONFIG_DOMAIN = keccak256("D20_VRF_CONFIG");
@@ -205,6 +207,8 @@ contract D20VRFCoordinator is VRF, ReentrancyGuard, ID20VRF, Ownable2StepUpgrade
     /// @notice Bounded pricing update. Open requests keep settling from the fee they escrowed.
     function setPricing(uint256 nextMinFee, uint16 multiplier, uint32 overhead) external onlyOwner {
         if (nextMinFee > MAX_MIN_FEE || multiplier > MAX_FEE_MULTIPLIER || overhead < MIN_FULFILL_GAS_OVERHEAD || overhead > MAX_FULFILL_GAS_OVERHEAD) revert InvalidConfig();
+        // Requests are never free: a zero minimum fee needs a base-fee multiplier.
+        if (nextMinFee == 0 && multiplier == 0) revert InvalidConfig();
         minFee = nextMinFee; feeMultiplier = multiplier; fulfillGasOverhead = overhead;
         emit PricingChanged(nextMinFee, multiplier, overhead);
     }
@@ -399,9 +403,22 @@ contract D20VRFCoordinator is VRF, ReentrancyGuard, ID20VRF, Ownable2StepUpgrade
     /// @notice Fulfill up to MAX_FULFILL_BATCH prepared requests in one transaction. Members that are already fulfilled,
     ///         refunded or past their deadline are skipped with FulfillmentSkipped; every other member runs exactly like
     ///         fulfillRandomness, so a wrong seed, invalid proof or unready request reverts the whole batch.
+    /// @dev Requires gas for every member that will be served before any result is revealed:
+    ///      140000 + Σ(callbackGasLimit + callbackGasLimit / 63 + 400000), else InsufficientCallbackGas.
     function fulfillRandomnessBatch(uint256[] calldata ids, Proof[] calldata proofs) external nonReentrant {
         uint256 count = ids.length;
         if (count == 0 || count > MAX_FULFILL_BATCH || count != proofs.length) revert InvalidBatch();
+        // A callback sees the results stored before it. Budget every served member's full callback up front, so no
+        // callback, however much of its own budget it burns, can starve a later member and revert revealed results.
+        // Skipped members stay skipped for the whole transaction, so they need no budget.
+        uint256 need = CALLBACK_RESERVE;
+        for (uint256 i; i < count; ++i) {
+            StoredRequest storage r = _request(ids[i]);
+            if (r.fulfilled || r.refunded || block.timestamp > r.deadline) continue;
+            uint256 limit = r.callbackGasLimit;
+            need += limit + limit / 63 + BATCH_MEMBER_OVERHEAD;
+        }
+        if (gasleft() < need) revert InsufficientCallbackGas();
         for (uint256 i; i < count; ++i) {
             StoredRequest storage r = _request(ids[i]);
             uint8 reason = r.fulfilled ? 1 : r.refunded ? 2 : block.timestamp > r.deadline ? 3 : 0;

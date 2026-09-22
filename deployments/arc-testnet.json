@@ -8,13 +8,13 @@
   "feeRecipient": "0xcA35c280c5DF22958Adb74DD03911C8A0ec3eA03",
   "keeper": "0x61659d9A9A85dA07C36e7d1B35CF0d96CF199Cac",
   "epochImplementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
-  "coordinatorImplementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+  "coordinatorImplementation": "0xD20da000125643B4db5A6A36A3b853c17745DF44",
   "clientImplementation": "0xD20DA00A872acfDe3e4721Fc1051BD23CC84B66b",
   "registry": "0xD20Da00B47A7cD2211dC4683E306913b05903756",
   "coordinator": "0xd20DA0FF9087d053f0291524Eac12abA1ADBd945",
   "client": "0xD20da026090B8472579a2B93030F1fC4c94807F1",
   "epochImplementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
-  "coordinatorImplementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+  "coordinatorImplementationCodeHash": "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c",
   "clientImplementationCodeHash": "0xb30bd76592fc6def770bf8599a4dcfa827ce4fe1e951000d462c74d488b53e91",
   "registryCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
   "coordinatorCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
@@ -31,7 +31,7 @@
   "refundBps": 10000,
   "keeperFeeBps": 5000,
   "initialKeeperFeeBps": 5000,
-  "contractSourceCommit": "da1bded",
+  "contractSourceCommit": "f38aaf8",
   "deploymentScriptCommit": "640b60cb992a7e3add1efe8e7b392341732ea004",
   "createdAt": "2026-09-16T19:05:46.864Z",
   "transactions": [
@@ -143,6 +143,25 @@
       },
       "reason": "Keeper share paid to the authorized wallet that submits the accepted proof",
       "upgradedAt": "2026-09-17T22:36:53.525Z"
+    },
+    {
+      "contract": "coordinator",
+      "proxy": "0xd20DA0FF9087d053f0291524Eac12abA1ADBd945",
+      "previousImplementation": "0xd20da0DADa4352A1a9722be43a2D85923443458c",
+      "previousImplementationCodeHash": "0x8c592609fcb15bc512a91a5cdf6b1ddbe994f3a8b30793fc3967a19b69c1cd0d",
+      "implementation": "0xD20da000125643B4db5A6A36A3b853c17745DF44",
+      "implementationCodeHash": "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c",
+      "contractSourceCommit": "f38aaf8",
+      "deployment": {
+        "hash": "0xaf52decb9de65c52245d5bb8efbfd87d43451138b8b1211e56d6618f0ccd9ab6",
+        "block": 63437730
+      },
+      "upgrade": {
+        "hash": "0xd2762144d0d0277786d655d7d2ccee12bde76de01537c97a6002aeef3f11c406",
+        "block": 63437914
+      },
+      "reason": "Batch gas guard: fulfillRandomnessBatch budgets every served member's callback before revealing any result; setPricing rejects a zero minimum fee with a zero multiplier",
+      "upgradedAt": "2026-09-22T14:53:53.000Z"
     }
   ],
   "consumerAccess": {

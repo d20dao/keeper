@@ -2,7 +2,11 @@ use alloy_primitives::U256;
 use anyhow::{Context, Result};
 use d20dao_keeper::{config::Config, prover, worker::Worker};
 use fs2::FileExt;
-use std::{fs::OpenOptions, path::Path};
+use std::{fs::OpenOptions, path::Path, process::ExitCode};
+
+/// Startup attempts while an approved upgrade propagates across the RPC endpoints, one second apart; a disagreement
+/// that outlasts them fails startup as any disagreement always has.
+const UPGRADE_SETTLE_ATTEMPTS: u32 = 10;
 
 #[cfg(unix)]
 struct Shutdown {
@@ -51,7 +55,7 @@ fn rate_limit_pause(attempt: u32) -> std::time::Duration {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     tracing_subscriber::fmt()
         .json()
         .with_writer(std::io::stderr)
@@ -150,12 +154,14 @@ async fn main() -> Result<()> {
                 .open(cfg.db.with_extension("lock"))?;
             FileExt::try_lock_exclusive(&lock).context("Another keeper holds this journal lock")?;
             // Startup verifies every endpoint and the pins; while every endpoint is rate limiting it waits and
-            // tries again instead of exiting, since a restart would only add to the load.
+            // tries again instead of exiting, since a restart would only add to the load. It also tries again, for a
+            // bounded time, while endpoints still disagree about an approved upgrade that is taking effect.
             let mut starts = 0u32;
+            let mut settling = 0u32;
             let mut worker = loop {
                 let attempt = tokio::select! {
                     biased;
-                    signal = shutdown.wait() => { signal?; return Ok(()); },
+                    signal = shutdown.wait() => { signal?; return Ok(ExitCode::SUCCESS); },
                     result = tokio::time::timeout(std::time::Duration::from_secs(20), Worker::new(cfg.clone())) => {
                         result.context("Keeper startup exceeded 20 second time budget")?
                     }
@@ -170,8 +176,22 @@ async fn main() -> Result<()> {
                         );
                         tokio::select! {
                             biased;
-                            signal = shutdown.wait() => { signal?; return Ok(()); },
+                            signal = shutdown.wait() => { signal?; return Ok(ExitCode::SUCCESS); },
                             _ = tokio::time::sleep(rate_limit_pause(starts)) => {}
+                        }
+                    }
+                    Err(error)
+                        if !cfg.once
+                            && settling < UPGRADE_SETTLE_ATTEMPTS
+                            && d20dao_keeper::proxy::upgrade_in_progress(&error) =>
+                    {
+                        settling += 1;
+                        tracing::warn!(error=%error,attempt=settling,
+                            "An approved implementation upgrade is taking effect on the RPC endpoints; starting again once they agree");
+                        tokio::select! {
+                            biased;
+                            signal = shutdown.wait() => { signal?; return Ok(ExitCode::SUCCESS); },
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                         }
                     }
                     Err(error) => return Err(error),
@@ -249,6 +269,25 @@ async fn main() -> Result<()> {
                     },
                     result = &mut tick => result,
                 };
+                if let Some(upgrade) = worker.approved_upgrade() {
+                    // Not a failed tick and no error notice: this process signs and sends nothing more, and the
+                    // supervisor's restart runs every startup check against the new implementation. The journal is
+                    // left as any interrupted tick leaves it, and the restart reconciles it.
+                    tracing::warn!(service=upgrade.service.name(),proxy=%upgrade.proxy,from=%upgrade.from,to=%upgrade.to,
+                        code_hash=%upgrade.code_hash,exit_code=d20dao_keeper::proxy::APPROVED_UPGRADE_EXIT,
+                        "Keeper exiting for a restart on the approved next implementation");
+                    drop(subscription.take());
+                    drop(telemetry.take());
+                    drop(explorer.take());
+                    drop(telegram.take());
+                    // An epoch source fetch still in flight saves its packet first, as at any shutdown; the restart
+                    // retries one that failed.
+                    if let Err(error) = worker.stop_epoch_fetch().await {
+                        tracing::warn!(error=%error,"Epoch source fetch ended with an error during the restart");
+                    }
+                    worker.journal.pool.close().await;
+                    return Ok(ExitCode::from(d20dao_keeper::proxy::APPROVED_UPGRADE_EXIT));
+                }
                 if let Err(error) = &result
                     && !cfg.once
                     && !stopping
@@ -343,5 +382,5 @@ async fn main() -> Result<()> {
             "d20dao-keeper run [--once]\nd20dao-keeper health --db <path> [--max-age <seconds>]\nd20dao-keeper sweep [--db <path>] --amount <USDC> | --keep <USDC> | --status | --cancel\nd20dao-keeper migrate --from <old-db> --prepare|--apply|--resume\nd20dao-keeper prove <seed> <key-file>\nd20dao-keeper public-key <key-file>\nConfiguration: keeper/.env.example. Sending is OFF by default. Migration requires drained ingress and the reviewed destination environment."
         ),
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

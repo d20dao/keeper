@@ -33,7 +33,7 @@ The output names each implementation address and its runtime code hash, which is
 
 ## 2. Prepare the keeper
 
-Before any owner transaction, build or pull the keeper image of this revision and prepare each host's `keeper.env` with `EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH` and `EXPECTED_IMPLEMENTATION_CODE_HASH` set to the printed runtime hashes, without restarting. Keepers on the previous image stop sending the moment the upgrade executes, and the new image refuses to start until it has, so the service gap lasts from execution until the restart. Requests that expire in that gap stay refundable.
+Before any owner transaction, build or pull the keeper image of this revision. Setting each host's `keeper.env` `APPROVED_NEXT_REGISTRY_IMPLEMENTATION_CODE_HASH` and `APPROVED_NEXT_IMPLEMENTATION_CODE_HASH` to the printed runtime hashes and recreating the keeper on the new image before the upgrade avoids a manual restart at execution time: the setting is read only at startup, a keeper started this way keeps sending on the current implementation, and the moment the upgrade executes and its proxy moves to the approved hash it exits at once with status 75 for its supervisor to start it again on the new code (keeper/README.md, "Configuration and identity"). Without that preparation, keepers on the previous image stop sending the moment the upgrade executes and need a manual restart on the new image with `EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH` and `EXPECTED_IMPLEMENTATION_CODE_HASH` set to the printed hashes; the service gap then lasts from execution until that restart, and requests that expire in the gap stay refundable.
 
 The keeper maps each catalog signer to a gateway. The four built-in Airnodes have defaults; `EPOCH_API_ENDPOINTS` takes `AIRNODE_ADDRESS=URL` pairs (the previous `provider=URL` form is no longer accepted). A signer without a gateway makes its sources fail and fall back.
 
@@ -65,7 +65,7 @@ node scripts/admin.ts upgrade-coordinator --manifest deployments/arc-mainnet.jso
 1. `upgradeToAndCall(<registry implementation>, initializeRecipeRegistry())` on the registry proxy `0xd20Da048C1A68fa3Bc0B5f5Bc454D1530062C82D`.
 2. `upgradeToAndCall(<coordinator implementation>, 0x)` on the coordinator proxy `0xd20da057469C45928912d983F45790C41e290571`. It must follow the registry upgrade inside batch A, because its keeper-share path reads `isAuthorizedCommitter` on the registry.
 
-Then restart the keepers (section 4) and check the upgraded views. Batch B follows, printed once the registry runs the new implementation, so both calls simulate:
+Then handle the keeper restart (section 4) and check the upgraded views. Batch B follows, printed once the registry runs the new implementation, so both calls simulate:
 
 ```sh
 node scripts/admin.ts schedule-catalog --manifest deployments/arc-mainnet.json --from-epoch <epoch>
@@ -79,7 +79,7 @@ Between A and B the service keeps working: epochs keep the initial catalog, reci
 
 ## 4. Restart and record
 
-Restart each keeper with the prepared `keeper.env` (`sh keeper.sh update ghcr.io/d20dao/keeper@sha256:<digest>`). Check on chain that `recipeCount()` is 6, `getRecipe(0..5)` equals `test/fixtures/builtin-recipes.json`, `catalogAt(<fromEpoch>)` lists the rollout catalog and `isAuthorizedCommitter(committer())` is true. Then record `epochImplementation`, `coordinatorImplementation`, both code hashes and an `implementationUpgrades` entry per proxy in the deployment manifest, which `admin.ts` checks on its next run. The first fulfillment after the coordinator upgrade shows the new payment rule: its `KeeperFeePaid` names the submitting keeper wallet.
+If the keeper was not recreated beforehand with `APPROVED_NEXT_REGISTRY_IMPLEMENTATION_CODE_HASH` / `APPROVED_NEXT_IMPLEMENTATION_CODE_HASH` (section 2), restart it now with the prepared `keeper.env` (`sh keeper.sh update ghcr.io/d20dao/keeper@sha256:<digest>`); a keeper prepared that way has already exited on status 75 and restarted itself on the new code. Either way, move each hash from its `APPROVED_NEXT_*` setting into its `EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH` / `EXPECTED_IMPLEMENTATION_CODE_HASH` pin and remove the approval line. Check on chain that `recipeCount()` is 6, `getRecipe(0..5)` equals `test/fixtures/builtin-recipes.json`, `catalogAt(<fromEpoch>)` lists the rollout catalog and `isAuthorizedCommitter(committer())` is true. Then record `epochImplementation`, `coordinatorImplementation`, both code hashes and an `implementationUpgrades` entry per proxy in the deployment manifest, which `admin.ts` checks on its next run. The first fulfillment after the coordinator upgrade shows the new payment rule: its `KeeperFeePaid` names the submitting keeper wallet.
 
 Until the rollout catalog's first epoch, epochs keep the initial catalog. Its slot 1 pairs recipe 1 with the retired provider's Airnode, so a slot 1 selection yields no packet and falls back after 20 blocks, as it did before the rollout catalog. Published epochs are unaffected: on 2026-09-17 mainnet had two published epochs, both from recipe 2, and testnet sixty from recipes 0, 2 and 3, so every epoch published so far replays with the built-in recipes.
 

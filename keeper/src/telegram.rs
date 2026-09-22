@@ -225,6 +225,9 @@ pub enum Event {
         epoch: u64,
         tx_hash: B256,
     },
+    /// Informational: the keeper restarted on an approved next implementation after an in-place upgrade and passed
+    /// every startup check on it. The worker builds the text.
+    Upgrade(String),
 }
 #[derive(Clone, Copy)]
 enum Command {
@@ -446,7 +449,10 @@ fn event_text(
         Event::OperationalError { class } => Some(*class as u8),
         Event::FeeBudget(_) => Some(ErrorClass::FeeBudget as u8),
         Event::LowBalance { .. } => Some(255),
-        Event::Sweep(_) | Event::EpochPublished { .. } | Event::Authorization(_) => None,
+        Event::Sweep(_)
+        | Event::EpochPublished { .. }
+        | Event::Authorization(_)
+        | Event::Upgrade(_) => None,
     };
     if let Some(key) = key {
         if cooldowns
@@ -485,7 +491,7 @@ fn event_text(
             amount(balance_wei),
             display.symbol
         ),
-        Event::Sweep(text) => text,
+        Event::Sweep(text) | Event::Upgrade(text) => text,
     };
     // Takeover notices already name the follower; its other notices carry the role as a prefix.
     Some(if display.follower && !text.starts_with("Follower ") {
@@ -781,6 +787,30 @@ mod tests {
         assert!(event_text(low.clone(), &mut cooldowns, now, &display).is_some());
         assert!(event_text(low, &mut cooldowns, now + Duration::from_secs(1), &display).is_none());
         assert_eq!(cooldowns.len(), 2);
+    }
+    #[test]
+    fn an_approved_upgrade_notice_is_informational_and_never_held_back() {
+        let mut cooldowns = HashMap::new();
+        let now = Instant::now();
+        let notice =
+            || Event::Upgrade("Keeper restarted on the approved coordinator implementation".into());
+        let display = DisplayMetadata::default();
+        for _ in 0..2 {
+            assert_eq!(
+                event_text(notice(), &mut cooldowns, now, &display).as_deref(),
+                Some("Keeper restarted on the approved coordinator implementation")
+            );
+        }
+        assert!(cooldowns.is_empty(), "not an error class and no cooldown");
+        let follower = DisplayMetadata {
+            follower: true,
+            ..DisplayMetadata::default()
+        };
+        assert!(
+            event_text(notice(), &mut cooldowns, now, &follower)
+                .unwrap()
+                .starts_with("[follower] Keeper restarted")
+        );
     }
     #[test]
     fn fee_budget_names_the_cap_and_shares_its_class_cooldown() {

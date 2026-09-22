@@ -19,7 +19,8 @@
     "storage:check": "node scripts/check-storage-layout.mjs",
     "check": "npm run vendor:check && npm run compile && npm run storage:check && npm run typecheck && npm test && npm run browser:check && npm run test:collector && npm run test:deployment && npm run test:admin && npm run test:docker-wrapper",
     "demo": "hardhat run scripts/demo.ts",
-    "node": "hardhat node"
+    "node": "hardhat node",
+    "drill:batch-abort-live": "node scripts/batch-abort-live.ts"
   },
   "devDependencies": {
     "@noble/curves": "1.9.7",

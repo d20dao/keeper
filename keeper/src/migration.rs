@@ -397,13 +397,21 @@ async fn verified_plan(cfg: &Config, source: &Journal, from: PathBuf, to: PathBu
             rpc.call(registry, E::committerCall {}).await? == new_sender,
             "Destination epoch committer does not match transaction wallet"
         );
-        let old_nonce = drained(&rpc, source, old_coordinator, old_sender).await?;
+        let old_nonce = drained(
+            &rpc,
+            source,
+            old_coordinator,
+            old_sender,
+            cfg.approved_next(),
+        )
+        .await?;
         let new_nonce = rpc.nonce(new_sender, "latest").await?;
         ensure!(
             new_nonce == rpc.nonce(new_sender, "pending").await?,
             "Destination wallet has pending or ambiguous transactions"
         );
-        runtime_pins.verify(&rpc).await?;
+        // The plan records exactly this identity: an upgrade while planning, approved or not, fails closed here.
+        runtime_pins.verify(&rpc, cfg.approved_next()).await?;
         let values = (code_hash, protocol_hash, old_nonce, new_nonce, runtime_pins);
         ensure!(
             observed.is_none_or(|previous| previous == values),
@@ -437,10 +445,18 @@ async fn drained(
     source: &Journal,
     coordinator: Address,
     sender: Address,
+    approved: crate::proxy::ApprovedNext,
 ) -> Result<u64> {
     if let Some(saved) = source.meta("runtime:pins").await? {
         let pins: crate::proxy::RuntimePins = serde_json::from_str(&saved)?;
-        pins.verify(rpc).await?;
+        // The source last ran on these implementations. A move since then to the approved next implementation is
+        // the reviewed upgrade itself, and the plan pins what runs now; any other change still refuses.
+        if let Err(error) = pins.verify(rpc, approved).await {
+            let Some(upgrade) = crate::proxy::approved_upgrade(&error) else {
+                return Err(error);
+            };
+            tracing::info!(service=upgrade.service.name(),from=%upgrade.from,to=%upgrade.to,"Source journal predates the approved implementation upgrade");
+        }
     }
     let unresolved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM txs WHERE state != 'resolved'")
         .fetch_one(&source.pool)
@@ -1283,5 +1299,58 @@ mod tests {
                 .1,
             Mode::Prepare
         );
+    }
+    #[tokio::test]
+    async fn a_drained_source_recorded_before_an_approved_upgrade_still_migrates() {
+        use crate::proxy::{ApprovedNext, tests as chain};
+        let (state, rpc) = chain::local_chain().await;
+        let pins = chain::pins();
+        let dir = tempfile::tempdir().unwrap();
+        let source = Journal::open(&dir.path().join("source.sqlite"), "scope")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meta(key,value) VALUES('runtime:pins',?)")
+            .bind(serde_json::to_string(&pins).unwrap())
+            .execute(&source.pool)
+            .await
+            .unwrap();
+        let (coordinator, sender) = (pins.coordinator.proxy, Address::repeat_byte(0x55));
+        let approved = ApprovedNext {
+            coordinator: Some(keccak256(chain::NEXT_CODE)),
+            registry: None,
+        };
+        let move_to = |implementation: u8| {
+            state
+                .lock()
+                .unwrap()
+                .slots
+                .insert(coordinator, Address::repeat_byte(implementation));
+        };
+        assert_eq!(
+            drained(&rpc, &source, coordinator, sender, approved)
+                .await
+                .unwrap(),
+            0
+        );
+        // After the source last ran, the coordinator moved to the approved next implementation.
+        move_to(0xc3);
+        assert_eq!(
+            drained(&rpc, &source, coordinator, sender, approved)
+                .await
+                .unwrap(),
+            0
+        );
+        // Without the approval, or to any other implementation, the source still refuses as before.
+        for (implementation, approval) in [(0xc3, ApprovedNext::default()), (0xc4, approved)] {
+            move_to(implementation);
+            let refused = drained(&rpc, &source, coordinator, sender, approval)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                refused.to_string(),
+                "Proxy implementation changed; review and update pins before restarting"
+            );
+        }
+        source.pool.close().await;
     }
 }

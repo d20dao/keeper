@@ -43,6 +43,11 @@ pub struct Worker {
     signals: std::sync::Arc<crate::events::Signals>,
     /// The last successful runtime pin verification and the upgrade-event generation it covered.
     runtime_verified: std::sync::Mutex<(tokio::time::Instant, u64)>,
+    /// Set once a proxy is seen on its approved next implementation. From then on this process signs and sends
+    /// nothing, raises no error notices, and the run loop exits so that a restart verifies the new code.
+    approved_upgrade: std::sync::OnceLock<crate::proxy::ApprovedUpgrade>,
+    /// The operator notice of a first start on an approved implementation, sent once Telegram is attached.
+    upgrade_notice: Option<String>,
     /// The last publishing-right check and the role-event generation it covered.
     authorization_checked: std::sync::Mutex<(tokio::time::Instant, u64)>,
     /// The finalized block the last tick read. Work events above it keep the loop in its busy cadence.
@@ -193,9 +198,9 @@ pub fn terminal(r: &Request, now: u64) -> Option<&'static str> {
 fn timely(r: &Request, now: u64, margin: u64) -> bool {
     terminal(r, now).is_none() && now.saturating_add(margin) < r.deadline
 }
-/// Journal state a request receives when its nonce resolves, shared by single and batch
-/// attempts: chain state wins; otherwise a cancelled or reverted attempt blocks the job and
-/// a successful attempt that left no terminal state is inconsistent.
+/// Journal state a request receives when its own nonce resolves: chain state wins; otherwise a
+/// cancelled or reverted attempt blocks the job and a successful attempt that left no terminal
+/// state is inconsistent. A single attempt that reverts failed on its own.
 fn resolved_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static str {
     terminal(r, now).unwrap_or(if kind == "cancel" || status == 0 {
         "blocked"
@@ -203,6 +208,83 @@ fn resolved_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static st
         "inconsistent"
     })
 }
+/// Journal state a batch member receives when the batch nonce resolves. Chain state wins, as for a
+/// single attempt. A member still live after its batch reverted has not failed on its own: any
+/// member, or the batch as a whole, can revert the shared transaction. It returns to `prepared`,
+/// is left out of later batches and is resent one at a time; the proof is already public and the
+/// result fixed by the VRF, so the resend reveals nothing new. Only its own single attempt
+/// reverting blocks it.
+fn batch_member_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static str {
+    if kind == "fulfill_batch" && status == 0 {
+        terminal(r, now).unwrap_or("prepared")
+    } else {
+        resolved_state(r, now, kind, status)
+    }
+}
+/// The coordinator's CALLBACK_RESERVE: before each callback `_deliver` requires
+/// `gasleft() >= callbackGasLimit + callbackGasLimit / 63 + 140_000` and otherwise reverts the
+/// whole transaction with InsufficientCallbackGas.
+const CALLBACK_RESERVE_GAS: u64 = 140_000;
+/// The coordinator's own per-member requirement: the whole callback gas limit, the 1/63 the caller
+/// keeps under EIP-150 and CALLBACK_RESERVE.
+fn callback_budget(limit: u32) -> u64 {
+    let limit = u64::from(limit);
+    limit + limit / 63 + CALLBACK_RESERVE_GAS
+}
+/// Gas limit for a fulfillment whose members have these callback gas limits.
+///
+/// eth_estimateGas sees each callback only as expensive as it chooses to be in the simulation
+/// (Arc simulates with tx.gasprice == 0), and a callback can also read the results of earlier
+/// members, already stored in the same transaction. On chain it may then burn its whole limit,
+/// leaving a later member short of its own gas check, which reverts the whole batch. The limit
+/// therefore adds every member's full callback budget to the estimate, and never falls below the
+/// usual padding of the estimate. A single fulfillment follows the same rule.
+fn fulfillment_gas(estimate: u64, limits: &[u32]) -> Result<u64> {
+    let padded = estimate
+        .checked_mul(12)
+        .map(|gas| gas / 10)
+        .and_then(|gas| gas.checked_add(50_000));
+    let reserved = limits.iter().try_fold(estimate, |gas, &limit| {
+        gas.checked_add(callback_budget(limit))
+    });
+    match (padded, reserved) {
+        (Some(padded), Some(reserved)) => Ok(padded.max(reserved)),
+        _ => bail!("Gas overflow"),
+    }
+}
+/// The largest gas limit the configured caps allow at this price per gas: MAX_GAS, and
+/// MAX_TX_COST_WEI divided by the price.
+fn gas_cap(max_gas: u64, max_cost: u128, fee: u128) -> u64 {
+    match max_cost.checked_div(fee) {
+        Some(by_cost) => max_gas.min(u64::try_from(by_cost).unwrap_or(u64::MAX)),
+        None => max_gas,
+    }
+}
+/// How many members, from the front of a batch, fit `cap` with every member's full callback
+/// budget, predicted from the estimate of the whole batch at an even share per member. The caller
+/// re-estimates the shorter batch and shrinks it again if the prediction was short.
+fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
+    let Some(share) = u64::try_from(limits.len())
+        .ok()
+        .filter(|&count| count > 0)
+        .map(|count| estimate.div_ceil(count))
+    else {
+        return 0;
+    };
+    (1..=limits.len())
+        .take_while(|&count| {
+            u64::try_from(count)
+                .ok()
+                .and_then(|count| share.checked_mul(count))
+                .and_then(|estimate| fulfillment_gas(estimate, &limits[..count]).ok())
+                .is_some_and(|gas| gas <= cap)
+        })
+        .last()
+        .unwrap_or(0)
+}
+/// A batch over a cap is shrunk to the members that fit at most this many times before the single
+/// path takes over.
+const MAX_BATCH_SHRINKS: u32 = 4;
 /// Journal state epoch work receives when its nonce resolves: the registry's record or the packet's
 /// own freshness wins; otherwise a successful nonce cancellation leaves the saved packet publishable,
 /// because paid demand can arrive after the cancellation was signed, a reverted attempt blocks the
@@ -215,12 +297,6 @@ fn epoch_resolved_state(terminal: Option<&'static str>, kind: &str, status: u64)
     } else {
         "inconsistent"
     })
-}
-/// Members kept after one halving of an over-budget batch; None once one member would remain,
-/// which is the single path's job.
-fn halved(members: usize) -> Option<usize> {
-    let next = members / 2;
-    (next >= 2).then_some(next)
 }
 /// Request IDs a finalized receipt actually served, from the coordinator's own
 /// RandomnessFulfilled logs. A member skipped on chain has no such log.
@@ -247,6 +323,8 @@ struct Member {
     request_id: U256,
     proof: VrfProof,
     deadline: u64,
+    /// The request's callbackGasLimit: the gas its callback may burn on chain, reserved in full.
+    callback_gas: u32,
     /// Escrowed fee; read only when the fee coverage rule is enabled.
     fee_paid: u128,
 }
@@ -261,8 +339,8 @@ fn batch_payload(members: &[Member]) -> String {
 enum BatchOutcome {
     /// A batch was signed, journaled and handed to broadcast.
     Sent,
-    /// Fewer than two members qualified, the node rejected the batch preflight, or halving
-    /// reached one member: the existing single path serves this tick.
+    /// Fewer than two members qualified, the node rejected the batch preflight, or fewer than
+    /// two members fit the caps with their full callback budgets: the single path serves this tick.
     Single,
 }
 pub async fn live_lower_bound<F, Fut>(end: u64, now: u64, mut deadline: F) -> Result<u64>
@@ -384,6 +462,24 @@ async fn note_preparation_attempt(
 fn owns_any(policy: &SendPolicy, jobs: &[Job], now: u64) -> bool {
     jobs.iter()
         .any(|job| policy.allows(&job.id, u64::try_from(job.deadline).unwrap_or(0), now))
+}
+/// Send order for one pass, from the queue order of this node. Requests left out of batches that
+/// this node is responsible for come first, in queue order, to be sent one at a time: the live
+/// members of a batch that reverted, and requests whose own preflight the node rejected. Without
+/// this, a steady stream of batchable requests would keep them waiting until they expire. Returns
+/// the order and how many requests lead it this way.
+fn resend_first(
+    jobs: Vec<Job>,
+    excluded: &std::collections::HashSet<String>,
+    policy: &SendPolicy,
+    now: u64,
+) -> (Vec<Job>, usize) {
+    let (mut order, rest): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|job| {
+        excluded.contains(&job.id) && owns_any(policy, std::slice::from_ref(job), now)
+    });
+    let leading = order.len();
+    order.extend(rest);
+    (order, leading)
 }
 /// A follower's settlement observation lasts only while it is responsible for sending something: a prepared, open
 /// request of its joined lane or at the safety age, or a transaction of its own still unresolved. Once none is left,
@@ -557,9 +653,7 @@ fn spawn_telegram_observer(
                             .busy_timeout(std::time::Duration::from_millis(100)),
                     )
                     .await?;
-                let result =
-                    telegram_snapshot(&rpc, &pool, wallet, cfg.chain_id, pins, catalog, cfg.role)
-                        .await;
+                let result = telegram_snapshot(&rpc, &pool, wallet, &cfg, pins, catalog).await;
                 pool.close().await;
                 result
             })
@@ -575,6 +669,10 @@ fn spawn_telegram_observer(
                         notifier.notify(crate::telegram::Event::FeeBudget(exceeded));
                     }
                 }
+                // Not an RPC fault: the worker exits for a verified restart and the new process reports afresh.
+                Ok(Err(error)) if crate::proxy::approved_upgrade(&error).is_some() => {
+                    notifier.invalidate_status();
+                }
                 _ => {
                     notifier.invalidate_status();
                     notifier.notify(crate::telegram::Event::OperationalError {
@@ -589,13 +687,13 @@ async fn telegram_snapshot(
     rpc: &Rpc,
     pool: &sqlx::SqlitePool,
     wallet: alloy_primitives::Address,
-    chain_id: u64,
+    cfg: &Config,
     pins: crate::proxy::RuntimePins,
     catalog: B256,
-    role: Role,
 ) -> Result<(crate::telegram::StatusSnapshot, u128)> {
     use crate::telegram::{EpochState, Health, StatusSnapshot};
-    pins.verify(rpc).await?;
+    let (chain_id, role) = (cfg.chain_id, cfg.role);
+    pins.verify(rpc, cfg.approved_next()).await?;
     let registry = pins.registry.proxy;
     let head = rpc.head().await?;
     let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE state IN ('pending','prepared','signed','submitted') AND deadline>=?")
@@ -713,7 +811,13 @@ impl Worker {
         let journal = Journal::open(&cfg.db, &scope).await?;
         // On rejected startup, finish SQLite shutdown while ownership locks remain
         // held. Dropping the pool alone can leave background WAL handles alive.
-        let startup: Result<(Rpc, crate::epoch::Publisher, crate::proxy::RuntimePins)> = async {
+        type Started = (
+            Rpc,
+            crate::epoch::Publisher,
+            crate::proxy::RuntimePins,
+            Option<String>,
+        );
+        let startup: Result<Started> = async {
             let instance = journal
                 .meta("instance_id")
                 .await?
@@ -768,10 +872,22 @@ impl Worker {
             }
             ensure!(!healthy.is_empty(), "No healthy verified RPC endpoint");
             let rpc = Rpc::new(healthy)?;
+            let approved = cfg.approved_next();
             let pins=crate::proxy::RuntimePins::observe(&rpc,&cfg).await?;
-            // Startup must not mix disagreeing endpoint implementation identities.
+            // Startup must not mix disagreeing endpoint implementation identities. While an approved upgrade
+            // propagates, one endpoint can still serve the pinned implementation and another the approved next one;
+            // when this endpoint's own view is also one the pins accept, startup waits for them to agree.
             for url in &rpc.urls {
-                pins.verify(&Rpc::new(vec![url.clone()])?).await?;
+                let endpoint = Rpc::new(vec![url.clone()])?;
+                if let Err(error) = pins.verify(&endpoint, approved).await {
+                    if crate::proxy::approved_upgrade(&error).is_none()
+                        && !crate::rpc::is_delivery_failure(&error)
+                        && crate::proxy::RuntimePins::observe(&endpoint, &cfg).await.is_ok()
+                    {
+                        return Err(crate::proxy::EndpointsDisagree(error.to_string()).into());
+                    }
+                    return Err(error);
+                }
             }
             let pk = prover::public_key(&vrf_key);
             ensure!(
@@ -805,18 +921,37 @@ impl Worker {
                 rpc.call(registry, ER::catalogHashCall {}).await?,
                 cfg.api_endpoints.clone(),
             );
-            pins.verify(&rpc).await?;
+            pins.verify(&rpc, approved).await?;
             let finalized = rpc.finalized_head().await?;
             if let Some(exceeded) = fee_headroom(finalized.base_fee, cfg.min_priority_fee, cfg.max_fee) {
                 tracing::warn!(base_fee=%finalized.base_fee,required=%exceeded.required,limit=%exceeded.limit,"Observed base fee exceeds the fulfillment fee cap; sends will be deferred until MAX_FEE_PER_GAS_WEI is raised");
             }
             journal.enable_public_service(finalized.timestamp).await?;
+            // A proxy accepted through its approved next hash is running the upgraded implementation. The journal's
+            // previous identity tells a first start on it, which is announced once, from every later restart.
+            let previous: Option<crate::proxy::RuntimePins> = journal
+                .meta("runtime:pins")
+                .await?
+                .and_then(|saved| serde_json::from_str(&saved).ok());
+            let mut notices = Vec::new();
+            for service in pins.on_approved_next(&cfg) {
+                let pin = pins.get(service);
+                tracing::warn!(service=service.name(),implementation=%pin.implementation,code_hash=%pin.implementation_code_hash,
+                    "Running on the approved next {} implementation; set {} to its runtime code hash and remove {}",
+                    service.name(),service.pin_setting(),service.approval_setting());
+                if previous.is_some_and(|previous| previous.get(service).implementation != pin.implementation) {
+                    notices.push(format!(
+                        "Keeper restarted on the approved {} implementation {}\nRuntime code hash: {}\nSet {} to it and remove {}.",
+                        service.name(),pin.implementation,pin.implementation_code_hash,service.pin_setting(),service.approval_setting()
+                    ));
+                }
+            }
             sqlx::query("INSERT INTO meta(key,value) VALUES('runtime:pins',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
                 .bind(serde_json::to_string(&pins)?).execute(&journal.pool).await?;
-            Ok((rpc, epoch, pins))
+            Ok((rpc, epoch, pins, (!notices.is_empty()).then(|| notices.join("\n\n"))))
         }
         .await;
-        let (rpc, epoch, runtime_pins) = match startup {
+        let (rpc, epoch, runtime_pins, upgrade_notice) = match startup {
             Ok(rpc) => rpc,
             Err(error) => {
                 journal.pool.close().await;
@@ -849,9 +984,24 @@ impl Worker {
             signals: crate::events::Signals::new(),
             // Startup verified both, just now.
             runtime_verified: std::sync::Mutex::new((tokio::time::Instant::now(), 0)),
+            approved_upgrade: std::sync::OnceLock::new(),
+            upgrade_notice,
             authorization_checked: std::sync::Mutex::new((tokio::time::Instant::now(), 0)),
             last_finalized: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+    /// The approved implementation upgrade this process has seen, if any. Once set, the run loop exits with
+    /// `proxy::APPROVED_UPGRADE_EXIT` and nothing more is signed or sent.
+    pub fn approved_upgrade(&self) -> Option<crate::proxy::ApprovedUpgrade> {
+        self.approved_upgrade.get().copied()
+    }
+    /// Refuse any signature or broadcast after an approved upgrade was seen. Every send path verifies the runtime pins
+    /// immediately before it anyway; this holds even where an earlier failure was deferred rather than returned.
+    fn ensure_not_upgraded(&self) -> Result<()> {
+        match self.approved_upgrade() {
+            Some(upgrade) => Err(upgrade.into()),
+            None => Ok(()),
+        }
     }
     /// The event hints this worker listens to; the caller connects a subscription to them.
     pub fn signals(&self) -> std::sync::Arc<crate::events::Signals> {
@@ -1021,6 +1171,9 @@ impl Worker {
             self.runtime_pins,
             self.epoch.catalog,
         );
+        if let Some(notice) = &self.upgrade_notice {
+            notifier.notify(crate::telegram::Event::Upgrade(notice.clone()));
+        }
         self.telegram = Some(notifier);
         TelegramObserver(task)
     }
@@ -1030,6 +1183,7 @@ impl Worker {
                 settings,
                 self.rpc.clone(),
                 self.runtime_pins,
+                self.cfg.approved_next(),
                 self.cfg.chain_id,
                 crate::explorer::StatusSource {
                     db: self.cfg.db.clone(),
@@ -1047,6 +1201,11 @@ impl Worker {
         self.discord = Some(notifier);
     }
     pub fn notify_error(&self, class: crate::telegram::ErrorClass) {
+        // An approved upgrade is not an operational error: whatever failed with it is the process stopping for its
+        // restart, which announces itself once it runs on the new implementation.
+        if self.approved_upgrade().is_some() {
+            return;
+        }
         if let Some(notifier) = &self.telegram {
             notifier.notify(crate::telegram::Event::OperationalError { class });
         }
@@ -1091,20 +1250,32 @@ impl Worker {
     /// Both proxies' implementation slots and all four runtime codes, in one batched read, immediately before a
     /// signature or broadcast. Never cached: an upgrade between an earlier check and a send must not slip through.
     /// An RPC failure is reported as one, so a rate-limited endpoint is not mistaken for a changed implementation.
+    /// A move to an approved next implementation is recorded and returned as `ApprovedUpgrade`: the tick stops, the
+    /// process exits, and its restart verifies the new implementation. Any other change fails as it always has.
     async fn verify_runtime(&self) -> Result<()> {
+        self.ensure_not_upgraded()?;
         let generation = self.signals.upgrades();
         let rpc = self.rpc.for_runtime_checks();
         // Keep repeated nested runtime/read state machines off the small Windows debug stack.
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
             Box::pin(async {
-                self.runtime_pins.verify(&rpc).await.map_err(|error| {
-                    if crate::rpc::is_delivery_failure(&error) {
-                        error.context("Proxy runtime could not be verified")
-                    } else {
-                        anyhow::anyhow!("Proxy runtime changed: {error}")
-                    }
-                })
+                self.runtime_pins
+                    .verify(&rpc, self.cfg.approved_next())
+                    .await
+                    .map_err(|error| {
+                        if let Some(upgrade) = crate::proxy::approved_upgrade(&error) {
+                            if self.approved_upgrade.set(upgrade).is_ok() {
+                                tracing::warn!(service=upgrade.service.name(),proxy=%upgrade.proxy,from=%upgrade.from,to=%upgrade.to,code_hash=%upgrade.code_hash,
+                                    "Proxy moved to its approved next implementation; nothing more is signed or sent by this process, which exits for a restart that verifies the new implementation");
+                            }
+                            error
+                        } else if crate::rpc::is_delivery_failure(&error) {
+                            error.context("Proxy runtime could not be verified")
+                        } else {
+                            anyhow::anyhow!("Proxy runtime changed: {error}")
+                        }
+                    })
             }),
         )
         .await
@@ -1350,6 +1521,10 @@ impl Worker {
                 .min(std::time::Duration::from_secs(5));
             match tokio::time::timeout(budget, self.send_epoch(&work)).await {
                 Ok(Ok(())) => {}
+                // Not a failed publication: the process stops for its restart and the work keeps its schedule.
+                Ok(Err(error)) if crate::proxy::approved_upgrade(&error).is_some() => {
+                    return Err(error);
+                }
                 outcome => {
                     // Back off from completion, not entry: a hung estimate must not
                     // consume the next tick's maintenance slice again immediately.
@@ -1435,16 +1610,25 @@ impl Worker {
         {
             jobs.rotate_left(index);
         }
-        if self.cfg.fulfill_batch_max > 1 && jobs.len() > 1 {
-            let mut candidates = Vec::new();
-            for job in &jobs {
-                if candidates.len() == self.cfg.fulfill_batch_max {
-                    break;
-                }
-                if !self.journal.batch_excluded(&job.id).await? {
-                    candidates.push(job.clone());
-                }
+        let excluded = self.journal.batch_excluded_prepared().await?;
+        let (jobs, resend) = resend_first(jobs, &excluded, &policy, crate::health::now()?);
+        // Requests that must go one at a time are sent before the next batch. Each attempt backs
+        // its request off first, so one the node keeps rejecting cannot hold batching back.
+        if resend > 0 {
+            if self.send_singles(&jobs[..resend], &policy, until).await? {
+                return Ok(true);
             }
+            if tokio::time::Instant::now() >= until {
+                return Ok(false);
+            }
+        }
+        if self.cfg.fulfill_batch_max > 1 && jobs.len() > 1 {
+            let candidates: Vec<Job> = jobs
+                .iter()
+                .filter(|job| !excluded.contains(&job.id))
+                .take(self.cfg.fulfill_batch_max)
+                .cloned()
+                .collect();
             if candidates.len() > 1 {
                 // The single path's durable bookkeeping, for every candidate at once: backoff
                 // before preflight and the neighbor to start from if this preflight hangs.
@@ -1500,6 +1684,17 @@ impl Worker {
                 }
             }
         }
+        // Whatever led the order this pass has had its single attempt already.
+        self.send_singles(&jobs[resend..], &policy, until).await
+    }
+    /// The single path: one request per transaction in `jobs` order, at most four preflights,
+    /// stopping at the first send that leaves a signed nonce. Returns whether the lane is busy.
+    async fn send_singles(
+        &self,
+        jobs: &[Job],
+        policy: &SendPolicy,
+        until: tokio::time::Instant,
+    ) -> Result<bool> {
         for (index, job) in jobs.iter().take(4).enumerate() {
             if tokio::time::Instant::now() >= until {
                 break;
@@ -1545,7 +1740,7 @@ impl Worker {
                     // preflight timeouts are a durable lack of settlement progress.
                     let now = crate::health::now()?;
                     if self.cfg.send
-                        && owns_any(&policy, std::slice::from_ref(job), now)
+                        && owns_any(policy, std::slice::from_ref(job), now)
                         && self.journal.unresolved().await?.is_empty()
                     {
                         crate::health::blocked(&self.journal, "settlement", now).await?;
@@ -1915,11 +2110,8 @@ impl Worker {
             Err(error) => return Err(error),
         };
         let used = gas;
-        let gas = gas
-            .checked_mul(12)
-            .ok_or_else(|| anyhow::anyhow!("Gas overflow"))?
-            / 10
-            + 50000;
+        // The callback's full budget is reserved: never under-provisioned to fit a cap.
+        let gas = fulfillment_gas(used, &[request.callbackGasLimit])?;
         if let Some(exceeded) = self.gas_over_budget(gas) {
             return Err(SendDeferred::budget(exceeded).into());
         }
@@ -1966,7 +2158,8 @@ impl Worker {
     }
     /// One fulfillRandomnessBatch for the earliest-deadline prepared requests. Each member
     /// passes exactly the checks of send_prepared; the node's preflight then verifies every
-    /// proof at once, and the batch shrinks by halving while it exceeds a gas or cost cap.
+    /// proof at once. The gas limit reserves every member's full callback budget, and a batch
+    /// that then exceeds a gas or cost cap shrinks to the members that fit.
     async fn send_prepared_batch(&self, candidates: &[Job]) -> Result<BatchOutcome> {
         // Estimation is not a send: the pins are verified after it, immediately before signing.
         let (head, latest, pending) = tokio::try_join!(
@@ -2010,6 +2203,7 @@ impl Worker {
                 request_id: decoded.id,
                 proof: decoded.proof,
                 deadline: request.deadline,
+                callback_gas: request.callbackGasLimit,
                 fee_paid: 0,
             });
         }
@@ -2054,7 +2248,7 @@ impl Worker {
         let priority = self.priority_fee().await;
         let fee = required_fee(head.base_fee, priority)?;
         // The price per gas does not depend on the member count: an unaffordable price is a
-        // budget deferral before any estimate, and no halving could change it.
+        // budget deferral before any estimate, and no smaller batch could change it.
         if fee > self.cfg.max_fee {
             return Err(SendDeferred::budget(FeeBudget {
                 cap: FeeCap::MaxFeePerGas,
@@ -2063,7 +2257,7 @@ impl Worker {
             })
             .into());
         }
-        let mut halvings = 0;
+        let mut shrinks = 0;
         let (plan, now) = loop {
             let payload = batch_payload(&members);
             let estimate = self
@@ -2087,11 +2281,10 @@ impl Worker {
                 Err(error) => return Err(error),
             };
             let used = gas;
-            let gas = gas
-                .checked_mul(12)
-                .ok_or_else(|| anyhow::anyhow!("Gas overflow"))?
-                / 10
-                + 50000;
+            // Every member's full callback budget is reserved, so no callback can leave a later
+            // member short of the coordinator's gas check (see fulfillment_gas).
+            let limits: Vec<u32> = members.iter().map(|member| member.callback_gas).collect();
+            let gas = fulfillment_gas(used, &limits)?;
             let plan = TxPlan {
                 nonce: latest,
                 gas,
@@ -2104,20 +2297,24 @@ impl Worker {
                 .gas_over_budget(gas)
                 .or_else(|| self.over_budget(&plan))
             {
-                match halved(members.len()).filter(|_| halvings < 3) {
-                    Some(next) => {
-                        halvings += 1;
-                        tracing::info!(members=members.len(),next,exceeded=%exceeded,"Batch exceeds a configured cap; halving the member count");
-                        members.truncate(next);
-                        continue;
-                    }
-                    None => {
-                        // The single path prices one request on its own and classifies its
-                        // own budget deferral; no cap is bypassed either way.
-                        tracing::warn!(members=members.len(),exceeded=%exceeded,"Batch still exceeds a configured cap after halving; using the single path");
-                        return Ok(BatchOutcome::Single);
-                    }
+                // A batch that does not fit is shrunk, never under-provisioned: it keeps the
+                // earliest members that fit the caps with their full budgets.
+                let fit = members_within(
+                    used,
+                    &limits,
+                    gas_cap(self.cfg.max_gas, self.cfg.max_cost, fee),
+                )
+                .min(members.len() - 1);
+                if fit >= 2 && shrinks < MAX_BATCH_SHRINKS {
+                    shrinks += 1;
+                    tracing::info!(members=members.len(),next=fit,exceeded=%exceeded,"Batch with full callback budgets exceeds a configured cap; shrinking it to the members that fit");
+                    members.truncate(fit);
+                    continue;
                 }
+                // The single path prices one request on its own and classifies its own budget
+                // deferral; no cap is bypassed either way.
+                tracing::warn!(members=members.len(),exceeded=%exceeded,"Batch with full callback budgets still exceeds a configured cap; using the single path");
+                return Ok(BatchOutcome::Single);
             }
             // Recheck implementations and time after estimation; neither cached ABI nor old head authorizes a send.
             let fees = members
@@ -2538,6 +2735,7 @@ impl Worker {
         now: u64,
         members: &[String],
     ) -> Result<()> {
+        self.ensure_not_upgraded()?;
         ensure!(
             self.over_budget(&plan).is_none(),
             "Transaction exceeds fee/cost budget"
@@ -2781,6 +2979,7 @@ impl Worker {
         value: U256,
         now: u64,
     ) -> Result<crate::sweep::SignedTx> {
+        self.ensure_not_upgraded()?;
         let tx = TxEip1559 {
             chain_id: self.cfg.chain_id,
             nonce: plan.nonce,
@@ -2980,6 +3179,7 @@ impl Worker {
         if a.kind == "cancel" || a.kind == "epoch_cancel" {
             self.verify_runtime().await?;
         }
+        self.ensure_not_upgraded()?;
         let outcome = self.rpc.broadcast(&a.raw, a.hash.parse()?).await?;
         if let crate::rpc::BroadcastOutcome::Rejected(reason) = outcome {
             self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
@@ -3260,12 +3460,22 @@ impl Worker {
                     }
                     states.push((
                         id.clone(),
-                        resolved_state(r, head.timestamp, &a.kind, status),
+                        batch_member_state(r, head.timestamp, &a.kind, status),
                     ));
                 }
+                // The journal returns a reverted batch's live members to `prepared`, out of later
+                // batches and due at once, in the same commit that resolves the nonce.
                 self.journal
                     .resolve_nonce_batch(a.nonce, key, &states)
                     .await?;
+                let resend = states
+                    .iter()
+                    .filter(|(_, state)| *state == "prepared")
+                    .count();
+                if resend > 0 {
+                    self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
+                    tracing::warn!(batch_key=%key,tx_hash=%a.hash,members=members.len(),resend,"Batch reverted on chain; resending its live members one at a time");
+                }
                 // Notifications name only the members this receipt served. A member already
                 // fulfilled elsewhere is skipped on chain and has no RandomnessFulfilled log here.
                 let served = fulfilled_in_receipt(&receipt, self.cfg.coordinator)?;
@@ -4110,7 +4320,7 @@ mod tests {
         assert!(!timely(&r, 50, 5));
     }
     #[test]
-    fn resolved_state_is_shared_by_single_and_batch_members() {
+    fn resolved_state_classifies_single_attempts_and_cancellations() {
         let live = Request {
             deadline: 100,
             ..Default::default()
@@ -4123,7 +4333,7 @@ mod tests {
             refunded: true,
             ..live.clone()
         };
-        for kind in ["fulfill", "fulfill_batch", "cancel"] {
+        for kind in ["fulfill", "cancel"] {
             for status in [0, 1] {
                 assert_eq!(resolved_state(&served, 50, kind, status), "served");
                 assert_eq!(resolved_state(&refunded, 50, kind, status), "refunded");
@@ -4133,10 +4343,6 @@ mod tests {
         }
         assert_eq!(resolved_state(&live, 50, "cancel", 1), "blocked");
         assert_eq!(resolved_state(&live, 50, "fulfill", 1), "inconsistent");
-        assert_eq!(
-            resolved_state(&live, 50, "fulfill_batch", 1),
-            "inconsistent"
-        );
     }
     #[test]
     fn epoch_resolution_keeps_a_cancelled_packet_publishable() {
@@ -4176,20 +4382,214 @@ mod tests {
         assert!(!awaiting_receipt_visibility(1_100, &attempt(990, 0)));
     }
     #[test]
-    fn halving_stops_before_a_single_member() {
-        assert_eq!(halved(16), Some(8));
-        assert_eq!(halved(8), Some(4));
-        assert_eq!(halved(5), Some(2));
-        assert_eq!(halved(4), Some(2));
-        assert_eq!(halved(3), None);
-        assert_eq!(halved(2), None);
-        // At most three halvings from the coordinator maximum still leave a real batch.
-        let mut size = 16;
-        for _ in 0..3 {
-            size = halved(size).unwrap();
+    fn a_reverted_batch_resends_its_live_members_and_only_their_own_revert_blocks_them() {
+        let live = Request {
+            deadline: 100,
+            ..Default::default()
+        };
+        let served = Request {
+            fulfilled: true,
+            ..live.clone()
+        };
+        let refunded = Request {
+            refunded: true,
+            ..live.clone()
+        };
+        // Chain state wins whatever the batch did.
+        for kind in ["fulfill_batch", "cancel"] {
+            for status in [0, 1] {
+                assert_eq!(batch_member_state(&served, 50, kind, status), "served");
+                assert_eq!(batch_member_state(&refunded, 50, kind, status), "refunded");
+                assert_eq!(batch_member_state(&live, 101, kind, status), "expired");
+            }
         }
-        assert_eq!(size, 2);
-        assert_eq!(halved(size), None);
+        // A live member of a reverted batch is resent, not blocked.
+        assert_eq!(
+            batch_member_state(&live, 50, "fulfill_batch", 0),
+            "prepared"
+        );
+        // A landed batch that left a member live is still inconsistent, a cancelled lane still blocks.
+        assert_eq!(
+            batch_member_state(&live, 50, "fulfill_batch", 1),
+            "inconsistent"
+        );
+        assert_eq!(batch_member_state(&live, 50, "cancel", 1), "blocked");
+        assert_eq!(batch_member_state(&live, 50, "cancel", 0), "blocked");
+        // The request's own single attempt reverting is what fails it permanently.
+        assert_eq!(resolved_state(&live, 50, "fulfill", 0), "blocked");
+    }
+    /// A gas model of fulfillRandomnessBatch: each member spends `before` gas up to its callback,
+    /// must pass the coordinator's check `gasleft() >= limit + limit / 63 + CALLBACK_RESERVE`
+    /// (InsufficientCallbackGas reverts the whole batch), burns at most its limit in the callback
+    /// and spends `after` once it returns. Whether the batch completes with `gas`.
+    fn batch_lands(gas: u64, members: &[(u64, u32, u64, u64)]) -> bool {
+        let mut left = gas;
+        for &(before, limit, burn, after) in members {
+            let Some(at_check) = left.checked_sub(before) else {
+                return false;
+            };
+            if at_check < callback_budget(limit) {
+                return false;
+            }
+            let Some(rest) = (at_check - burn.min(u64::from(limit))).checked_sub(after) else {
+                return false;
+            };
+            left = rest;
+        }
+        true
+    }
+    /// What eth_estimateGas returns for the model: the least gas with which it completes.
+    fn estimated(members: &[(u64, u32, u64, u64)]) -> u64 {
+        let (mut low, mut high) = (0u64, 100_000_000u64);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if batch_lands(mid, members) {
+                high = mid
+            } else {
+                low = mid + 1
+            }
+        }
+        low
+    }
+    #[test]
+    fn a_callback_that_burns_its_budget_only_on_chain_cannot_abort_a_full_budget_batch() {
+        // The batch-abort issue: the draw, then two helpers with 1,000,000-gas callbacks that are cheap in
+        // the unpriced simulation and, once the draw has lost, burn their whole limit on chain.
+        let (before, after) = (180_000, 40_000);
+        let simulated = [
+            (before, 100_000, 25_000, after),
+            (before, 1_000_000, 2_000, after),
+            (before, 1_000_000, 2_000, after),
+        ];
+        let on_chain = [
+            (before, 100_000, 25_000, after),
+            (before, 1_000_000, 1_000_000, after),
+            (before, 1_000_000, 1_000_000, after),
+        ];
+        let estimate = estimated(&simulated);
+        let limits = [100_000, 1_000_000, 1_000_000];
+        // The previous sizing, estimate * 1.2 + 50,000: the second helper's check fails on chain.
+        assert!(!batch_lands(estimate * 12 / 10 + 50_000, &on_chain));
+        // Every member's full budget reserved: the batch lands with the draw's result in it.
+        assert!(batch_lands(
+            fulfillment_gas(estimate, &limits).unwrap(),
+            &on_chain
+        ));
+        // The same holds for any mix of limits and of simulated and on-chain burns: no member can
+        // starve a later one.
+        for count in 1..=16usize {
+            for limit in [30_000u32, 100_000, 250_000, 1_000_000] {
+                for simulated_burn in [0, 1_000, u64::from(limit) / 2, u64::from(limit)] {
+                    let limits = vec![limit; count];
+                    let simulated: Vec<_> = limits
+                        .iter()
+                        .map(|&limit| (before, limit, simulated_burn, after))
+                        .collect();
+                    let on_chain: Vec<_> = limits
+                        .iter()
+                        .map(|&limit| (before, limit, u64::from(limit), after))
+                        .collect();
+                    let gas = fulfillment_gas(estimated(&simulated), &limits).unwrap();
+                    assert!(
+                        batch_lands(gas, &on_chain),
+                        "{count} x {limit} burning {simulated_burn} in simulation"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn fulfillment_gas_reserves_every_callback_budget_above_the_padded_estimate() {
+        assert_eq!(callback_budget(100_000), 100_000 + 1_587 + 140_000);
+        assert_eq!(callback_budget(1_000_000), 1_000_000 + 15_873 + 140_000);
+        // A single: the budget on top of the estimate, never below the old padding.
+        assert_eq!(
+            fulfillment_gas(300_000, &[100_000]).unwrap(),
+            300_000 + 241_587
+        );
+        assert_eq!(fulfillment_gas(2_000_000, &[30_000]).unwrap(), 2_450_000);
+        assert_eq!(fulfillment_gas(1_000_000, &[]).unwrap(), 1_250_000);
+        // Sixteen 100,000-gas members at the Arc testnet batch estimate: about 8.2M.
+        assert_eq!(
+            fulfillment_gas(4_300_000, &[100_000; 16]).unwrap(),
+            4_300_000 + 16 * 241_587
+        );
+        // The worst single request the coordinator accepts (a 1,000,000-gas callback) fits 3M.
+        let worst_single_estimate = 21_000 + 7_300 + 180_000 + callback_budget(1_000_000);
+        assert!(fulfillment_gas(worst_single_estimate, &[1_000_000]).unwrap() <= 3_000_000);
+        assert!(fulfillment_gas(u64::MAX, &[1]).is_err());
+        assert!(fulfillment_gas(u64::MAX / 10, &[]).is_err());
+    }
+    #[test]
+    fn an_over_cap_batch_shrinks_to_the_members_that_fit_with_full_budgets() {
+        // MAX_TX_COST_WEI binds only when it allows less gas than MAX_GAS at this price.
+        assert_eq!(
+            gas_cap(6_000_000, 4 * 10u128.pow(18), 41_000_000_000),
+            6_000_000
+        );
+        assert_eq!(
+            gas_cap(10_000_000, 4 * 10u128.pow(18), 503_000_000_000),
+            7_952_286
+        );
+        assert_eq!(gas_cap(6_000_000, 4 * 10u128.pow(18), 0), 6_000_000);
+        assert_eq!(gas_cap(6_000_000, 0, 1), 0);
+        // Sixteen 100,000-gas members estimated at 4.3M: eleven fit 6M, all sixteen fit 10M.
+        let limits = [100_000u32; 16];
+        assert_eq!(members_within(4_300_000, &limits, 6_000_000), 11);
+        assert_eq!(members_within(4_300_000, &limits, 10_000_000), 16);
+        // 1,000,000-gas callbacks: four fit 6M.
+        assert_eq!(members_within(4_300_000, &[1_000_000; 16], 6_000_000), 4);
+        // The prediction keeps the order: a heavy member in front limits the prefix.
+        let mut mixed = [100_000u32; 8];
+        mixed[1] = 1_000_000;
+        assert_eq!(members_within(2_200_000, &mixed, 3_000_000), 4);
+        assert_eq!(members_within(2_200_000, &mixed, 1_000_000), 1);
+        // Nothing fits, or nothing to fit.
+        assert_eq!(members_within(4_300_000, &limits, 400_000), 0);
+        assert_eq!(members_within(0, &[], 6_000_000), 0);
+        // Whatever fits by the prediction is really within the cap at the predicted estimate.
+        for cap in (1_000_000..12_000_000).step_by(250_000) {
+            let fit = members_within(4_300_000, &limits, cap);
+            if fit > 0 {
+                let share = 4_300_000u64.div_ceil(16);
+                assert!(fulfillment_gas(share * fit as u64, &limits[..fit]).unwrap() <= cap);
+            }
+        }
+    }
+    #[test]
+    fn requests_left_out_of_batches_that_this_node_owns_lead_the_send_order() {
+        let job = |id: &str, deadline: i64| Job {
+            id: id.into(),
+            deadline,
+            state: "prepared".into(),
+            proof: Some("proof".into()),
+            call: Some("call".into()),
+        };
+        let ids = |jobs: &[Job]| jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
+        let queue = vec![
+            job("1", 1060),
+            job("2", 1061),
+            job("3", 1062),
+            job("4", 1063),
+        ];
+        let excluded: std::collections::HashSet<String> = ["3".to_string(), "9".to_string()].into();
+        let (order, leading) = resend_first(queue.clone(), &excluded, &SendPolicy::PRIMARY, 1000);
+        assert_eq!(ids(&order), ["3", "1", "2", "4"]);
+        assert_eq!(leading, 1);
+        // Nothing excluded: the queue order is untouched.
+        let (order, leading) = resend_first(
+            queue.clone(),
+            &Default::default(),
+            &SendPolicy::PRIMARY,
+            1000,
+        );
+        assert_eq!((ids(&order), leading), (ids(&queue), 0));
+        // A follower that has not joined does not own the request, until it reaches the safety age.
+        let (order, leading) = resend_first(queue.clone(), &excluded, &follower(false), 1000);
+        assert_eq!((ids(&order), leading), (ids(&queue), 0));
+        let (order, leading) = resend_first(queue, &excluded, &follower(false), 1042);
+        assert_eq!(leading, 1);
+        assert_eq!(order[0].id, "3");
     }
     #[test]
     fn batch_payload_carries_each_member_proof_in_order() {
@@ -4211,6 +4611,7 @@ mod tests {
                 request_id: U256::from(id),
                 proof: proof(id * 100),
                 deadline: 0,
+                callback_gas: 100_000,
                 fee_paid: 0,
             })
             .collect();
