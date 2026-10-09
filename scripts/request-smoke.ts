@@ -5,9 +5,9 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {Contract,JsonRpcProvider,formatUnits,hexlify,randomBytes} from "ethers";
 import {loadDeployer} from "./lib/deployer-env.ts";
-import {loadChain} from "./lib/chains.ts";
+import {loadChain,requireOperable} from "./lib/chains.ts";
 import {validateNetwork,Stop} from "./lib/deployment.ts";
-import {currentFee} from "./lib/gas.ts";
+import {currentFee,tipBounds} from "./lib/gas.ts";
 
 const CALLBACK_GAS=100000,BUFFER_BPS=2000n,REQUEST_GAS_LIMIT=450000n; // A cost client request uses about 370k gas.
 const sleep=(ms:number)=>new Promise(done=>setTimeout(done,ms));
@@ -17,6 +17,8 @@ async function main(){
     count:{type:"string",default:"1"},apply:{type:"boolean",default:false},mainnet:{type:"boolean",default:false}}});
   if(!values.env)throw new Stop("Provide --env with the deployer settings");
   const chain=await loadChain(values.chain);
+  // The gas limit and the Arc cost client's ABI here are Arc's; refused before any network access or key use.
+  requireOperable(chain,"request-smoke.ts");
   if(!chain.testnet&&!values.mainnet)throw new Stop("Mainnet requests require --mainnet");
   const count=Number(values.count);
   if(!Number.isInteger(count)||count<1||count>5)throw new Stop("--count must be between 1 and 5");
@@ -30,7 +32,7 @@ async function main(){
     const coordinator=new Contract(manifest.coordinator,await abi("D20VRFCoordinator","D20VRFCoordinator"),provider);
     const client=new Contract(manifest.client,await abi("examples/D20CostClient","D20CostClient"),wallet);
     if(await client.tester()!==wallet.address)throw new Stop("The deployer is not this cost client's tester");
-    const {baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei));
+    const {baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei),tipBounds(chain.gas));
     const quote=await coordinator.quoteFeeAt(CALLBACK_GAS,baseFee) as bigint,value=quote+quote*BUFFER_BPS/10000n;
     const maxSpend=BigInt(count)*(value+REQUEST_GAS_LIMIT*maxFee),balance=await provider.getBalance(wallet.address);
     console.log(JSON.stringify({chain:chain.key,coordinator:manifest.coordinator,client:manifest.client,count,callbackGas:CALLBACK_GAS,

@@ -5,8 +5,10 @@ import {canonicalRequestOfBody,validateEpochRecipe,type EpochRecipe} from "../..
 import {decodeDataTemplate,encodeDataTemplate,matchesDataTemplate,type DataTemplateSegment} from "../../src/templates.ts";
 import {attestationDigest,validateApiSignatureEncoding} from "../../src/sources.ts";
 
-/// The JSON a recipe file holds. body is the gateway request (an object, serialized with JSON.stringify, or the exact
-/// JSON text); sample is a signed gateway response for that body: {airnode, requestHash, timestamp, data, signature}.
+/// The JSON a recipe file holds. body is the gateway request, serialized with JSON.stringify or given as the exact JSON
+/// text: an object posted to the gateway's root, or a passthrough request array sent to its /api. sample is a signed
+/// gateway response for that body: {airnode, requestHash, timestamp, data, signature}. A passthrough sample takes these
+/// from the X-Airnode-* headers, with data the response body text exactly as received.
 export interface RecipeFile {description?:string;signer:string;body:unknown;template:DataTemplateSegment[];sample:{airnode:string;requestHash:string;timestamp:string;data:unknown;signature:string}}
 export interface CheckedRecipe {recipe:EpochRecipe;signer:string;description?:string;queryHash:string;sample:{timestamp:string;data:string}}
 export class RecipeFileError extends Error {}
@@ -25,7 +27,7 @@ export function checkRecipeFile(text:string):CheckedRecipe {
   if(file.description!==undefined&&typeof file.description!=="string")fail("description must be a string");
   const signer=attempt("signer is not an address",()=>getAddress(String(file.signer).toLowerCase()));
   if(BigInt(signer)===0n)fail("signer must not be the zero address");
-  if(file.body===undefined)fail("body is required: the JSON request body the keeper posts to the gateway");
+  if(file.body===undefined)fail("body is required: the gateway request, a POST / body object or a passthrough request array");
   const body=typeof file.body==="string"?file.body:JSON.stringify(file.body);
   const canonicalRequest=attempt("body is not a gateway request",()=>canonicalRequestOfBody(body));
   const template=attempt("template is invalid",()=>encodeDataTemplate(file.template));
@@ -38,6 +40,8 @@ export function checkRecipeFile(text:string):CheckedRecipe {
   const airnode=attempt("sample.airnode is not an address",()=>getAddress(String(sample.airnode).toLowerCase()));
   if(airnode!==signer)fail(`sample.airnode ${airnode} is not the recipe signer ${signer}`);
   if(typeof sample.timestamp!=="string"||!/^(0|[1-9][0-9]{0,77})$/.test(sample.timestamp))fail("sample.timestamp must be the signed decimal timestamp string");
+  // A passthrough gateway signs the response body exactly as received, so its sample keeps that text.
+  if(Array.isArray(JSON.parse(body))&&typeof sample.data!=="string")fail("sample.data of a passthrough recipe is the response body text exactly as received");
   const data=typeof sample.data==="string"?sample.data:JSON.stringify(sample.data);
   if(typeof data!=="string")fail("sample.data is missing");
   attempt("sample.signature is not a canonical 65-byte low-s signature",()=>validateApiSignatureEncoding(sample.signature));

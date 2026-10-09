@@ -1,0 +1,87 @@
+{
+  "note": "Passthrough recipe requests: the keeper (Rust) and the replay library (TypeScript) must accept exactly the valid texts, send each to the given URL under the gateway, and refuse every invalid text.",
+  "valid": [
+    {
+      "note": "Nodary latest feed: a query value with a slash",
+      "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\",\"ETH/USD\"]],\"\"]",
+      "gateway": "https://airnode-nodary.fly.dev/",
+      "url": "https://airnode-nodary.fly.dev/api/feed/latest?name=ETH%2FUSD"
+    },
+    {
+      "note": "Hyperliquid info: a JSON body and a sorted projection",
+      "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{\\\"type\\\":\\\"metaAndAssetCtxs\\\",\\\"dex\\\":\\\"\\\"}\",[[\"symbol\",\"/0/universe/0/name\"],[\"value\",\"/1/0/dayNtlVlm\"]]]",
+      "gateway": "https://airnode-hyperliquid.fly.dev",
+      "url": "https://airnode-hyperliquid.fly.dev/api/info?x-airnode-project=symbol%3A%2F0%2Funiverse%2F0%2Fname&x-airnode-project=value%3A%2F1%2F0%2FdayNtlVlm"
+    },
+    {
+      "note": "dRPC JSON-RPC: a query entry and a JSON body",
+      "request": "[\"passthrough\",\"POST\",\"/ogrpc\",[[\"network\",\"base\"]],\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":null,\\\"method\\\":\\\"eth_call\\\",\\\"params\\\":[{\\\"to\\\":\\\"0xcA11bde05977b3631167028862bE2a173976CA11\\\",\\\"data\\\":\\\"0x27e86d6e\\\"},\\\"latest\\\"]}\"]",
+      "gateway": "https://airnode-drpc.fly.dev//",
+      "url": "https://airnode-drpc.fly.dev/api/ogrpc?network=base"
+    },
+    {
+      "note": "TickerLayer last trade: path parameters only",
+      "request": "[\"passthrough\",\"GET\",\"/crypto/trade/last/BTCUSD\",[],\"\"]",
+      "gateway": "https://airnode-tickerlayer.fly.dev/",
+      "url": "https://airnode-tickerlayer.fly.dev/api/crypto/trade/last/BTCUSD"
+    },
+    {
+      "note": "Query values are percent-encoded as UTF-8, including space, plus, ampersand and equals; an empty value stays",
+      "request": "[\"passthrough\",\"GET\",\"/q\",[[\"a\",\"x y+z&=é\"],[\"b\",\"\"]],\"\"]",
+      "gateway": "https://g.example",
+      "url": "https://g.example/api/q?a=x%20y%2Bz%26%3D%C3%A9&b="
+    },
+    {
+      "note": "Projection pointers keep their ~0 and ~1 escapes",
+      "request": "[\"passthrough\",\"POST\",\"/p\",[],\"{}\",[[\"k\",\"/a~1b/c~0d\"]]]",
+      "gateway": "https://g.example/",
+      "url": "https://g.example/api/p?x-airnode-project=k%3A%2Fa~1b%2Fc~0d"
+    },
+    {
+      "note": "Path segments of unreserved characters",
+      "request": "[\"passthrough\",\"GET\",\"/v1.2/a_b-c~d\",[],\"\"]",
+      "gateway": "https://g.example/base/",
+      "url": "https://g.example/base/api/v1.2/a_b-c~d"
+    }
+  ],
+  "invalid": [
+    {"note": "four elements", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\",\"ETH/USD\"]]]"},
+    {"note": "seven elements", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a\",\"/0\"]],\"x\"]"},
+    {"note": "not compact: leading space", "request": "[ \"passthrough\",\"GET\",\"/feed/latest\",[],\"\"]"},
+    {"note": "not compact: space after a comma", "request": "[\"passthrough\", \"GET\",\"/feed/latest\",[],\"\"]"},
+    {"note": "not the canonical escape: \\u00e9 instead of é", "request": "[\"passthrough\",\"GET\",\"/f\",[[\"a\",\"\\u00e9\"]],\"\"]"},
+    {"note": "another first element", "request": "[\"passthru\",\"GET\",\"/feed/latest\",[],\"\"]"},
+    {"note": "a JSON object", "request": "{\"passthrough\":true}"},
+    {"note": "a JSON string", "request": "\"passthrough\""},
+    {"note": "lowercase method", "request": "[\"passthrough\",\"get\",\"/feed/latest\",[],\"\"]"},
+    {"note": "another method", "request": "[\"passthrough\",\"PUT\",\"/feed/latest\",[],\"\"]"},
+    {"note": "relative path", "request": "[\"passthrough\",\"GET\",\"feed/latest\",[],\"\"]"},
+    {"note": "root path", "request": "[\"passthrough\",\"GET\",\"/\",[],\"\"]"},
+    {"note": "empty segment", "request": "[\"passthrough\",\"GET\",\"/feed//latest\",[],\"\"]"},
+    {"note": "trailing slash", "request": "[\"passthrough\",\"GET\",\"/feed/latest/\",[],\"\"]"},
+    {"note": "dot-dot segment", "request": "[\"passthrough\",\"GET\",\"/feed/../latest\",[],\"\"]"},
+    {"note": "dot segment", "request": "[\"passthrough\",\"GET\",\"/feed/./latest\",[],\"\"]"},
+    {"note": "query in the path", "request": "[\"passthrough\",\"GET\",\"/feed/latest?name=ETH\",[],\"\"]"},
+    {"note": "percent-encoded path", "request": "[\"passthrough\",\"GET\",\"/feed/l%61test\",[],\"\"]"},
+    {"note": "repeated query name", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\",\"b\"],[\"name\",\"a\"]],\"\"]"},
+    {"note": "unsorted query", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"z\",\"1\"],[\"a\",\"2\"]],\"\"]"},
+    {"note": "the gateway's own parameter", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"x-airnode-sign\",\"false\"]],\"\"]"},
+    {"note": "the gateway's own parameter in another case", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"X-Airnode-Project\",\"a:/0\"]],\"\"]"},
+    {"note": "reserved character in a query name", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"na me\",\"x\"]],\"\"]"},
+    {"note": "empty query name", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"\",\"x\"]],\"\"]"},
+    {"note": "numeric query value", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\",1]],\"\"]"},
+    {"note": "query entry that is not a pair", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\"]],\"\"]"},
+    {"note": "query object", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",{\"name\":\"x\"},\"\"]"},
+    {"note": "GET with a body", "request": "[\"passthrough\",\"GET\",\"/feed/latest\",[],\"{}\"]"},
+    {"note": "POST without a body", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"\"]"},
+    {"note": "POST body that is not JSON", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"not json\"]"},
+    {"note": "body that is not a string", "request": "[\"passthrough\",\"POST\",\"/info\",[],{}]"},
+    {"note": "empty projection", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[]]"},
+    {"note": "projection alias with a colon", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a:b\",\"/0\"]]]"},
+    {"note": "projection pointer without a leading slash", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a\",\"0\"]]]"},
+    {"note": "empty projection pointer", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a\",\"\"]]]"},
+    {"note": "projection pointer with ~2", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a\",\"/x~2\"]]]"},
+    {"note": "projection pointer ending in ~", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"a\",\"/x~\"]]]"},
+    {"note": "unsorted projection", "request": "[\"passthrough\",\"POST\",\"/info\",[],\"{}\",[[\"b\",\"/0\"],[\"a\",\"/1\"]]]"}
+  ]
+}

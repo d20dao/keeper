@@ -1,0 +1,11 @@
+{
+  "owner": "0x00000000000000000000000000000000005afE77",
+  "ownerNote": "Stand-in Safe for the overlay test",
+  "interimOwner": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+  "interimOwnerNote": "Deployer account",
+  "safe": {
+    "address": "0x00000000000000000000000000000000005afE77",
+    "owners": ["0x00000000000000000000000000000000005a1601", "0x00000000000000000000000000000000005A1602"],
+    "threshold": 2
+  }
+}

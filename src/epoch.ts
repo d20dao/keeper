@@ -1,9 +1,9 @@
-import { AbiCoder, Contract, getAddress, hexlify, id, keccak256, getBytes, toUtf8Bytes, verifyMessage, type ContractRunner } from "ethers";
-import { canonicalApiRequest, attestationDigest, hashAttestation, validateApiSignatureEncoding, type ApiAttestation, type ApiRequest } from "./sources.ts";
+import { AbiCoder, Contract, getAddress, hexlify, id, keccak256, getBytes, toUtf8Bytes, verifyMessage, type BlockTag, type ContractRunner } from "ethers";
+import { canonicalApiRequest, canonicalPassthroughRequest, parsePassthroughRequest, attestationDigest, hashAttestation, validateApiSignatureEncoding, type ApiAttestation, type ApiRequest, type PassthroughRequest } from "./sources.ts";
 import { encodeDataTemplate, matchesDataTemplate, validateDataTemplate, type DataTemplateSegment } from "./templates.ts";
+import { BEACON_TEMPLATE, beaconCanonicalRequest, beaconRoundTime, beaconSlotSigner, decodeBeaconRound, verifyBeaconRound, type BeaconRegistration } from "./beacon.ts";
 import { deriveRequestSeed,hashPublicKey, hashProof, verifyVRFProof, type VRFProof, type RequestContext } from "./verification.ts";
 import { hashMapping, mapRandomness } from "./mapping.ts";
-import type { MappingSpec } from "./mapping.ts";
 import type { XY } from "./verification.ts";
 const abi=AbiCoder.defaultAbiCoder();
 export const EPOCH_LENGTH=200n;
@@ -30,7 +30,9 @@ const MULTICALL3="0xcA11bde05977b3631167028862bE2a173976CA11", GET_LAST_BLOCK_HA
 export const MAX_EPOCH_RECIPES=256, MAX_RECIPE_REQUEST_BYTES=1024, MAX_RECIPE_BODY_BYTES=2048;
 /// A registered recipe: the canonical request whose keccak256 is the signed query hash, the data template of its exact
 /// signed record, and the JSON body keepers post to its provider's gateway. EpochEntropy.getRecipe(id) returns one.
-export interface EpochRecipe { canonicalRequest:string; template:string; body:string; }
+/// A beacon recipe, from registerBeacon, also carries its registration: its record is a round number and its signature
+/// the beacon's, which the registration's verifier checks. EpochEntropy.beaconOf(id) returns it.
+export interface EpochRecipe { canonicalRequest:string; template:string; body:string; beacon?:BeaconRegistration; }
 /// Registered recipe definitions by id. Replay needs the definition of every recipe id an epoch's catalog selects.
 export type EpochRecipeBook={readonly [recipe:number]:EpochRecipe|undefined};
 export type EpochProvider="hyperliquid"|"drpc"|"tickerlayer"|"nodary";
@@ -58,19 +60,49 @@ export const BUILTIN_EPOCH_RECIPES:readonly BuiltinEpochRecipe[]=frozen<BuiltinE
   builtin(5,"drpc","Base block hash",blockHash("base"),blockHashRecord),
 ]);
 export const INITIAL_EPOCH_RECIPES:readonly number[]=frozen([0,1,2,3]);
+const jsonRpcCall=(network:string):PassthroughRequest=>({method:"POST",path:"/ogrpc",query:{network},
+  body:JSON.stringify({jsonrpc:"2.0",id:null,method:"eth_call",params:[{to:MULTICALL3,data:GET_LAST_BLOCK_HASH},"latest"]})});
+/// Each built-in recipe's listing reached through the gateway's passthrough (/api) instead of POST /: the same parameters
+/// and projection, answered with the same signed record, so it keeps the built-in template. The gateway signs it under
+/// another request hash, so it is a separate recipe the owner registers; EpochEntropy does not register it.
+export const PASSTHROUGH_EPOCH_REQUESTS:readonly PassthroughRequest[]=frozen<PassthroughRequest[]>([
+  {method:"POST",path:"/info",body:'{"type":"metaAndAssetCtxs","dex":""}',projection:{symbol:"/0/universe/0/name",value:"/1/0/dayNtlVlm"}},
+  jsonRpcCall("ethereum"),
+  {method:"GET",path:"/crypto/trade/last/BTCUSD"},
+  {method:"GET",path:"/crypto/trade/last/ETHUSD"},
+  {method:"GET",path:"/feed/latest",query:{name:"ETH/USD"}},
+  jsonRpcCall("base"),
+]);
+/// The passthrough recipe of a built-in recipe id: its canonical request is also its body.
+export function passthroughEpochRecipe(builtinRecipe:number):EpochRecipe {
+  const request=PASSTHROUGH_EPOCH_REQUESTS[builtinRecipe];
+  if(request===undefined)throw new Error(`Built-in recipe ${builtinRecipe} has no passthrough form`);
+  const canonicalRequest=canonicalPassthroughRequest(request);
+  return {canonicalRequest,template:BUILTIN_EPOCH_RECIPES[builtinRecipe].template,body:canonicalRequest};
+}
 const byteLength=(text:string)=>toUtf8Bytes(text).length;
 /// Throws unless a recipe satisfies the registry's registration rules: bounded sizes and a well-formed template.
+/// A beacon recipe must also be exactly what registerBeacon appends for its registration.
 export function validateEpochRecipe(recipe:EpochRecipe):void {
   if(typeof recipe?.canonicalRequest!=="string"||byteLength(recipe.canonicalRequest)===0||byteLength(recipe.canonicalRequest)>MAX_RECIPE_REQUEST_BYTES)
     throw new Error(`A recipe canonical request must be 1 to ${MAX_RECIPE_REQUEST_BYTES} bytes`);
   if(typeof recipe.body!=="string"||byteLength(recipe.body)===0||byteLength(recipe.body)>MAX_RECIPE_BODY_BYTES)
     throw new Error(`A recipe body must be 1 to ${MAX_RECIPE_BODY_BYTES} bytes`);
   validateDataTemplate(recipe.template);
+  const {beacon}=recipe;
+  if(beacon===undefined)return;
+  if(BigInt(beacon.verifier)===0n||BigInt(beacon.chainHash)===0n||beacon.genesis<1n||beacon.period<1n||getBytes(beacon.publicKey).length!==128)
+    throw new Error("Invalid beacon registration");
+  const request=beaconCanonicalRequest(beacon.chainHash);
+  if(recipe.canonicalRequest!==request||recipe.body!==request||recipe.template!==BEACON_TEMPLATE)
+    throw new Error("A beacon recipe's canonical request and body name its chain hash, and its template is one round number");
 }
-/// The canonical request of a JSON gateway body: an object with a string operation, a parameters object and an
-/// optional responseProjection object. Keepers refuse a recipe whose body does not canonicalize to its request.
+/// The canonical request of a recipe body. An object is a POST / gateway body with a string operation, a parameters
+/// object and an optional responseProjection object; an array is a passthrough request, which is its own canonical
+/// request. Keepers refuse a recipe whose body does not canonicalize to its request.
 export function canonicalRequestOfBody(body:string):string {
   const parsed=JSON.parse(body) as unknown;
+  if(Array.isArray(parsed)){parsePassthroughRequest(body);return body;}
   const isObject=(value:unknown)=>value!==null&&typeof value==="object"&&!Array.isArray(value);
   if(!isObject(parsed))throw new Error("A recipe body must be a JSON object");
   const request=parsed as ApiRequest;
@@ -78,14 +110,24 @@ export function canonicalRequestOfBody(body:string):string {
     throw new Error("A recipe body needs a string operation, a parameters object and an optional responseProjection object");
   return canonicalApiRequest(request);
 }
-const RECIPE_VIEW=["function getRecipe(uint8 recipe) view returns (bytes32 queryHash,string canonicalRequest,bytes template,string body)"];
+const RECIPE_VIEW=["function getRecipe(uint8 recipe) view returns (bytes32 queryHash,string canonicalRequest,bytes template,string body)",
+  "function beaconOf(uint8 recipe) view returns (tuple(address verifier,uint64 genesis,uint64 period,bytes32 chainHash,bytes publicKey))"];
 /// Read registered recipes from a registry. Each definition is checked against its query hash and the registration rules.
-export async function readEpochRecipes(runner:ContractRunner,registry:string,ids:Iterable<number>):Promise<Record<number,EpochRecipe>> {
+/// A recipe whose canonical request names drand is asked for its beacon registration, which a signed recipe lacks.
+/// With a blockTag the recipes and registrations are read as of that block instead of the latest one. A registry that was rolled back to an
+/// implementation without beaconOf no longer answers it, so a beacon epoch published earlier replays from a block of the implementation
+/// that had it, for example the epoch's commit block; that needs an RPC that serves the state of past blocks.
+export async function readEpochRecipes(runner:ContractRunner,registry:string,ids:Iterable<number>,options:{blockTag?:BlockTag}={}):Promise<Record<number,EpochRecipe>> {
   const view=new Contract(registry,RECIPE_VIEW,runner),book:Record<number,EpochRecipe>={};
+  const overrides=options.blockTag===undefined?{}:{blockTag:options.blockTag};
   for(const recipe of new Set(ids)){
-    const [queryHash,canonicalRequest,template,body]=await view.getRecipe(recipe);
+    const [queryHash,canonicalRequest,template,body]=await view.getRecipe(recipe,overrides);
     const entry:EpochRecipe={canonicalRequest,template:hexlify(template),body};
     if(keccak256(toUtf8Bytes(canonicalRequest))!==queryHash)throw new Error(`Recipe ${recipe} query hash mismatch`);
+    if(canonicalRequest.startsWith('["drand","')){
+      const {verifier,genesis,period,chainHash,publicKey}=await view.beaconOf(recipe,overrides);
+      if(BigInt(verifier)!==0n)entry.beacon={verifier,chainHash,publicKey:hexlify(publicKey),genesis,period};
+    }
     validateEpochRecipe(entry);
     book[recipe]=entry;
   }
@@ -138,13 +180,23 @@ export function selectEpoch(catalog:EpochCatalog,epochId:bigint,anchorHash:strin
   if(!Number.isInteger(attempt)||attempt<0||attempt>=count) throw new Error("Invalid fallback attempt");
   const selector=keccak256(abi.encode(["bytes32","bytes32","uint64","bytes32"],[id("D20_EPOCH_SELECT"),epochCatalogHash(catalog.signers,catalog.recipes),epochId,anchorHash]));
   const source=(Number(BigInt(selector)%BigInt(count))+attempt)%count, recipe=recipes[source];
-  const {canonicalRequest,template,body}=epochRecipe(catalog,recipe);
-  return {source,recipe,attempt,airnode:catalog.signers[source],selector,canonicalRequest,queryHash:keccak256(toUtf8Bytes(canonicalRequest)),template,body};
+  const {canonicalRequest,template,body,beacon}=epochRecipe(catalog,recipe);
+  return {source,recipe,attempt,airnode:catalog.signers[source],selector,canonicalRequest,queryHash:keccak256(toUtf8Bytes(canonicalRequest)),template,body,...(beacon&&{beacon})};
 }
 export function verifyEpochAttestation(selected:ReturnType<typeof selectEpoch>,a:ApiAttestation,commitTimestamp:bigint) {
-  validateApiSignatureEncoding(a.signature);
+  const {beacon}=selected;
+  if(beacon===undefined)validateApiSignatureEncoding(a.signature);
   if(a.timestamp>commitTimestamp||commitTimestamp-a.timestamp>MAX_ATTESTATION_AGE) throw new Error("Invalid epoch attestation time");
   validateEpochData(selected.template,a.data);
+  if(beacon!==undefined){
+    // A beacon round is scheduled, so its number fixes the timestamp; the verifier's check stands in for the signer's, and
+    // the catalog's signer must be the identity this registration derives.
+    const round=decodeBeaconRound(a.data);
+    if(a.timestamp!==beaconRoundTime(beacon,round)) throw new Error("Invalid epoch attestation time");
+    if(!verifyBeaconRound(beacon.publicKey,round,a.signature)) throw new Error("Invalid beacon signature");
+    if(selected.airnode.toLowerCase()!==beaconSlotSigner(beacon).toLowerCase()) throw new Error("Wrong epoch signer/query");
+    return {dataHash:keccak256(a.data),attestationHash:hashAttestation(selected.queryHash,a),signer:selected.airnode};
+  }
   const signer=verifyMessage(getBytes(attestationDigest(selected.queryHash,a)),a.signature);
   if(signer.toLowerCase()!==selected.airnode.toLowerCase()) throw new Error("Wrong epoch signer/query");
   return {dataHash:keccak256(a.data),attestationHash:hashAttestation(selected.queryHash,a),signer};

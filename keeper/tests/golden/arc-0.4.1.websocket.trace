@@ -1,0 +1,77 @@
+# The chain event subscription of keeper 0.4.1: its handshake, its signals, and its backfill after a reconnect.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+# `name session n:` lines are the scripted WebSocket endpoint: `<-` is what the keeper sent it. `signals` lines are
+# what the subscription has told the keeper: whether it is live, the upgrade and role counters, the block of the
+# last work event and the last head pushed.
+
+## 1. the subscription connects
+other chain session 1: connected
+other chain session 1: <- eth_chainId
+other chain session 1: <- eth_subscribe newHeads
+other chain session 1: <- eth_subscribe logs addresses=[coordinator,registry]
+other chain session 1: closed by the keeper
+endpoint session 1: connected
+endpoint session 1: <- eth_chainId
+endpoint session 1: <- eth_subscribe newHeads
+endpoint session 1: <- eth_subscribe logs addresses=[coordinator,registry]
+signals live=true upgrades=1 roles=1 activity=0 head=0
+
+## 2. heads and logs are pushed
+signals live=true upgrades=2 roles=1 activity=1011 head=1011
+
+## 3. the connection drops and blocks pass
+endpoint session 1: dropped by the endpoint
+signals live=false upgrades=2 roles=1 activity=1011 head=1011
+
+## 4. it reconnects, re-checks everything and backfills the blocks it missed
+endpoint session 2: connected
+endpoint session 2: <- eth_chainId
+endpoint session 2: <- eth_subscribe newHeads
+endpoint session 2: <- eth_subscribe logs addresses=[coordinator,registry]
+http eth_getBlockByNumber latest full=false
+http eth_getLogs from=#latest-28/finalized-25 to=#latest/finalized+3 addresses=[coordinator,registry]
+signals live=true upgrades=3 roles=3 activity=1030 head=1011
+signals live=true upgrades=3 roles=3 activity=1030 head=1041
+
+## 5. a gap of 5,000 blocks, the longest there is, is backfilled in ranges of 500
+endpoint session 2: dropped by the endpoint
+endpoint session 3: connected
+endpoint session 3: <- eth_chainId
+endpoint session 3: <- eth_subscribe newHeads
+endpoint session 3: <- eth_subscribe logs addresses=[coordinator,registry]
+http eth_getBlockByNumber latest full=false
+http eth_getLogs from=#latest-4999/finalized-4996 to=#latest-4500/finalized-4497 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-4499/finalized-4496 to=#latest-4000/finalized-3997 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-3999/finalized-3996 to=#latest-3500/finalized-3497 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-3499/finalized-3496 to=#latest-3000/finalized-2997 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-2999/finalized-2996 to=#latest-2500/finalized-2497 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-2499/finalized-2496 to=#latest-2000/finalized-1997 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-1999/finalized-1996 to=#latest-1500/finalized-1497 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-1499/finalized-1496 to=#latest-1000/finalized-997 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-999/finalized-996 to=#latest-500/finalized-497 addresses=[coordinator,registry]
+http eth_getLogs from=#latest-499/finalized-496 to=#latest/finalized+3 addresses=[coordinator,registry]
+signals live=true upgrades=4 roles=4 activity=1030 head=1041
+
+## 6. a gap of 5,001 blocks is not backfilled
+endpoint session 3: dropped by the endpoint
+endpoint session 4: connected
+endpoint session 4: <- eth_chainId
+endpoint session 4: <- eth_subscribe newHeads
+endpoint session 4: <- eth_subscribe logs addresses=[coordinator,registry]
+http eth_getBlockByNumber latest full=false
+signals live=true upgrades=5 roles=5 activity=1030 head=1041

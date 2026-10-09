@@ -1,0 +1,124 @@
+{
+  "network": "robinhood-testnet",
+  "chainId": 46630,
+  "coordinatorContract": "D20VRFCoordinatorRobinhood",
+  "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+  "owner": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+  "feeRecipient": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+  "keeper": "0x90C0CA10cABc8B380a096093c208b44bd6a47Ad7",
+  "coordinator": "0x2f26513DE4Ed388947f5d22FD395D5E06f472f05",
+  "coordinatorImplementation": "0xC8Cd79B9092AEA38f3434388F291eb861b148f45",
+  "proofVerifier": "0x1EEBe8B8f7a6A18b966C3fBe3f644B8234f93709",
+  "mappingLibrary": "0xA57093a645C1Aed12486da50AfA95F3284826849",
+  "beaconVerifier": "0xd20dA01Aa16AeD6b77Cd8DDb869151802599100a",
+  "coordinatorCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
+  "coordinatorImplementationCodeHash": "0xe692b447c02225cb95c921ed29952edb566f2afdfe28ff929452b4909460e8f6",
+  "proofVerifierCodeHash": "0x2038efbfea08f4fe79add117570209e0ac7128ead09ad815b166d159454fdb64",
+  "mappingLibraryCodeHash": "0xc6148c742f31804eee99c3599a87ab25c988f65422842b37a12d5fd27e4794cd",
+  "beaconVerifierCodeHash": "0x4388250d26298224c4a39d030263550655390ca831ab44c4124f8b0be1f65351",
+  "publicKey": [
+    "12789725864746648757970795944624412804086491661266661338803265954045104605713",
+    "7034586226178307624938891946800202050158675619591470984368119261232327451703"
+  ],
+  "keyHash": "0xda5b9114edc329e09e5765dbca17ed243f4abdcf34420ea8e6e392ba408a4062",
+  "protocolConfigurationHash": "0x0834ec1ec066569c75f7323951998130e50295f4829f6f766dd77cc787938429",
+  "deployer": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+  "create2": {
+    "beaconVerifier": {
+      "contract": "D20BeaconVerifier",
+      "salt": "0x000000000000000000000000000000000000000000000000769ad50100000000",
+      "initCodeHash": "0xb82105a8322fe23541fe030ea59a0f2b8956be56184587bf535dba7984f173ae"
+    },
+    "proofVerifier": {
+      "contract": "D20VRFProofVerifier",
+      "salt": "0xef48ee4c7f570bd0fba27c47c92e7e53fad1351bece5f29cadcec11c099314aa",
+      "initCodeHash": "0x4ce2d43993b1396d34e765794293b8025daff9a4d467d641deba92c0b5c7dc27"
+    },
+    "mappingLibrary": {
+      "contract": "LinkedRandomnessMapping",
+      "salt": "0xcc9ccd84aa197d0a925f1ea3b5f5481517d940566e8051b73036034d4bbeb205",
+      "initCodeHash": "0xdb78bdb1fc7773bdccfc06e39c8768bbdd947142d5a9e156f4af664e13751461"
+    },
+    "coordinatorImplementation": {
+      "contract": "D20VRFCoordinatorRobinhood",
+      "salt": "0x6b1a6749f69e7226e4d3732202b101de9660cf661aac772df7b29e5395507da5",
+      "initCodeHash": "0xfc350791c80d57d9a02928c65af17cd43c08704104f4550c8d91e9448a562940"
+    },
+    "coordinator": {
+      "contract": "D20Proxy",
+      "salt": "0x8a3f36b3dab5bb41cd7002fe6ef76caf69ca0742c1280aafdf6d1c0c22791aaf",
+      "initCodeHash": "0x043040acb0c5597b2dcd90f1fd00fc25eecb0ca3996f5068d7a64ef291e94f56"
+    }
+  },
+  "storageLayoutHash": "0xba7ff6e3edc407a847489650d9970b1b3c04e38bf11eea57d573075ca2a0c125",
+  "roundLead": 3,
+  "beacon": {
+    "id": 0,
+    "verifier": "0xd20dA01Aa16AeD6b77Cd8DDb869151802599100a",
+    "chainHash": "0x04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3",
+    "publicKey": "0x07e1d1d335df83fa98462005690372c643340060d205306a9aa8106b6bd0b3820557ec32c2ad488e4d4f6008f89a346f18492092ccc0d594610de2732c8b808f0095685ae3a85ba243747b1b2f426049010f6b73a0cf1d389351d5aaaa1047f6297d3a4f9749b33eb2d904c9d9ebf17224150ddd7abd7567a9bec6c74480ee0b",
+    "genesis": 1727521075,
+    "period": 3,
+    "sampleRound": 21072365,
+    "sampleSignature": "0x039ac7e43d668128627ba9a0ed03396cb6258d85f4480a16fd65c32c77d22e080ba45533eac6fc3162d453e2e7960525bed9deec0f35bb62fabff0d3c44faa8a",
+    "identity": "0x65794cca839753a679e6274f47c6ae64359df498b1674f40a28f9500c91054a5",
+    "inForceSince": 1791248239
+  },
+  "pricing": {
+    "minFeeWei": "25000000000000",
+    "feeMultiplier": 2,
+    "fulfillGasOverhead": 405000,
+    "keeperFeeBps": 8000,
+    "refundBps": 10000
+  },
+  "sourceCommit": "72fe753d8f8ec869c40ecc61f5d3c33eba43c59e",
+  "createdAt": "2026-10-06T00:57:36.261Z",
+  "transactions": [
+    {
+      "contract": "beaconVerifier",
+      "address": "0xd20dA01Aa16AeD6b77Cd8DDb869151802599100a",
+      "hash": "0x89d21e0bf55b1b478ef6326a77ffbd9d47c72903e29118baf6f5d4bb8f8bbfce",
+      "block": 129544374,
+      "gasUsed": "2026929",
+      "effectiveGasPriceWei": "10000000",
+      "feeWei": "20269290000000"
+    },
+    {
+      "contract": "proofVerifier",
+      "address": "0x1EEBe8B8f7a6A18b966C3fBe3f644B8234f93709",
+      "hash": "0xc39b566489bff9ded662959aa6fc8f08085cf79f8fbfee25728da7734bdf81cb",
+      "block": 129544404,
+      "gasUsed": "816263",
+      "effectiveGasPriceWei": "10000000",
+      "feeWei": "8162630000000"
+    },
+    {
+      "contract": "mappingLibrary",
+      "address": "0xA57093a645C1Aed12486da50AfA95F3284826849",
+      "hash": "0xb65ba66e2f6e46ca18a0dae49b44c01772b632935f24ffffc1975452973e4d3e",
+      "block": 129544455,
+      "gasUsed": "571497",
+      "effectiveGasPriceWei": "10000000",
+      "feeWei": "5714970000000"
+    },
+    {
+      "contract": "coordinatorImplementation",
+      "address": "0xC8Cd79B9092AEA38f3434388F291eb861b148f45",
+      "hash": "0xfc0b90c5cd62adf1bd7ada3baa664f3c809672667b25dbb50bd76bc39a2c3385",
+      "block": 129544516,
+      "gasUsed": "5878216",
+      "effectiveGasPriceWei": "10000000",
+      "feeWei": "58782160000000"
+    },
+    {
+      "contract": "coordinator",
+      "address": "0x2f26513DE4Ed388947f5d22FD395D5E06f472f05",
+      "hash": "0x55b8a802cfd75c18bbeff0dda09b74b96fda94898ff3f6312a0efaf13947b2b0",
+      "block": 129544569,
+      "gasUsed": "923676",
+      "effectiveGasPriceWei": "10000000",
+      "feeWei": "9236760000000"
+    }
+  ],
+  "implementationUpgrades": []
+}

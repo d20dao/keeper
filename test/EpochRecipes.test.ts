@@ -4,12 +4,14 @@ import {network} from "hardhat";
 import {deployProxy} from "./helpers/proxy.ts";
 import {EPOCH_TEST_SIGNERS,signSelection} from "./helpers/epoch.ts";
 import {LEGACY_TEMPLATES} from "./helpers/template-corpus.ts";
-import {BUILTIN_EPOCH_RECIPES,canonicalApiRequest,canonicalRequestOfBody,encodeDataTemplate,readEpochRecipes,replayEpochCommitment,resolveEpochCatalog,selectEpoch,
+import {BUILTIN_EPOCH_RECIPES,PASSTHROUGH_EPOCH_REQUESTS,canonicalApiRequest,canonicalPassthroughRequest,canonicalRequestOfBody,encodeDataTemplate,parsePassthroughRequest,
+  passthroughEpochRecipe,passthroughUrl,readEpochRecipes,replayEpochCommitment,resolveEpochCatalog,selectEpoch,
   validateEpochData,validateEpochRecipe,verifyEpochAttestation,type EpochRecipe} from "../src/index.ts";
 
 const {ethers,networkHelpers}=await network.create();
 const json=(path:string)=>JSON.parse(readFileSync(new URL(path,import.meta.url),"utf8"));
 const airnode=json("./fixtures/airnode-recipes-2026-09-17.json");
+const passthrough=json("./fixtures/airnode-passthrough-2026-09-28.json");
 const {cases,templates}=json("./fixtures/epoch-data-cases.json") as {cases:Array<{template:string;valid:boolean;origin:string;note:string;data:string}>;templates:Record<string,{template:string}>};
 const utf8=(text:string)=>ethers.hexlify(ethers.toUtf8Bytes(text));
 type Sample={airnode:string;requestHash:string;timestamp:string;data:unknown;signature:string};
@@ -171,6 +173,71 @@ describe("Epoch recipe registry",function(){
           expect(replayEpochCommitment({catalog,epochId:2n,record,commitTimestamp:signedAt+2n,packet}).epochHash).to.equal(record.epochHash);
           // Without the registered definition, replay names the missing recipe instead of guessing.
           if(recipe>=6)expect(()=>replayEpochCommitment({catalog:{...catalog,recipeBook:undefined},epochId:2n,record,commitTimestamp:signedAt+2n,packet})).to.throw("Unknown epoch recipe 6");
+        } finally {await local.close();}
+      }
+    });
+  }
+
+  it("parses, canonicalizes and addresses passthrough requests exactly as the keeper does",()=>{
+    const shared=json("./fixtures/passthrough-request-cases.json") as {valid:Array<{note:string;request:string;gateway:string;url:string}>;invalid:Array<{note:string;request:string}>};
+    for(const c of shared.valid){
+      const request=parsePassthroughRequest(c.request);
+      expect(canonicalPassthroughRequest(request),c.note).to.equal(c.request);
+      expect(canonicalRequestOfBody(c.request),c.note).to.equal(c.request);
+      expect(passthroughUrl(c.gateway,request),c.note).to.equal(c.url);
+    }
+    for(const c of shared.invalid){
+      expect(()=>parsePassthroughRequest(c.request),c.note).to.throw();
+      expect(()=>canonicalRequestOfBody(c.request),c.note).to.throw();
+    }
+    // Each built-in listing's passthrough recipe keeps its template under the request hash its gateway signs.
+    for(const entry of passthrough.recipes){
+      const recipe=passthroughEpochRecipe(entry.builtinRecipe),builtin=BUILTIN_EPOCH_RECIPES[entry.builtinRecipe];
+      expect(recipe).to.deep.equal({canonicalRequest:entry.canonicalRequest,template:builtin.template,body:entry.canonicalRequest});
+      expect(parsePassthroughRequest(recipe.canonicalRequest)).to.deep.equal(PASSTHROUGH_EPOCH_REQUESTS[entry.builtinRecipe]);
+      expect(ethers.id(recipe.canonicalRequest)).to.equal(entry.requestHash).and.not.equal(ethers.id(builtin.canonicalRequest));
+      expect(passthroughUrl("",PASSTHROUGH_EPOCH_REQUESTS[entry.builtinRecipe])).to.equal(entry.url);
+      validateEpochRecipe(recipe);
+    }
+    expect(()=>passthroughEpochRecipe(6)).to.throw("has no passthrough form");
+  });
+
+  // Each listing's passthrough recipe is registered as the owner will, then committed with the gateway's real /api attestation.
+  for(const listing of passthrough.recipes){
+    it(`verifies both real signed ${listing.name} passthrough responses onchain and in replay`,async()=>{
+      for(const sample of listing.samples as Sample[]){
+        const signedAt=BigInt(sample.timestamp);
+        const local=await network.create({override:{initialDate:new Date(Number(signedAt-3600n)*1000)}});
+        try {
+          const [owner]=await local.ethers.getSigners();
+          const registry=await deployProxy(local.ethers,"EpochEntropy",[EPOCH_TEST_SIGNERS,owner.address,owner.address]);
+          const address=await registry.getAddress(),recipe=passthroughEpochRecipe(listing.builtinRecipe);
+          await registry.registerRecipe(...definition(recipe));
+          await registry.scheduleCatalog([6],[sample.airnode],2);
+          await local.networkHelpers.mine(Number(await registry.epochStart(2))-await local.ethers.provider.getBlockNumber());
+          const s=await registry.getEpochSelection(2);
+          expect(Number(s.recipe)).to.equal(6);expect(s.airnode).to.equal(sample.airnode);expect(s.queryHash).to.equal(sample.requestHash);
+          // The body exactly as received is the signed data.
+          const a={timestamp:signedAt,data:utf8(sample.data as string),signature:sample.signature},tampered={...a,data:tamper(a.data)};
+          const base={registry:address,chainId:31337n,firstEpochStart:await registry.firstEpochStart(),recipeBook:await readEpochRecipes(local.ethers.provider,address,[6])};
+          const [hash,recipes,signers]=await registry.catalogAt(2);
+          const catalog=resolveEpochCatalog(base,{hash,recipes,signers});
+          validateEpochData(catalog.recipeBook![6]!.template,tampered.data);
+          const anchor=(await local.ethers.provider.getBlock(Number(await registry.epochStart(2))-1))!.hash!;
+          const selected=selectEpoch(catalog,2n,anchor);
+          expect(verifyEpochAttestation(selected,a,signedAt).signer).to.equal(sample.airnode);
+          expect(()=>verifyEpochAttestation(selected,tampered,signedAt)).to.throw("Wrong epoch signer/query");
+          // Under the POST / recipe of the same listing the attestation recovers to another address.
+          const builtinDigest=ethers.solidityPackedKeccak256(["bytes32","uint256","bytes"],[ethers.id(BUILTIN_EPOCH_RECIPES[listing.builtinRecipe].canonicalRequest),a.timestamp,a.data]);
+          expect(ethers.verifyMessage(ethers.getBytes(builtinDigest),a.signature)).to.not.equal(sample.airnode);
+          await local.networkHelpers.time.setNextBlockTimestamp(signedAt+1n);
+          await expect(registry.commitEpoch(2,tampered)).to.be.revertedWithCustomError(registry,"InvalidSigner");
+          await local.networkHelpers.time.setNextBlockTimestamp(signedAt+2n);
+          const receipt=(await(await registry.commitEpoch(2,a)).wait())!;
+          const record=await registry.getEpoch(2);
+          expect(record.catalogHash).to.equal(hash);expect(record.queryHash).to.equal(sample.requestHash);expect(record.signedAt).to.equal(signedAt);
+          const packet=registry.interface.parseLog(receipt.logs[0])!.args.packet;
+          expect(replayEpochCommitment({catalog,epochId:2n,record,commitTimestamp:signedAt+2n,packet}).epochHash).to.equal(record.epochHash);
         } finally {await local.close();}
       }
     });

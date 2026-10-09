@@ -20,8 +20,8 @@ import {readFile, writeFile, mkdir, open} from "node:fs/promises";
 import {resolve, join} from "node:path";
 import {Contract, ContractFactory, JsonRpcProvider, formatUnits, parseUnits, getAddress, getCreateAddress, keccak256, getBytes, type TransactionReceipt} from "ethers";
 import {loadDeployer} from "./lib/deployer-env.ts";
-import {loadChain, type Chain} from "./lib/chains.ts";
-import {currentFee} from "./lib/gas.ts";
+import {loadChain, requireOperable, type Chain} from "./lib/chains.ts";
+import {currentFee, tipBounds} from "./lib/gas.ts";
 import {Stop} from "./lib/deployment.ts";
 
 // Transactions handed to the RPC in this run; a failure after a broadcast lists them so receipts can be checked.
@@ -55,6 +55,8 @@ async function loadProfile(chainKey: string, rpc: string | undefined): Promise<P
   if (chainKey === "arc-mainnet") throw new Stop("Arc mainnet (chain 5042) is refused; this drill runs on Arc testnet or a local chain only");
   if (chainKey === "local" || chainKey === "localhost") return localProfile(rpc ?? "http://127.0.0.1:8545");
   const chain = await loadChain(chainKey);
+  // The drill's contracts and the keepers' batching are Arc's; refused before any network access or key use, whatever --rpc says.
+  requireOperable(chain, "batch-abort-live.ts");
   if (chain.chainId === MAINNET_CHAIN_ID) throw new Stop("Arc mainnet (chain 5042) is refused, whatever flags are given");
   return {...chain, rpcUrls: rpc ? [rpc] : chain.rpcUrls, local: false};
 }
@@ -118,7 +120,7 @@ async function main() {
 
     // Price a round from real on-chain reads: fees scale with the callback budget, and drawAndArm re-quotes at execution
     // base fee, so the estimate uses the current base fee like the keeper does.
-    const {baseFee, tip, maxFee} = await currentFee(provider, BigInt(profile.gas.maxFeePerGasWei));
+    const {baseFee, tip, maxFee} = await currentFee(provider, BigInt(profile.gas.maxFeePerGasWei), tipBounds(profile.gas));
     const [minFee, feeMultiplier, fulfillGasOverhead] = await coordinator.pricing() as [bigint, bigint, bigint];
     const drawFee = await coordinator.quoteFeeAt(DRAW_CALLBACK_GAS, baseFee) as bigint;
     const saboteurFee = await coordinator.quoteFeeAt(HELPER_CALLBACK_GAS, baseFee) as bigint;

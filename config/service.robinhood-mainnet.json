@@ -1,0 +1,12 @@
+{
+  "coordinator": "D20VRFCoordinatorRobinhood",
+  "proofVerifier": "D20VRFProofVerifier",
+  "mappingLibrary": "LinkedRandomnessMapping",
+  "beacon": "config/beacons/drand-evmnet.json",
+  "minFeeWei": "25000000000000",
+  "keeperFeeBps": 8000,
+  "pricing": {
+    "multiplier": 2,
+    "overhead": 405000
+  }
+}

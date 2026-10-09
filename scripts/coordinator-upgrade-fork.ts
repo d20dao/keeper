@@ -11,7 +11,7 @@ import {parseArgs} from "node:util";
 import {spawn} from "node:child_process";
 import {readFile} from "node:fs/promises";
 import {Contract,Interface,JsonRpcProvider,Network,ZeroAddress,ZeroHash,AbiCoder,getAddress,keccak256,toBeHex,zeroPadValue,formatUnits,id as eventId,type TransactionReceipt} from "ethers";
-import {loadChain} from "./lib/chains.ts";
+import {loadChain,requireOperable} from "./lib/chains.ts";
 import {initCode,candidate,compiledRuntimeCodeHash,Stop} from "./lib/deployment.ts";
 import {publicKey,makeProof,proofOutput} from "../test/helpers/proof.ts";
 
@@ -33,6 +33,8 @@ async function main(){
   const {values}=parseArgs({options:{chain:{type:"string",default:"arc-mainnet"},"fork-url":{type:"string"},port:{type:"string",default:"8547"},
     "implementation-result":{type:"string"},implementation:{type:"string"},"backup-committer":{type:"string",multiple:true,default:[]},"skip-control":{type:"boolean",default:false}}});
   const chain=await loadChain(values.chain);
+  // The rehearsal impersonates the owner and replays Arc's coordinator upgrade; a chain it cannot rehearse is refused before any network access.
+  requireOperable(chain,"coordinator-upgrade-fork.ts");
   const manifest=JSON.parse(await readFile(`deployments/${chain.key}.json`,"utf8"));
   const forkUrl=values["fork-url"]??chain.rpcUrls[0],port=Number(values.port),url=`http://127.0.0.1:${port}`;
   if(!values["implementation-result"]&&!values.implementation)throw new Stop("Pass --implementation-result <mined result> or --implementation <deployed address>");

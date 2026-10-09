@@ -194,6 +194,9 @@ pub struct StatusSnapshot {
     pub last_serve_unix: Option<u64>,
     pub epoch_id: Option<u64>,
     pub epoch_state: EpochState,
+    /// A round coordinator's keeper: how many rounds live requests wait on. `None` for an epoch coordinator's, whose
+    /// status names its epoch instead.
+    pub rounds_awaited: Option<u64>,
     pub transaction_wallet: Address,
     pub chain_id: u64,
     pub balance_wei: Option<U256>,
@@ -228,6 +231,13 @@ pub enum Event {
     /// Informational: the keeper restarted on an approved next implementation after an in-place upgrade and passed
     /// every startup check on it. The worker builds the text.
     Upgrade(String),
+    /// Soft finality, in plain Turkish: the keeper recovered by itself from a block the sequencer replaced, and nothing is
+    /// required (once per incident); or the owner is asked to act, with what to do, because no two endpoints confirmed
+    /// a replaced block or the recovery kept failing (once per case). The worker builds the text.
+    Finality(String),
+    /// In plain Turkish: something only the owner can put right, with what to do (a machine clock behind the chain's, a
+    /// lost sweep to queue again), once per case. The keeper goes on meanwhile. The worker builds the text.
+    Owner(String),
 }
 #[derive(Clone, Copy)]
 enum Command {
@@ -256,6 +266,9 @@ pub struct TelegramNotifier {
     dropped: Arc<AtomicU64>,
     status: watch::Sender<Option<StatusSnapshot>>,
     threshold: U256,
+    /// A round keeper's low-balance episode: told once while the balance stays below the threshold, and told again only
+    /// after it has stood a quarter above it. An epoch keeper's alert repeats after its cooldown, as in 0.4.1.
+    low_told: Arc<std::sync::atomic::AtomicBool>,
     _tasks: Arc<Tasks>,
 }
 fn increment(counter: &AtomicU64) {
@@ -304,6 +317,7 @@ impl TelegramNotifier {
             dropped,
             status,
             threshold: settings.low_balance_wei,
+            low_told: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _tasks: Arc::new(Tasks {
                 send: send.abort_handle(),
                 poll: poll.map(|task| task.abort_handle()),
@@ -315,7 +329,17 @@ impl TelegramNotifier {
     }
     /// Feed independently observed public state, preferably every 60 seconds outside the request tick.
     pub fn update_status(&self, snapshot: StatusSnapshot) {
-        if let Some(balance) = snapshot.balance_wei.filter(|b| *b < self.threshold) {
+        let round = snapshot.rounds_awaited.is_some();
+        if round
+            && snapshot
+                .balance_wei
+                .is_some_and(|b| b >= self.threshold + self.threshold / U256::from(4))
+        {
+            self.low_told.store(false, Ordering::Relaxed);
+        }
+        if let Some(balance) = snapshot.balance_wei.filter(|b| *b < self.threshold)
+            && !(round && self.low_told.swap(true, Ordering::Relaxed))
+        {
             self.notify(Event::LowBalance {
                 wallet: snapshot.transaction_wallet,
                 balance_wei: balance,
@@ -338,12 +362,49 @@ impl TelegramNotifier {
         self.dropped.load(Ordering::Relaxed)
     }
 }
+/// What a test reads of a notifier that delivers nowhere (`TelegramNotifier::capture`).
+#[cfg(test)]
+pub(crate) struct Captured(mpsc::Receiver<Message>);
+#[cfg(test)]
+impl Captured {
+    /// The events queued since the last call, oldest first.
+    pub(crate) fn events(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Ok(message) = self.0.try_recv() {
+            if let Message::Event(event) = message {
+                events.push(event);
+            }
+        }
+        events
+    }
+}
+#[cfg(test)]
+impl TelegramNotifier {
+    /// A notifier that sends nothing to anyone: the events the worker gives it wait for a test to read. It needs a
+    /// Tokio runtime, as the real one does.
+    pub(crate) fn capture() -> (Self, Captured) {
+        let (tx, rx) = mpsc::channel(CAPACITY);
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let notifier = Self {
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            status: watch::channel(None).0,
+            threshold: U256::ZERO,
+            low_told: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            _tasks: Arc::new(Tasks {
+                send: idle.abort_handle(),
+                poll: None,
+            }),
+        };
+        (notifier, Captured(rx))
+    }
+}
 fn enqueue(tx: &mpsc::Sender<Message>, value: Message, dropped: &AtomicU64) {
     if tx.try_send(value).is_err() {
         increment(dropped);
     }
 }
-fn amount(wei: U256) -> String {
+pub(crate) fn amount(wei: U256) -> String {
     let unit = U256::from(1_000_000_000_000_000_000u64);
     format!("{}.{:018}", wei / unit, wei % unit)
 }
@@ -368,10 +429,12 @@ fn wallet_text(s: &StatusSnapshot, display: &DisplayMetadata) -> String {
             )
         })
         .unwrap_or_default();
-    let role = if display.follower {
-        "Backup committer"
-    } else {
-        "Epoch committer"
+    // A round coordinator has keepers where an epoch registry has committers.
+    let role = match (display.follower, s.rounds_awaited.is_some()) {
+        (true, false) => "Backup committer",
+        (false, false) => "Epoch committer",
+        (true, true) => "Backup keeper",
+        (false, true) => "Primary keeper wallet",
     };
     format!(
         "Keeper transaction wallet\n{}\nChain: {}\nNative balance (18 decimals): {} {}\n{role}: {}{}",
@@ -409,30 +472,40 @@ fn command_text(
     } else {
         "primary"
     };
-    // A follower reports whether it currently counts the primary as alive, which sets its request delay.
+    // A follower reports whether it currently counts the primary as alive, which sets its request delay. A round
+    // coordinator's primary is its keeper, an epoch registry's its committer.
     let primary = if display.follower {
-        match s.primary_alive {
-            Some(true) => "Primary alive: yes (committer nonce advanced recently)\n",
-            Some(false) => "Primary alive: no (committer nonce idle)\n",
-            None => "Primary alive: unknown\n",
+        match (s.primary_alive, s.rounds_awaited.is_some()) {
+            (Some(true), false) => "Primary alive: yes (committer nonce advanced recently)\n",
+            (Some(false), false) => "Primary alive: no (committer nonce idle)\n",
+            (Some(true), true) => "Primary alive: yes (keeper nonce advanced recently)\n",
+            (Some(false), true) => "Primary alive: no (keeper nonce idle)\n",
+            (None, _) => "Primary alive: unknown\n",
         }
     } else {
         ""
     };
+    // The lane line: an epoch coordinator's epoch, or the rounds a round coordinator's requests wait on.
+    let lane = match s.rounds_awaited {
+        Some(rounds) => format!("Rounds awaited: {rounds}"),
+        None => format!(
+            "Epoch: {} / {:?}",
+            s.epoch_id
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+            s.epoch_state
+        ),
+    };
     let content = match command {
         Command::Keeper => wallet_text(s, display),
         Command::Status => format!(
-            "Keeper status ({role})\nUptime: {uptime}s\nHealth: {:?}\n{primary}Pending: {}\nServed: {}\nLast observed served receipt (Unix): {}\nEpoch: {} / {:?}\nDropped notifications: {dropped}\n{}",
+            "Keeper status ({role})\nUptime: {uptime}s\nHealth: {:?}\n{primary}Pending: {}\nServed: {}\nLast observed served receipt (Unix): {}\n{lane}\nDropped notifications: {dropped}\n{}",
             s.health,
             s.pending,
             s.served,
             s.last_serve_unix
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "unknown".into()),
-            s.epoch_id
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-            s.epoch_state,
             wallet_text(s, display)
         ),
     };
@@ -452,7 +525,9 @@ fn event_text(
         Event::Sweep(_)
         | Event::EpochPublished { .. }
         | Event::Authorization(_)
-        | Event::Upgrade(_) => None,
+        | Event::Upgrade(_)
+        | Event::Finality(_)
+        | Event::Owner(_) => None,
     };
     if let Some(key) = key {
         if cooldowns
@@ -491,7 +566,9 @@ fn event_text(
             amount(balance_wei),
             display.symbol
         ),
-        Event::Sweep(text) | Event::Upgrade(text) => text,
+        Event::Sweep(text) | Event::Upgrade(text) | Event::Finality(text) | Event::Owner(text) => {
+            text
+        }
     };
     // Takeover notices already name the follower; its other notices carry the role as a prefix.
     Some(if display.follower && !text.starts_with("Follower ") {
@@ -813,6 +890,36 @@ mod tests {
         );
     }
     #[test]
+    fn a_finality_message_is_never_held_back_and_never_takes_the_cooldown_of_an_error() {
+        let mut cooldowns = HashMap::new();
+        let now = Instant::now();
+        let display = DisplayMetadata::default();
+        let halt = || Event::Finality("Keeper işlem göndermeyi bekletiyor.".into());
+        for _ in 0..2 {
+            assert_eq!(
+                event_text(halt(), &mut cooldowns, now, &display).as_deref(),
+                Some("Keeper işlem göndermeyi bekletiyor.")
+            );
+        }
+        assert!(cooldowns.is_empty());
+        // The errors that follow it are held back as ever, and do not hold it back.
+        let error = Event::OperationalError {
+            class: ErrorClass::KeeperTick,
+        };
+        assert!(event_text(error.clone(), &mut cooldowns, now, &display).is_some());
+        assert!(event_text(error, &mut cooldowns, now, &display).is_none());
+        assert!(event_text(halt(), &mut cooldowns, now, &display).is_some());
+        let follower = DisplayMetadata {
+            follower: true,
+            ..DisplayMetadata::default()
+        };
+        assert!(
+            event_text(halt(), &mut cooldowns, now, &follower)
+                .unwrap()
+                .starts_with("[follower] Keeper işlem")
+        );
+    }
+    #[test]
     fn fee_budget_names_the_cap_and_shares_its_class_cooldown() {
         use crate::config::{FeeBudget, FeeCap};
         let mut cooldowns = HashMap::new();
@@ -927,6 +1034,50 @@ mod tests {
             Ok(Message::Command(Command::Keeper))
         ));
     }
+    /// R4: a round keeper's low-balance alert is once per episode; an epoch keeper's is as in 0.4.1, every observation
+    /// below the threshold, under the cooldown of the sending loop.
+    #[tokio::test]
+    async fn a_round_keepers_low_balance_alert_is_once_per_episode() {
+        let snapshot = |balance: u64, round: bool| StatusSnapshot {
+            observed_at_unix: Some(100),
+            health: Health::Healthy,
+            pending: 0,
+            served: 0,
+            last_serve_unix: None,
+            epoch_id: None,
+            epoch_state: EpochState::Unknown,
+            rounds_awaited: round.then_some(0),
+            transaction_wallet: Address::ZERO,
+            chain_id: 46_630,
+            balance_wei: Some(U256::from(balance)),
+            authorized: Some(true),
+            primary_alive: None,
+        };
+        let low = |captured: &mut Captured| {
+            captured
+                .events()
+                .into_iter()
+                .filter(|event| matches!(event, Event::LowBalance { .. }))
+                .count()
+        };
+        let (mut notifier, mut captured) = TelegramNotifier::capture();
+        notifier.threshold = U256::from(1_000u64);
+        for balance in [500, 400, 999, 1_100] {
+            notifier.update_status(snapshot(balance, true));
+        }
+        assert_eq!(
+            low(&mut captured),
+            1,
+            "once while below, and not just above the threshold"
+        );
+        notifier.update_status(snapshot(1_250, true));
+        notifier.update_status(snapshot(500, true));
+        assert_eq!(low(&mut captured), 1, "a new episode");
+        for _ in 0..3 {
+            notifier.update_status(snapshot(500, false));
+        }
+        assert_eq!(low(&mut captured), 3, "an epoch keeper's, as before");
+    }
     #[test]
     fn snapshots_expose_only_typed_public_information() {
         let snapshot = StatusSnapshot {
@@ -937,6 +1088,7 @@ mod tests {
             last_serve_unix: Some(100),
             epoch_id: Some(5),
             epoch_state: EpochState::Local,
+            rounds_awaited: None,
             transaction_wallet: Address::ZERO,
             chain_id: 31337,
             balance_wei: Some(U256::from(50_000_000_000_000_000u64)),
@@ -969,6 +1121,25 @@ mod tests {
         let future = command_text(Command::Status, Some(&snapshot), 60, 4, 99, &display);
         assert!(future.contains("unknown (stale)"));
         assert!(!text.contains("Primary alive"));
+        // A round coordinator's keeper has no epoch: its line is the rounds its requests wait on, and its role is the
+        // coordinator's keeper's.
+        let round = StatusSnapshot {
+            epoch_id: None,
+            epoch_state: EpochState::Unknown,
+            rounds_awaited: Some(2),
+            ..snapshot.clone()
+        };
+        let text = command_text(Command::Status, Some(&round), 60, 4, 110, &display);
+        assert!(text.contains("Rounds awaited: 2\n"), "{text}");
+        assert!(!text.contains("Epoch"), "{text}");
+        assert!(text.contains("Primary keeper wallet: authorized"), "{text}");
+        let backup = DisplayMetadata {
+            follower: true,
+            ..display.clone()
+        };
+        let text = command_text(Command::Keeper, Some(&round), 60, 4, 110, &backup);
+        assert!(text.contains("Backup keeper: authorized"), "{text}");
+        assert!(!text.contains("committer"), "{text}");
         // A follower's status says whether it counts the primary as alive.
         let follower = DisplayMetadata {
             follower: true,
@@ -994,6 +1165,23 @@ mod tests {
             command_text(Command::Status, Some(&idle), 600, 4, 221, &follower)
                 .contains("Primary alive: unknown")
         );
+        // A round coordinator's follower names its primary the keeper, never a committer.
+        for (alive, said) in [
+            (true, "Primary alive: yes (keeper nonce advanced recently)"),
+            (false, "Primary alive: no (keeper nonce idle)"),
+        ] {
+            let status = StatusSnapshot {
+                primary_alive: Some(alive),
+                ..round.clone()
+            };
+            for command in [Command::Status, Command::Keeper] {
+                let text = command_text(command, Some(&status), 60, 4, 110, &follower);
+                assert!(!text.contains("committer"), "{text}");
+                if matches!(command, Command::Status) {
+                    assert!(text.contains(said), "{text}");
+                }
+            }
+        }
     }
     #[tokio::test]
     async fn stalled_delivery_does_not_block_producers() {

@@ -1,0 +1,885 @@
+{
+ "about": "The round coordinator's gas model as scripts/lib/round-gas.ts computes it: roundFulfilmentGasLimit, roundFulfilmentGasBound, roundFulfilmentL1Gas, roundMaxBatch and vrfHashToCurveCandidates. keeper/src/round_gas.rs must give the same numbers. robinhoodLive is evidence from Robinhood testnet, written in the generator: the node's estimates of the keeper's first fulfillments.",
+ "regenerate": "node keeper/tests/fixtures/round-gas-model.gen.mjs scripts/lib/round-gas.ts > keeper/tests/fixtures/round-gas-model.json, in a tree that has the round contracts' scripts/lib/round-gas.ts",
+ "source": "scripts/lib/round-gas.ts at 8e3570e",
+ "constants": {
+  "single": "223400",
+  "singleRound": "217300",
+  "batch": "79500",
+  "batchMember": "161400",
+  "batchRound": "205600",
+  "batchMemberRound": "250",
+  "vrfCandidate": "5500",
+  "feesWithdrawn": "17200"
+ },
+ "robinhoodRoundExcess": "17000",
+ "l1": {
+  "single": "25000",
+  "member": "12000",
+  "round": "3000"
+ },
+ "pricedVrfCandidates": 10,
+ "maxFulfillBatch": 16,
+ "gas": [
+  {
+   "name": "single first in its round, 30000",
+   "batch": false,
+   "callbackGasLimits": [
+    30000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1045410",
+   "gasBound": "554400",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "single of a cached round, 30000",
+   "batch": false,
+   "callbackGasLimits": [
+    30000
+   ],
+   "roundsToVerify": 0,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "458782",
+   "gasBound": "320100",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "batch of 2 over 1 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1487619",
+   "gasBound": "801600",
+   "l1Gas": "37000"
+  },
+  {
+   "name": "batch of 2 over 2 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1907297",
+   "gasBound": "1024700",
+   "l1Gas": "40000"
+  },
+  {
+   "name": "batch of 4 over 1 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "2375837",
+   "gasBound": "1283900",
+   "l1Gas": "61000"
+  },
+  {
+   "name": "batch of 4 over 2 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "2795515",
+   "gasBound": "1507500",
+   "l1Gas": "64000"
+  },
+  {
+   "name": "batch of 8 over 1 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "4152273",
+   "gasBound": "2248500",
+   "l1Gas": "109000"
+  },
+  {
+   "name": "batch of 8 over 2 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "4571951",
+   "gasBound": "2473100",
+   "l1Gas": "112000"
+  },
+  {
+   "name": "batch of 16 over 1 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "7705144",
+   "gasBound": "4177700",
+   "l1Gas": "205000"
+  },
+  {
+   "name": "batch of 16 over 2 rounds, 30000",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000,
+    30000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "8124823",
+   "gasBound": "4404300",
+   "l1Gas": "208000"
+  },
+  {
+   "name": "single first in its round, 100000",
+   "batch": false,
+   "callbackGasLimits": [
+    100000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1117650",
+   "gasBound": "624400",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "single of a cached round, 100000",
+   "batch": false,
+   "callbackGasLimits": [
+    100000
+   ],
+   "roundsToVerify": 0,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "531022",
+   "gasBound": "390100",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "batch of 2 over 1 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1632098",
+   "gasBound": "941600",
+   "l1Gas": "37000"
+  },
+  {
+   "name": "batch of 2 over 2 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "2051777",
+   "gasBound": "1164700",
+   "l1Gas": "40000"
+  },
+  {
+   "name": "batch of 4 over 1 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "2664796",
+   "gasBound": "1563900",
+   "l1Gas": "61000"
+  },
+  {
+   "name": "batch of 4 over 2 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "3084474",
+   "gasBound": "1787500",
+   "l1Gas": "64000"
+  },
+  {
+   "name": "batch of 8 over 1 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "4730191",
+   "gasBound": "2808500",
+   "l1Gas": "109000"
+  },
+  {
+   "name": "batch of 8 over 2 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "5149869",
+   "gasBound": "3033100",
+   "l1Gas": "112000"
+  },
+  {
+   "name": "batch of 16 over 1 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "8860980",
+   "gasBound": "5297700",
+   "l1Gas": "205000"
+  },
+  {
+   "name": "batch of 16 over 2 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "9280659",
+   "gasBound": "5524300",
+   "l1Gas": "208000"
+  },
+  {
+   "name": "single first in its round, 1000000",
+   "batch": false,
+   "callbackGasLimits": [
+    1000000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "2046448",
+   "gasBound": "1524400",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "single of a cached round, 1000000",
+   "batch": false,
+   "callbackGasLimits": [
+    1000000
+   ],
+   "roundsToVerify": 0,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "1459821",
+   "gasBound": "1290100",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "batch of 2 over 1 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "3489695",
+   "gasBound": "2741600",
+   "l1Gas": "37000"
+  },
+  {
+   "name": "batch of 2 over 2 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "3909374",
+   "gasBound": "2964700",
+   "l1Gas": "40000"
+  },
+  {
+   "name": "batch of 4 over 1 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "6379990",
+   "gasBound": "5163900",
+   "l1Gas": "61000"
+  },
+  {
+   "name": "batch of 4 over 2 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "6799668",
+   "gasBound": "5387500",
+   "l1Gas": "64000"
+  },
+  {
+   "name": "batch of 8 over 1 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "12160578",
+   "gasBound": "10008500",
+   "l1Gas": "109000"
+  },
+  {
+   "name": "batch of 8 over 2 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "12580257",
+   "gasBound": "10233100",
+   "l1Gas": "112000"
+  },
+  {
+   "name": "batch of 16 over 1 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "23721756",
+   "gasBound": "19697700",
+   "l1Gas": "205000"
+  },
+  {
+   "name": "batch of 16 over 2 rounds, 1000000",
+   "batch": true,
+   "callbackGasLimits": [
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000,
+    1000000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "24141434",
+   "gasBound": "19924300",
+   "l1Gas": "208000"
+  },
+  {
+   "name": "batch of 3 mixed over 3 rounds",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    250000,
+    1000000
+   ],
+   "roundsToVerify": 3,
+   "vrfCandidates": null,
+   "feesWithdrawn": true,
+   "gasLimit": "3999162",
+   "gasBound": "2679450",
+   "l1Gas": "55000"
+  },
+  {
+   "name": "single first in its round, 2 candidates, fees kept",
+   "batch": false,
+   "callbackGasLimits": [
+    50000
+   ],
+   "roundsToVerify": 1,
+   "vrfCandidates": [
+    2
+   ],
+   "feesWithdrawn": false,
+   "gasLimit": "1066050",
+   "gasBound": "513200",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "single of a cached round, 3 candidates",
+   "batch": false,
+   "callbackGasLimits": [
+    50000
+   ],
+   "roundsToVerify": 0,
+   "vrfCandidates": [
+    3
+   ],
+   "feesWithdrawn": true,
+   "gasLimit": "440222",
+   "gasBound": "301600",
+   "l1Gas": "25000"
+  },
+  {
+   "name": "batch of 4 over 2 rounds, exact candidates, fees kept",
+   "batch": true,
+   "callbackGasLimits": [
+    30000,
+    30000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 2,
+   "vrfCandidates": [
+    1,
+    2,
+    1,
+    4
+   ],
+   "feesWithdrawn": false,
+   "gasLimit": "2939995",
+   "gasBound": "1454300",
+   "l1Gas": "64000"
+  }
+ ],
+ "maxBatch": [
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 1,
+   "cap": "13000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 1,
+   "cap": "16777216",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 1,
+   "cap": "32000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 2,
+   "cap": "13000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 2,
+   "cap": "16777216",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 30000,
+   "rounds": 2,
+   "cap": "32000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 1,
+   "cap": "13000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 1,
+   "cap": "16777216",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 1,
+   "cap": "32000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 2,
+   "cap": "13000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 2,
+   "cap": "16777216",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 100000,
+   "rounds": 2,
+   "cap": "32000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 1,
+   "cap": "13000000",
+   "members": 8
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 1,
+   "cap": "16777216",
+   "members": 11
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 1,
+   "cap": "32000000",
+   "members": 16
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 2,
+   "cap": "13000000",
+   "members": 8
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 2,
+   "cap": "16777216",
+   "members": 10
+  },
+  {
+   "callbackGasLimit": 1000000,
+   "rounds": 2,
+   "cap": "32000000",
+   "members": 16
+  }
+ ],
+ "vrfCandidates": {
+  "publicKey": [
+   "4051293998585674784991639592782214972820158391371785981004352359465450369227",
+   "88166831356626186178414913298033275054086243781277878360288998796587140930350"
+  ],
+  "seeds": [
+   {
+    "seed": "1",
+    "candidates": 1
+   },
+   {
+    "seed": "11400714819323198486",
+    "candidates": 3
+   },
+   {
+    "seed": "22801429638646396971",
+    "candidates": 1
+   },
+   {
+    "seed": "34202144457969595456",
+    "candidates": 1
+   },
+   {
+    "seed": "45602859277292793941",
+    "candidates": 4
+   },
+   {
+    "seed": "57003574096615992426",
+    "candidates": 4
+   },
+   {
+    "seed": "68404288915939190911",
+    "candidates": 1
+   },
+   {
+    "seed": "79805003735262389396",
+    "candidates": 1
+   },
+   {
+    "seed": "91205718554585587881",
+    "candidates": 2
+   },
+   {
+    "seed": "102606433373908786366",
+    "candidates": 3
+   },
+   {
+    "seed": "114007148193231984851",
+    "candidates": 5
+   },
+   {
+    "seed": "125407863012555183336",
+    "candidates": 1
+   },
+   {
+    "seed": "136808577831878381821",
+    "candidates": 5
+   },
+   {
+    "seed": "148209292651201580306",
+    "candidates": 2
+   },
+   {
+    "seed": "159610007470524778791",
+    "candidates": 2
+   },
+   {
+    "seed": "171010722289847977276",
+    "candidates": 2
+   },
+   {
+    "seed": "182411437109171175761",
+    "candidates": 1
+   },
+   {
+    "seed": "193812151928494374246",
+    "candidates": 1
+   },
+   {
+    "seed": "205212866747817572731",
+    "candidates": 5
+   },
+   {
+    "seed": "216613581567140771216",
+    "candidates": 1
+   },
+   {
+    "seed": "228014296386463969701",
+    "candidates": 2
+   },
+   {
+    "seed": "239415011205787168186",
+    "candidates": 5
+   },
+   {
+    "seed": "250815726025110366671",
+    "candidates": 1
+   },
+   {
+    "seed": "262216440844433565156",
+    "candidates": 1
+   }
+  ]
+ },
+ "robinhoodLive": [
+  {
+   "name": "testnet single first in its round, 100000",
+   "batch": false,
+   "callbackGasLimits": [
+    100000
+   ],
+   "roundsToVerify": 1,
+   "l1Gas": 20423,
+   "l1MarginBps": 2500,
+   "loggedModelLimit": 1143179,
+   "estimate": 1145832,
+   "receiptGasUsed": 556063,
+   "receiptL1Gas": 17621,
+   "gasLimit": "1117650"
+  },
+  {
+   "name": "testnet batch of 3 over 1 rounds, 100000",
+   "batch": true,
+   "callbackGasLimits": [
+    100000,
+    100000,
+    100000
+   ],
+   "roundsToVerify": 1,
+   "l1Gas": 41916,
+   "l1MarginBps": 2500,
+   "loggedModelLimit": 2200842,
+   "estimate": 2205422,
+   "receiptGasUsed": null,
+   "receiptL1Gas": null,
+   "gasLimit": "2148447"
+  }
+ ]
+}

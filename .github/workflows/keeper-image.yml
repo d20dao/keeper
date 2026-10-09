@@ -35,9 +35,12 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/keeper"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker tag d20dao-keeper:local "$image:sha-$GITHUB_SHA"
-          docker tag d20dao-keeper:local "$image:main"
           docker push "$image:sha-$GITHUB_SHA"
-          docker push "$image:main"
+          # The moving :main tag follows the main branch alone; a manual run from any other ref publishes its commit tag only.
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag d20dao-keeper:local "$image:main"
+            docker push "$image:main"
+          fi
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:sha-$GITHUB_SHA")
           docker logout ghcr.io
           {

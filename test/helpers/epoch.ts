@@ -1,8 +1,9 @@
 import {deployProxy} from "./proxy.ts";
 import { Wallet, toBeHex, hexlify, toUtf8Bytes, getBytes } from "ethers";
 import { attestationDigest } from "../../src/sources.ts";
-import { BUILTIN_EPOCH_RECIPES, type EpochProvider } from "../../src/epoch.ts";
-import { publicKey } from "./proof.ts";
+import { BUILTIN_EPOCH_RECIPES, readEpochRecipes, replayEpochCoordinator, resolveEpochCatalog, type EpochProvider } from "../../src/epoch.ts";
+import { builtins } from "../../src/mapping.ts";
+import { publicKey, type makeProof } from "./proof.ts";
 // Public test keys, never production signers. EPOCH_TEST_WALLETS sign the initial catalog's four slots.
 export const EPOCH_TEST_WALLETS=[11n,12n,13n,14n].map(n=>new Wallet(toBeHex(n,32)));
 export const EPOCH_TEST_SIGNERS=EPOCH_TEST_WALLETS.map(w=>w.address);
@@ -48,4 +49,20 @@ export async function deployReadyEpochFixture(ethers:any,networkHelpers:any,fee=
   if(flat)await rng.setPricing(fee,0,300000);
   const consumer=await ethers.deployContract("TestConsumer",[await rng.getAddress()]);
   return {registry,rng,consumer,owner,user,stranger};
+}
+/// Replay a served request as an independent verifier would, from the chain's records: the catalog and recipe definitions in
+/// force for its epoch (a beacon's registration included), the epoch's published packet and the request's acceptance.
+export async function replayServedRequest(ethers:any,c:{registry:any;rng:any;consumer:any},id:bigint,proof:ReturnType<typeof makeProof>,
+  commit:{blockNumber:number;logs:readonly any[]},accepted:{blockNumber:number},initialMinFee:bigint) {
+  const {registry,rng,consumer}=c,address=await registry.getAddress(),r=await rng.getRequest(id),firstEpochStart=await registry.firstEpochStart();
+  const [hash,recipes,signers]=await registry.catalogAt(r.epochId);
+  const recipeBook=await readEpochRecipes(ethers.provider,address,recipes.map(Number));
+  const catalog=resolveEpochCatalog({registry:address,chainId:(await ethers.provider.getNetwork()).chainId,firstEpochStart,recipeBook},{hash,recipes,signers});
+  const packet=commit.logs.filter(log=>log.address===address).map(log=>registry.interface.parseLog(log)).find(event=>event?.name==="EpochCommitted")!.args.packet;
+  const context={chainId:catalog.chainId,coordinator:await rng.getAddress(),keyHash:await rng.keyHash(),requestId:id,consumer:await consumer.getAddress(),clientSeed:r.clientSeed,mapping:builtins.raw(),
+    requestBlock:r.requestBlock,targetBlock:r.targetBlock,blockHash:(await ethers.provider.getBlock(Number(r.targetBlock)))!.hash!,epochId:r.epochId,epochHash:r.epochHash};
+  const configuration={publicKey:publicKey(),feeRecipient:await rng.initialFeeRecipient(),initialMinFee,confirmationBlocks:1,registry:address,catalogHash:await registry.catalogHash(),firstEpochStart};
+  return replayEpochCoordinator({context,configuration,protocolConfigurationHash:await rng.protocolConfigurationHash(),
+    epoch:{catalog,record:await registry.getEpoch(r.epochId),commitTimestamp:BigInt((await ethers.provider.getBlock(commit.blockNumber))!.timestamp),packet},
+    requestedAt:r.deadline-60n,deadline:r.deadline,acceptanceTimestamp:BigInt((await ethers.provider.getBlock(accepted.blockNumber))!.timestamp),acceptanceBlock:BigInt(accepted.blockNumber),vrfProof:proof,recorded:r});
 }

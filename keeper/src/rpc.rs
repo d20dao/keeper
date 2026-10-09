@@ -1,3 +1,5 @@
+use crate::abi::NodeInterface;
+use crate::config::FinalityMode;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use anyhow::{Context, Result, ensure};
@@ -8,6 +10,24 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// The most blocks one `block_hashes` batch names: the size of an audit page of the finality audit.
+pub const MAX_BLOCK_HASHES: usize = 64;
+/// How long an endpoint that showed another block than the other endpoints agree on stays last in the read order
+/// (soft finality; see `finality::verdict`).
+pub const DISAGREEMENT_COOLDOWN: Duration = Duration::from_secs(300);
+/// One endpoint's answer about a block whose hash is disputed: the hash it has for the block, and the number of its
+/// finalized head when it served one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockView {
+    /// The endpoint's position in `RPC_URLS`, from 0. Never its address, which may hold a key.
+    pub endpoint: usize,
+    pub hash: B256,
+    pub finalized: Option<u64>,
+}
+/// Arbitrum's NodeInterface, a virtual contract that only `eth_call` reaches.
+pub const NODE_INTERFACE: Address = Address::new([
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc8,
+]);
 #[derive(Debug, PartialEq, Eq)]
 pub enum BroadcastOutcome {
     Acknowledged,
@@ -30,6 +50,10 @@ struct DeliveryError {
     /// The endpoint answered a well-formed read with something the read could not use: no JSON-RPC answer, or a
     /// result of the wrong shape (null, not hex, a missing field). That endpoint failed, not the request or the chain.
     malformed: bool,
+    /// The JSON-RPC error code the node answered with.
+    code: Option<i64>,
+    /// The endpoint refused a JSON-RPC batch for its size: an HTTP error or a JSON-RPC error that names batches.
+    batch_refused: bool,
     detail: String,
 }
 impl std::fmt::Display for DeliveryError {
@@ -42,6 +66,20 @@ impl std::fmt::Display for DeliveryError {
     }
 }
 impl std::error::Error for DeliveryError {}
+impl DeliveryError {
+    /// The endpoint failed as a provider does when it is overloaded or down: no answer (transport, timeout), an HTTP
+    /// error, a rate limit, or a JSON-RPC server error (-32000) that is no rejection, revert or known transaction. An
+    /// answer the read could not use is not one: it may be another chain's or another contract's.
+    fn provider(&self) -> bool {
+        if self.malformed {
+            return false;
+        }
+        if self.rate_limited || !self.responded {
+            return true;
+        }
+        self.code == Some(-32000) && self.rejection.is_none() && !self.known && !self.reverted
+    }
+}
 /// No usable answer arrived: the endpoints did not answer, answered with a JSON-RPC error, rate limited, or (for a
 /// read) answered with something the read could not use. Not a verdict on the chain.
 pub fn is_delivery_failure(error: &anyhow::Error) -> bool {
@@ -54,6 +92,15 @@ pub fn is_rate_limited(error: &anyhow::Error) -> bool {
         cause
             .downcast_ref::<DeliveryError>()
             .is_some_and(|d| d.rate_limited)
+    })
+}
+/// The call failed only because the endpoints failed as providers do when they are overloaded or down (HTTP 429 or
+/// 5xx, a rate limit, -32000, no answer in time): not a verdict on the chain, the keys or the configuration.
+pub fn is_provider_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<DeliveryError>()
+            .is_some_and(DeliveryError::provider)
     })
 }
 /// Provider wording for "slow down". Codes alone are ambiguous (-32005 also reports oversized log queries), so an
@@ -75,6 +122,19 @@ fn rate_limit_response(code: i64, message: &str) -> bool {
         ]
         .iter()
         .any(|needle| message.contains(needle))
+}
+/// Provider wording for a JSON-RPC batch it does not take, such as "Batch of more than 3 requests are not allowed on free
+/// plan" or "batch size too large".
+fn names_batches(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("batch")
+}
+/// Whether an array of JSON-RPC calls was refused for its size: the provider answered with an HTTP error or a JSON-RPC
+/// error that names batches (or HTTP 400 or 413). A rate limit is not a refusal.
+fn batch_refused(error: &anyhow::Error) -> bool {
+    !is_rate_limited(error)
+        && error
+            .downcast_ref::<DeliveryError>()
+            .is_some_and(|delivery| delivery.batch_refused)
 }
 /// A failure that happened only because every endpoint was rate limiting, for callers that observed that themselves.
 pub fn rate_limited_error(context: &'static str) -> anyhow::Error {
@@ -172,6 +232,8 @@ fn uncertain(detail: impl Into<String>) -> DeliveryError {
         reverted: false,
         rate_limited: false,
         malformed: false,
+        code: None,
+        batch_refused: false,
         detail: detail.into(),
     }
 }
@@ -181,6 +243,11 @@ fn malformed(detail: impl Into<String>) -> DeliveryError {
         malformed: true,
         ..uncertain(detail)
     }
+}
+/// An answer that two reads of one block contradict (a revert for state another read there says exists): the failure of
+/// the endpoint that gave it, a delivery failure and not a revert.
+pub fn unusable(detail: impl Into<String>) -> anyhow::Error {
+    malformed(detail).into()
 }
 fn broadcast_result(result: Result<Value>, expected: B256) -> Result<BroadcastOutcome> {
     match result {
@@ -227,10 +294,19 @@ pub struct Rpc {
     /// Per endpoint: consecutive rate-limited answers and the end of the back-off they earned. An endpoint inside
     /// its back-off is not asked at all, so a limit is never answered with more traffic.
     limits: Arc<Mutex<Vec<RateLimit>>>,
-    /// Endpoints that answered a JSON-RPC batch with something other than a matching array.
-    unbatched: Arc<Mutex<Vec<bool>>>,
+    /// Per endpoint: the most calls one JSON-RPC batch to it may carry. Unbounded until it refuses a batch for its size,
+    /// then the largest chunk that it answered (`batch_at`); 1 for an endpoint that answers a batch with something other
+    /// than a matching array, which is asked one call at a time. Kept for the life of the process.
+    batch_limits: Arc<Mutex<Vec<usize>>>,
+    /// Per endpoint: whether it is held out of every read. A round keeper holds the endpoints that did not answer at
+    /// startup, and admits each once it answers its probe (`Worker::readmit_endpoints`). Nothing is held otherwise.
+    held: Arc<Mutex<Vec<bool>>>,
     read_budget: Duration,
     attempt_budget: Duration,
+    /// The block the keeper decides on: see `decision_head`. Finalized until `with_finality` says otherwise.
+    finality: FinalityMode,
+    /// In soft mode the decision head is this many blocks below the latest one; 0 in finalized mode.
+    soft_depth: u64,
 }
 #[derive(Clone, Debug)]
 pub struct Head {
@@ -285,6 +361,17 @@ fn usable_receipt(v: Value, expected: B256) -> Result<Option<Value>> {
     );
     Ok(Some(v))
 }
+/// The number of the block a receipt of transaction `hash` names, once the receipt is shown to be that transaction's
+/// and to carry a valid status.
+fn receipt_number(hash: &str, receipt: &Value) -> Result<u64> {
+    let actual: B256 = serde_json::from_value(receipt["transactionHash"].clone())?;
+    ensure!(
+        actual == hash.parse::<B256>()?,
+        "Unexpected receipt transaction"
+    );
+    ensure!(quantity(&receipt["status"])? <= 1, "Invalid receipt status");
+    quantity(&receipt["blockNumber"])
+}
 /// The answer to a request for block `number`: that block. Null (a block the endpoint has not served yet) or any
 /// other block is unusable.
 fn numbered_block(v: &Value, number: u64) -> Result<Head> {
@@ -305,22 +392,80 @@ impl Rpc {
             active: Arc::new(AtomicUsize::new(0)),
             cooldowns: Arc::new(Mutex::new(vec![None; count])),
             limits: Arc::new(Mutex::new(vec![(0, None); count])),
-            unbatched: Arc::new(Mutex::new(vec![false; count])),
+            batch_limits: Arc::new(Mutex::new(vec![usize::MAX; count])),
+            held: Arc::new(Mutex::new(vec![false; count])),
             read_budget: Duration::from_secs(8u64.saturating_mul(count as u64)),
             attempt_budget: Duration::from_secs(8),
+            finality: FinalityMode::Finalized,
+            soft_depth: 0,
         })
     }
+    /// These endpoints, deciding on `mode`. `Finalized` is what `new` gives and what Arc runs: the keeper decides on the
+    /// finalized head and reads contract views at the `finalized` tag. `Soft` decides on the sequencer's latest block
+    /// less `soft_depth` blocks and reads views at `latest`; see `decision_head`. Every primitive below that depends on
+    /// the mode is exactly the finalized code path when the mode is `Finalized`.
+    pub fn with_finality(self, mode: FinalityMode, soft_depth: u64) -> Self {
+        Self {
+            finality: mode,
+            soft_depth: match mode {
+                FinalityMode::Finalized => 0,
+                FinalityMode::Soft => soft_depth,
+            },
+            ..self
+        }
+    }
+    pub fn finality(&self) -> FinalityMode {
+        self.finality
+    }
+    /// These endpoints, with the ones whose position `admitted` does not list held out of every read until `admit`.
+    pub fn holding(self, admitted: &[bool]) -> Self {
+        {
+            let mut held = self.held.lock().expect("RPC held mutex");
+            for (i, held) in held.iter_mut().enumerate() {
+                *held = !admitted.get(i).copied().unwrap_or(true);
+            }
+        }
+        if let Some(first) = admitted.iter().position(|admitted| *admitted) {
+            self.active.store(first, Ordering::Relaxed);
+        }
+        self
+    }
+    /// The positions of the endpoints held out of reads.
+    pub fn held(&self) -> Vec<usize> {
+        let held = self.held.lock().expect("RPC held mutex");
+        (0..held.len()).filter(|i| held[*i]).collect()
+    }
+    /// Endpoint `i` answers reads from now on.
+    pub fn admit(&self, i: usize) {
+        self.held.lock().expect("RPC held mutex")[i] = false;
+    }
+    /// The endpoints that answer reads, in configured order.
+    pub fn admitted_urls(&self) -> Vec<String> {
+        let held = self.held.lock().expect("RPC held mutex");
+        self.urls
+            .iter()
+            .zip(held.iter())
+            .filter(|(_, held)| !**held)
+            .map(|(url, _)| url.clone())
+            .collect()
+    }
+    /// How many endpoints answer reads: the configured ones less the held ones.
+    pub fn admitted(&self) -> usize {
+        self.urls.len() - self.held().len()
+    }
     /// Endpoints in the order a read tries them: the last one that answered first, slow ones last, and the ones
-    /// inside a rate-limit back-off not at all. Empty when every endpoint is backing off.
+    /// inside a rate-limit back-off, or held, not at all. Empty when every endpoint is backing off.
     fn read_order(&self) -> Vec<usize> {
         let count = self.urls.len();
         let start = self.active.load(Ordering::Relaxed) % count;
         let now = tokio::time::Instant::now();
         let limits = self.limits.lock().expect("RPC rate-limit mutex");
+        let held = self.held.lock().expect("RPC held mutex");
         let mut order: Vec<usize> = (0..count)
             .map(|offset| (start + offset) % count)
-            .filter(|i| limits[*i].1.is_none_or(|until| until <= now))
+            .filter(|i| !held[*i] && limits[*i].1.is_none_or(|until| until <= now))
             .collect();
+        drop(held);
         drop(limits);
         let cooldowns = self.cooldowns.lock().expect("RPC cooldown mutex");
         order.sort_by_key(|i| cooldowns[*i].is_some_and(|until| until > now));
@@ -390,10 +535,23 @@ impl Rpc {
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(rate_limited("HTTP status 429").into());
         }
-        if !response.status().is_success() {
-            return Err(uncertain(format!("HTTP status {}", response.status().as_u16())).into());
-        }
         let mut response = response;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            // A provider that refuses a batch for its size says so in the body of its HTTP error, or answers 400 or 413.
+            let mut said = Vec::new();
+            while said.len() < 4096
+                && let Ok(Some(chunk)) = response.chunk().await
+            {
+                said.extend_from_slice(&chunk);
+            }
+            return Err(DeliveryError {
+                batch_refused: matches!(status, 400 | 413)
+                    || names_batches(&String::from_utf8_lossy(&said)),
+                ..uncertain(format!("HTTP status {status}"))
+            }
+            .into());
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| uncertain("transport"))? {
             ensure!(
@@ -421,6 +579,11 @@ impl Rpc {
                 reverted: code == 3 || message.to_ascii_lowercase().contains("revert"),
                 rate_limited: rate_limit_response(code, message),
                 malformed: false,
+                code: Some(code),
+                // A revert that names a batch (a batch fulfillment's) is no refusal.
+                batch_refused: names_batches(message)
+                    && code != 3
+                    && !message.to_ascii_lowercase().contains("revert"),
                 detail: format!("JSON-RPC code {code}"),
             }
             .into());
@@ -580,50 +743,90 @@ impl Rpc {
     }
     /// `calls` sent to endpoint `i` alone: one JSON-RPC batch where the endpoint answers batches, otherwise one call
     /// at a time. Results come back in call order.
+    ///
+    /// An endpoint that refuses a batch for its size (`batch_refused`) is asked the same calls again at once in chunks of
+    /// half the size, halving down to single calls; the size it answered is kept for it, and later batches to it are sent
+    /// in chunks of that size. A refusal is not the endpoint's failure: only a chunk that fails as anything else fails the
+    /// attempt.
     pub(crate) async fn batch_at(&self, i: usize, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
         let url = &self.urls[i];
-        if !self.unbatched.lock().expect("RPC batch mutex")[i] {
-            let body: Vec<Value> = calls
-                .iter()
-                .enumerate()
-                .map(|(id, (method, params))| {
-                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-                })
-                .collect();
-            let answer = self.post(url, &Value::Array(body)).await?;
-            if let Some(items) = answer.as_array().filter(|items| items.len() == calls.len()) {
-                let mut results = vec![Value::Null; calls.len()];
-                let mut seen = vec![false; calls.len()];
-                for item in items {
-                    let id = item["id"]
-                        .as_u64()
-                        .and_then(|id| usize::try_from(id).ok())
-                        .filter(|id| *id < calls.len() && !seen[*id])
-                        .ok_or_else(|| anyhow::anyhow!("Invalid RPC batch response id"))?;
-                    seen[id] = true;
-                    results[id] = Self::outcome(item)?;
-                }
-                return Ok(results);
-            }
-            // A single error object or a short array: this endpoint does not batch. A rate-limit error in that
-            // position is still a rate limit, not a lack of batch support.
-            if answer.get("error").is_some()
-                && let Err(error) = Self::outcome(&answer)
-                && is_rate_limited(&error)
-            {
-                return Err(error);
-            }
-            self.unbatched.lock().expect("RPC batch mutex")[i] = true;
-            tracing::debug!(
-                endpoint = i,
-                "RPC endpoint does not answer batches; sending calls one by one"
-            );
-        }
+        let known = self.batch_limits.lock().expect("RPC batch mutex")[i];
+        let mut limit = known;
         let mut results = Vec::with_capacity(calls.len());
-        for (method, params) in calls {
-            results.push(self.at(url, method, params.clone()).await?);
+        while results.len() < calls.len() {
+            let rest = &calls[results.len()..];
+            if limit <= 1 {
+                for (method, params) in rest {
+                    results.push(self.at(url, method, params.clone()).await?);
+                }
+                break;
+            }
+            let chunk = &rest[..rest.len().min(limit)];
+            match self.post_batch(url, chunk).await {
+                Ok(Some(answered)) => results.extend(answered),
+                Ok(None) => {
+                    limit = 1;
+                    tracing::debug!(
+                        endpoint = i,
+                        "RPC endpoint does not answer batches; sending calls one by one"
+                    );
+                }
+                Err(error) if batch_refused(&error) => {
+                    limit = (chunk.len() / 2).max(1);
+                    tracing::debug!(endpoint = i, refused = chunk.len(), batch = limit, error = %error,
+                        "RPC endpoint refused a batch; asking again in smaller chunks");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if limit < known {
+            let mut limits = self.batch_limits.lock().expect("RPC batch mutex");
+            if limit < limits[i] {
+                limits[i] = limit;
+                drop(limits);
+                tracing::info!(
+                    endpoint = i,
+                    batch = limit,
+                    "RPC endpoint takes batches of this size at most; larger ones are sent in chunks"
+                );
+            }
         }
         Ok(results)
+    }
+    /// One JSON-RPC batch of `calls` to `url`: the results in call order, or None when the endpoint answered with
+    /// something other than a matching array that is no refusal of its size (it does not batch).
+    async fn post_batch(&self, url: &str, calls: &[(&str, Value)]) -> Result<Option<Vec<Value>>> {
+        let body: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(id, (method, params))| {
+                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+            })
+            .collect();
+        let answer = self.post(url, &Value::Array(body)).await?;
+        if let Some(items) = answer.as_array().filter(|items| items.len() == calls.len()) {
+            let mut results = vec![Value::Null; calls.len()];
+            let mut seen = vec![false; calls.len()];
+            for item in items {
+                let id = item["id"]
+                    .as_u64()
+                    .and_then(|id| usize::try_from(id).ok())
+                    .filter(|id| *id < calls.len() && !seen[*id])
+                    .ok_or_else(|| anyhow::anyhow!("Invalid RPC batch response id"))?;
+                seen[id] = true;
+                results[id] = Self::outcome(item)?;
+            }
+            return Ok(Some(results));
+        }
+        // A single error object or a short array: this endpoint does not batch. A rate-limit error in that position is
+        // still a rate limit, and an error that names batches a refusal of this batch's size.
+        if answer.get("error").is_some()
+            && let Err(error) = Self::outcome(&answer)
+            && (is_rate_limited(&error) || batch_refused(&error))
+        {
+            return Err(error);
+        }
+        Ok(None)
     }
     /// Only an attempt that consumed a full attempt budget proves a slow endpoint.
     fn cool_slow_attempts(&self, attempts: &[(usize, tokio::time::Instant)]) {
@@ -637,8 +840,16 @@ impl Rpc {
     /// start at the next endpoint instead. It is never dropped: a single endpoint, or every endpoint cooling at
     /// once, is still asked.
     fn cool(&self, i: usize) {
-        self.cooldowns.lock().expect("RPC cooldown mutex")[i] =
-            Some(tokio::time::Instant::now() + Duration::from_secs(5));
+        self.cool_for(i, Duration::from_secs(5));
+    }
+    /// `cool` for `period`: endpoint `i` moves last in the read order until then, or until a longer cooldown it is
+    /// already in ends. A soft keeper puts an endpoint that showed another block than the others agree on here for
+    /// `DISAGREEMENT_COOLDOWN`; it is still asked when no other endpoint answers.
+    pub fn cool_for(&self, i: usize, period: Duration) {
+        let until = tokio::time::Instant::now() + period;
+        let mut cooldowns = self.cooldowns.lock().expect("RPC cooldown mutex");
+        cooldowns[i] = Some(cooldowns[i].map_or(until, |cooling| cooling.max(until)));
+        drop(cooldowns);
         self.active
             .compare_exchange(
                 i,
@@ -648,8 +859,124 @@ impl Rpc {
             )
             .ok();
     }
+    /// Whether endpoint `i` is cooling down now.
+    pub fn cooling(&self, i: usize) -> bool {
+        self.cooldowns.lock().expect("RPC cooldown mutex")[i]
+            .is_some_and(|until| until > tokio::time::Instant::now())
+    }
+    /// Every endpoint's view of block `number`, asked of all of them at once (those inside a rate-limit back-off
+    /// excepted, and cooling ones included), each within `budget`: the block, and beside it the `finalized` header. The
+    /// two are separate reads, so that an endpoint that does not serve the `finalized` tag still gives its view of the
+    /// block, without a finalized number. An endpoint that answers that it has no such block gives a view with the hash
+    /// `finality::ABSENT`; one that does not answer the block in time or answers it unusably gives no view. Views are in
+    /// endpoint order. This is how a soft keeper asks the other endpoints
+    /// about a block one of them showed with another hash than the journal's; nothing else reads this way.
+    pub async fn block_views(&self, number: u64, budget: Duration) -> Vec<BlockView> {
+        let reads = self.read_order().into_iter().map(|i| async move {
+            let url = &self.urls[i];
+            let ask = |tag: String| async move {
+                tokio::time::timeout(
+                    budget,
+                    self.at(url, "eth_getBlockByNumber", json!([tag, false])),
+                )
+                .await
+                .ok()
+            };
+            let (block, finalized) =
+                tokio::join!(ask(format!("0x{number:x}")), ask("finalized".to_owned()));
+            let block = block?;
+            self.note_rate_limit(i, block.as_ref().err().is_some_and(is_rate_limited));
+            let block = block.ok()?;
+            let hash = if block.is_null() {
+                crate::finality::ABSENT
+            } else {
+                numbered_block(&block, number).ok()?.hash
+            };
+            Some(BlockView {
+                endpoint: i,
+                hash,
+                finalized: finalized
+                    .and_then(Result::ok)
+                    .and_then(|header| Head::from_block(&header).ok())
+                    .map(|header| header.number),
+            })
+        });
+        let mut views: Vec<BlockView> = futures_util::future::join_all(reads)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        views.sort_by_key(|view| view.endpoint);
+        views
+    }
+    /// Every endpoint's `finalized` header, asked of all of them at once (those inside a rate-limit back-off excepted,
+    /// and cooling ones included), until `deadline`. An endpoint that does not answer by then, does not serve the tag or
+    /// answers unusably is left out.
+    pub async fn finalized_views(&self, deadline: tokio::time::Instant) -> Vec<Head> {
+        let reads = self.read_order().into_iter().map(|i| async move {
+            let answer = tokio::time::timeout_at(
+                deadline,
+                self.at(
+                    &self.urls[i],
+                    "eth_getBlockByNumber",
+                    json!(["finalized", false]),
+                ),
+            )
+            .await
+            .ok()?;
+            self.note_rate_limit(i, answer.as_ref().err().is_some_and(is_rate_limited));
+            Head::from_block(&answer.ok()?).ok()
+        });
+        futures_util::future::join_all(reads)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+    /// Every endpoint's hashes of the blocks `numbers` (at most MAX_BLOCK_HASHES), each endpoint's in one batch, asked of
+    /// all of them at once until `deadline`, as `finalized_views` asks. An endpoint that does not answer them all, usably
+    /// and by then, is left out.
+    pub async fn block_hash_views(
+        &self,
+        numbers: &[u64],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Vec<B256>> {
+        let calls: Vec<(&str, Value)> = numbers
+            .iter()
+            .map(|number| {
+                (
+                    "eth_getBlockByNumber",
+                    json!([format!("0x{number:x}"), false]),
+                )
+            })
+            .collect();
+        let calls = &calls;
+        let reads = self.read_order().into_iter().map(|i| async move {
+            let answer = tokio::time::timeout_at(deadline, self.batch_at(i, calls))
+                .await
+                .ok()?;
+            self.note_rate_limit(i, answer.as_ref().err().is_some_and(is_rate_limited));
+            let blocks = answer.ok()?;
+            numbers
+                .iter()
+                .zip(&blocks)
+                .map(|(number, block)| numbered_block(block, *number).ok().map(|block| block.hash))
+                .collect::<Option<Vec<B256>>>()
+                .filter(|hashes| hashes.len() == numbers.len())
+        });
+        futures_util::future::join_all(reads)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
     pub async fn head(&self) -> Result<Head> {
         self.head_at("latest").await
+    }
+    /// The `safe` head: on an Arbitrum chain, the latest block in a batch posted to L1, which the sequencer can no longer
+    /// replace.
+    pub async fn safe_head(&self) -> Result<Head> {
+        self.head_at("safe").await
     }
     /// Median of the per-block 50th-percentile tips over recent blocks (eth_feeHistory).
     pub async fn recent_priority_fee(&self, blocks: u64) -> Result<u128> {
@@ -671,6 +998,8 @@ impl Rpc {
         )
         .await
     }
+    /// The finalized head. Whatever the mode, this reads the `finalized` tag: it is what the finality audit compares the
+    /// blocks the keeper acted on against. The keeper decides on `decision_head`.
     pub async fn finalized_head(&self) -> Result<Head> {
         self.head_at("finalized").await
     }
@@ -698,6 +1027,119 @@ impl Rpc {
         })
         .await
     }
+    /// The block the keeper decides on: its time, its number and its base fee price what the tick does, and what it
+    /// reads of requests and nonces it reads at this block.
+    ///
+    /// `Finalized`: the finalized head, today's read. `Soft`: the sequencer's latest block less the soft depth. With
+    /// depth 0 that is the latest block, one request. With a depth, the latest block and the block that many below it
+    /// are read in turn from one endpoint, since the second depends on the first; no other endpoint's block is mixed
+    /// in, and the tick after it checks that the block it chose is still on the chain (the soft checkpoint).
+    pub async fn decision_head(&self) -> Result<Head> {
+        match self.finality {
+            FinalityMode::Finalized => self.finalized_head().await,
+            FinalityMode::Soft if self.soft_depth == 0 => self.head().await,
+            FinalityMode::Soft => Ok(self.soft_blocks(None, false).await?.0),
+        }
+    }
+    /// The decision head and, when `checkpoint` names a block number, that block, both from one endpoint's answers. An
+    /// answer without a usable block for either (a finalized head the endpoint does not serve, a checkpoint block it
+    /// has not reached) fails that endpoint, and the next one answers the whole read.
+    ///
+    /// `Finalized`: `finalized_head_with`. `Soft`: the latest block (less the soft depth) and the checkpoint block in
+    /// one batch from one endpoint; with a depth, the second read of `decision_head` carries the checkpoint too.
+    pub async fn decision_head_with(
+        &self,
+        checkpoint: Option<u64>,
+    ) -> Result<(Head, Option<Head>)> {
+        match self.finality {
+            FinalityMode::Finalized => self.finalized_head_with(checkpoint).await,
+            FinalityMode::Soft => self.soft_blocks(checkpoint, true).await,
+        }
+    }
+    /// Soft mode: the decision head and, when `block` names a number, that block, from one endpoint's answers.
+    ///
+    /// With `required`, the block must be served: an endpoint that does not serve it has not reached it, and fails. A
+    /// block above the decision head that the endpoint does not serve yet is otherwise `None`, which says that the
+    /// endpoint has not reached it, not that the endpoint is unusable. A block at or below the decision head that is
+    /// not served is unusable either way: an endpoint that has its head has all of the blocks below it.
+    async fn soft_blocks(
+        &self,
+        block: Option<u64>,
+        required: bool,
+    ) -> Result<(Head, Option<Head>)> {
+        let depth = self.soft_depth;
+        let ask = |number: &str| ("eth_getBlockByNumber", json!([number, false]));
+        let latest = ask("latest");
+        let wanted = block.map(|number| ask(&format!("0x{number:x}")));
+        // The batch that reads the latest block, with the checkpoint beside it when no depth needs a second read.
+        let mut first = vec![latest];
+        if depth == 0 {
+            first.extend(wanted.clone());
+        }
+        let (first, wanted) = (&first, &wanted);
+        self.hedged("eth_getBlockByNumber batch", move |i| async move {
+            let answers = self.batch_at(i, first).await?;
+            let latest = Head::from_block(&answers[0])?;
+            let (decision, other) = if depth == 0 {
+                (latest, answers.get(1).cloned())
+            } else {
+                let number = latest.number.saturating_sub(depth);
+                let mut calls = vec![ask(&format!("0x{number:x}"))];
+                calls.extend(wanted.clone());
+                let mut answers = self.batch_at(i, &calls).await?.into_iter();
+                let decision = numbered_block(&answers.next().unwrap_or(Value::Null), number)?;
+                (decision, answers.next())
+            };
+            let found = match block {
+                None => None,
+                Some(number) => {
+                    let value = other.ok_or_else(|| anyhow::anyhow!("Missing block answer"))?;
+                    if value.is_null() && !required && number > decision.number {
+                        None
+                    } else {
+                        Some(numbered_block(&value, number)?)
+                    }
+                }
+            };
+            Ok((decision, found))
+        })
+        .await
+    }
+    /// The block tag at which the keeper reads requests and the wallet's nonce for a tick that decided on `head`:
+    /// `finalized` in finalized mode, as always, and in soft mode the number of `head`, so that everything the tick
+    /// reads is read at the block it decided on.
+    pub fn decision_tag(&self, head: &Head) -> String {
+        match self.finality {
+            FinalityMode::Finalized => "finalized".to_owned(),
+            FinalityMode::Soft => format!("0x{:x}", head.number),
+        }
+    }
+    /// `decision_tag` for a caller that holds no head. Finalized mode needs none. In soft mode the decision head is the
+    /// latest block when the depth is 0, and otherwise it is read.
+    pub async fn current_decision_tag(&self) -> Result<String> {
+        Ok(match self.finality {
+            FinalityMode::Finalized => "finalized".to_owned(),
+            FinalityMode::Soft if self.soft_depth == 0 => "latest".to_owned(),
+            FinalityMode::Soft => self.decision_tag(&self.decision_head().await?),
+        })
+    }
+    /// The nonce of `address` at the block the tick decided on (`decision_tag`): the nonces the chain has consumed.
+    pub async fn decision_nonce(&self, address: Address, head: &Head) -> Result<u64> {
+        self.nonce(address, &self.decision_tag(head)).await
+    }
+    /// `call` at the block the keeper decides on rather than at the view tag: the finalized state, and in soft mode the
+    /// state at the decision head.
+    pub async fn call_decided<C: SolCall>(&self, to: Address, call: C) -> Result<C::Return> {
+        let tag = self.current_decision_tag().await?;
+        self.call_tag(to, call, &tag).await
+    }
+    /// The tag at which a contract view is read when the caller names no block: `finalized`, and in soft mode `latest`.
+    fn view_tag(&self) -> &'static str {
+        match self.finality {
+            FinalityMode::Finalized => "finalized",
+            FinalityMode::Soft => "latest",
+        }
+    }
     /// The block with this number, including its timestamp.
     pub async fn block(&self, number: u64) -> Result<Head> {
         self.request_as(
@@ -713,8 +1155,9 @@ impl Rpc {
         })
         .await
     }
+    /// A contract view read at the view tag: `finalized`, and in soft mode `latest`.
     pub async fn call<C: SolCall>(&self, to: Address, call: C) -> Result<C::Return> {
-        self.call_tag(to, call, "finalized").await
+        self.call_tag(to, call, self.view_tag()).await
     }
     pub async fn call_at<C: SolCall>(
         &self,
@@ -724,10 +1167,57 @@ impl Rpc {
     ) -> Result<C::Return> {
         self.call_tag(to, call, &format!("0x{number:x}")).await
     }
-    async fn call_tag<C: SolCall>(&self, to: Address, call: C, tag: &str) -> Result<C::Return> {
+    /// The L1 gas an Arbitrum chain charges for a transaction to `to` with `data` before it runs
+    /// (`NodeInterface.gasEstimateL1Component`, 173 for an empty transaction and 732 for a fulfillment on Robinhood
+    /// Chain mainnet). The precompile prices it at the chain's current L1 prices, so it is read at the latest block.
+    pub async fn l1_gas(&self, to: Address, data: &[u8]) -> Result<u64> {
+        let call = NodeInterface::gasEstimateL1ComponentCall {
+            to,
+            contractCreation: false,
+            data: Bytes::copy_from_slice(data),
+        };
+        Ok(self
+            .call_tag(NODE_INTERFACE, call, "latest")
+            .await?
+            .gasEstimateForL1)
+    }
+    pub(crate) async fn call_tag<C: SolCall>(
+        &self,
+        to: Address,
+        call: C,
+        tag: &str,
+    ) -> Result<C::Return> {
         self.request_as(
             "eth_call",
             json!([{"to":to,"data":Bytes::from(call.abi_encode())},tag]),
+            |v| {
+                let bytes: Bytes = serde_json::from_value(v)?;
+                Ok(C::abi_decode_returns(&bytes)?)
+            },
+        )
+        .await
+    }
+    /// `call` at the view tag with the gas the call may use written down, for a view that needs more than an endpoint
+    /// may give an `eth_call` without a limit of its own.
+    pub(crate) async fn call_with_gas<C: SolCall>(
+        &self,
+        to: Address,
+        call: C,
+        gas: u64,
+    ) -> Result<C::Return> {
+        self.call_with_gas_tag(to, call, gas, self.view_tag()).await
+    }
+    /// `call_with_gas` at the block tag `tag`.
+    pub(crate) async fn call_with_gas_tag<C: SolCall>(
+        &self,
+        to: Address,
+        call: C,
+        gas: u64,
+        tag: &str,
+    ) -> Result<C::Return> {
+        self.request_as(
+            "eth_call",
+            json!([{"to":to,"gas":format!("0x{gas:x}"),"data":Bytes::from(call.abi_encode())},tag]),
             |v| {
                 let bytes: Bytes = serde_json::from_value(v)?;
                 Ok(C::abi_decode_returns(&bytes)?)
@@ -817,14 +1307,64 @@ impl Rpc {
         )
         .await
     }
-    pub async fn receipt_is_finalized(&self, hash: &str, receipt: &Value) -> Result<bool> {
-        let actual: B256 = serde_json::from_value(receipt["transactionHash"].clone())?;
+    /// The hash of each of these blocks, in order, as one JSON-RPC batch answered by one endpoint: the chain's own hashes
+    /// that the finality audit compares the blocks the keeper acted on against. At most `MAX_BLOCK_HASHES` blocks. An
+    /// endpoint that has not reached one of them (it answers null) has not answered, and the next endpoint answers the
+    /// whole batch; none of one endpoint's hashes is ever mixed with another's.
+    pub async fn block_hashes(&self, numbers: &[u64]) -> Result<Vec<B256>> {
         ensure!(
-            actual == hash.parse::<B256>()?,
-            "Unexpected receipt transaction"
+            !numbers.is_empty() && numbers.len() <= MAX_BLOCK_HASHES,
+            "Block hash batch size"
         );
-        ensure!(quantity(&receipt["status"])? <= 1, "Invalid receipt status");
-        let number = quantity(&receipt["blockNumber"])?;
+        let calls: Vec<(&str, Value)> = numbers
+            .iter()
+            .map(|number| {
+                (
+                    "eth_getBlockByNumber",
+                    json!([format!("0x{number:x}"), false]),
+                )
+            })
+            .collect();
+        let calls = &calls;
+        self.hedged("eth_getBlockByNumber batch", move |i| async move {
+            let blocks = self.batch_at(i, calls).await?;
+            numbers
+                .iter()
+                .zip(&blocks)
+                .map(|(number, block)| {
+                    ensure!(
+                        quantity(&block["number"])? == *number,
+                        "Unexpected block number"
+                    );
+                    Ok(serde_json::from_value(block["hash"].clone())?)
+                })
+                .collect()
+        })
+        .await
+    }
+    /// Whether the receipt of `hash` is settled for the keeper: its block is at or below the block the keeper decides on
+    /// and is the canonical block of that number.
+    ///
+    /// `Finalized`: `receipt_is_finalized`. `Soft`: the receipt's block is at or below the decision head, and the
+    /// block of that number has the hash the receipt names, both as one endpoint says it in one batch. An endpoint
+    /// that has not reached the receipt's block says it is not settled yet. Whether it is settled is the keeper's
+    /// verdict on the sequencer's chain; the finality audit checks it against L1 finality later.
+    pub async fn receipt_is_settled(&self, hash: &str, receipt: &Value) -> Result<bool> {
+        match self.finality {
+            FinalityMode::Finalized => self.receipt_is_finalized(hash, receipt).await,
+            FinalityMode::Soft => {
+                let number = receipt_number(hash, receipt)?;
+                let expected: B256 = serde_json::from_value(receipt["blockHash"].clone())?;
+                let (decision, block) = self.soft_blocks(Some(number), false).await?;
+                // The decision head is itself the receipt's block when the numbers are equal: its hash must agree too.
+                Ok(decision.number >= number
+                    && (decision.number != number || decision.hash == expected)
+                    && block.is_some_and(|block| block.hash == expected))
+            }
+        }
+    }
+    pub async fn receipt_is_finalized(&self, hash: &str, receipt: &Value) -> Result<bool> {
+        let number = receipt_number(hash, receipt)?;
         let finalized = self.finalized_head().await?;
         if finalized.number < number {
             return Ok(false);
@@ -1230,6 +1770,8 @@ mod tests {
                         reverted: false,
                         rate_limited: false,
                         malformed: false,
+                        code: None,
+                        batch_refused: false,
                         detail: "node rejection".into()
                     }
                     .into()),
@@ -1269,6 +1811,8 @@ mod tests {
                     reverted: false,
                     rate_limited: false,
                     malformed: false,
+                    code: Some(-32000),
+                    batch_refused: false,
                     detail: "JSON-RPC code -32000".into(),
                 }
                 .into()),
@@ -1290,6 +1834,8 @@ mod tests {
                     reverted: false,
                     rate_limited: false,
                     malformed: false,
+                    code: Some(-32000),
+                    batch_refused: false,
                     detail: "JSON-RPC code -32000".into()
                 }
                 .into()),
@@ -1702,7 +2248,8 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(rpc.batch(&calls).await.unwrap(), expected);
         }
-        assert_eq!(single_hits.load(Ordering::SeqCst), 1 + 5 + 5);
+        // The error names batches: the five are refused, then two, and the calls go one by one from then on.
+        assert_eq!(single_hits.load(Ordering::SeqCst), 2 + 5 + 5);
         // One failed element fails that endpoint's whole answer; the next endpoint answers the whole batch.
         let (partial, _, c) = endpoint(Arc::new(move |body| {
             let items = body.as_array().unwrap().iter().map(|call| {
@@ -1726,6 +2273,623 @@ mod tests {
         assert_eq!(rpc.batch(&calls).await.unwrap(), expected);
         assert_eq!(rpc.active.load(Ordering::Relaxed), 1);
         for task in [a, b, c, d] {
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn provider_errors_defer_a_round_keepers_tick_and_anything_else_counts() {
+        use crate::config::CoordinatorKind::{Epoch, Round};
+        use crate::worker::FailedTick;
+        let node = |code: i64, message: &str| {
+            Rpc::outcome(&json!({"jsonrpc":"2.0","id":1,"error":{"code":code,"message":message}}))
+                .unwrap_err()
+        };
+        let read = |error: anyhow::Error| {
+            error.context("All configured RPC endpoints failed eth_call batch")
+        };
+        let http = |status: u16| -> anyhow::Error {
+            DeliveryError {
+                batch_refused: false,
+                ..uncertain(format!("HTTP status {status}"))
+            }
+            .into()
+        };
+        let provider = [
+            read(http(500)),
+            read(http(503)),
+            read(uncertain("transport").into()),
+            read(uncertain("read attempt timed out").into()),
+            read(node(-32000, "server busy")),
+            read(node(-32000, "header not found")),
+            read(node(-32000, "server busy")).context("Proxy runtime could not be verified"),
+        ];
+        for error in &provider {
+            assert!(is_provider_failure(error), "{error:#}");
+            assert_eq!(
+                FailedTick::of(Round, error),
+                FailedTick::ProviderUnavailable,
+                "{error:#}"
+            );
+            // An epoch keeper counts them as it always has.
+            assert_eq!(
+                FailedTick::of(Epoch, error),
+                FailedTick::Counted,
+                "{error:#}"
+            );
+        }
+        let counted = [
+            read(malformed("eth_call answer: not hex").into()),
+            read(node(3, "execution reverted")),
+            read(node(-32000, "already known")),
+            read(node(-32601, "method not found")),
+            anyhow::anyhow!("Proxy runtime changed: implementation slot moved"),
+            anyhow::anyhow!("RPC chain id 1 differs from CHAIN_ID 46630"),
+        ];
+        for error in &counted {
+            assert!(!is_provider_failure(error), "{error:#}");
+            assert_eq!(
+                FailedTick::of(Round, error),
+                FailedTick::Counted,
+                "{error:#}"
+            );
+        }
+        // A read that failed on rate limits is deferred as one in either mode: every endpoint backing off, or the last
+        // answer a rate limit.
+        for limited in [
+            Rpc::all_limited_error("eth_call batch"),
+            read(rate_limited("HTTP status 429").into()),
+        ] {
+            assert!(is_provider_failure(&limited));
+            for kind in [Round, Epoch] {
+                assert_eq!(FailedTick::of(kind, &limited), FailedTick::RateLimited);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_an_endpoint_refuses_for_its_size_is_asked_again_in_halves_on_that_endpoint() {
+        let echo = |call: &Value| result(call, json!(call["params"][0]));
+        let calls: Vec<(&str, Value)> = (0..8).map(|i| ("eth_test", json!([i]))).collect();
+        let expected: Vec<Value> = (0..8).map(|i| json!(i)).collect();
+        // A free plan: a batch of more than three is refused with HTTP 500 and an error that names batches.
+        let (free, free_hits, a) = endpoint(Arc::new(move |body| match body.as_array() {
+            Some(calls) if calls.len() > 3 => (
+                500,
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Batch of more than 3 requests are not allowed on free plan"}}),
+            ),
+            Some(calls) => (200, Value::Array(calls.iter().map(echo).collect())),
+            None => (200, echo(body)),
+        }))
+        .await;
+        let (other, other_hits, b) = answering(|call| json!(call["params"][0])).await;
+        let rpc = Rpc::new(vec![free, other]).unwrap();
+        // Eight are refused, then four; four chunks of two answer, on the same endpoint. The refusals are no failure: the
+        // endpoint is not cooled, no rate limit is noted, and the other endpoint is not asked.
+        assert_eq!(rpc.batch(&calls).await.unwrap(), expected);
+        assert_eq!(free_hits.load(Ordering::SeqCst), 2 + 4);
+        assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+        assert!(!rpc.cooling(0));
+        assert_eq!(rpc.limits.lock().unwrap()[0], (0, None));
+        assert_eq!(rpc.active.load(Ordering::Relaxed), 0);
+        // The size it answered is kept: the next batch goes in chunks of two at once, and a batch of two whole.
+        assert_eq!(rpc.batch(&calls).await.unwrap(), expected);
+        assert_eq!(free_hits.load(Ordering::SeqCst), 6 + 4);
+        assert_eq!(rpc.batch(&calls[..2]).await.unwrap(), expected[..2]);
+        assert_eq!(free_hits.load(Ordering::SeqCst), 10 + 1);
+        // So is it on a clone of the endpoints, as the runtime checks use.
+        assert_eq!(
+            rpc.for_runtime_checks().batch(&calls[..4]).await.unwrap(),
+            expected[..4]
+        );
+        assert_eq!(free_hits.load(Ordering::SeqCst), 11 + 2);
+        // A member that names batches in a JSON-RPC answer refuses the batch as well.
+        let (members, members_hits, c) = endpoint(Arc::new(move |body| match body.as_array() {
+            Some(calls) if calls.len() > 1 => (
+                200,
+                Value::Array(calls.iter().map(|call| json!({"jsonrpc":"2.0","id":call["id"],"error":{"code":-32000,"message":"batch too large"}})).collect()),
+            ),
+            Some(calls) => (200, Value::Array(calls.iter().map(echo).collect())),
+            None => (200, echo(body)),
+        }))
+        .await;
+        let rpc = Rpc::new(vec![members]).unwrap();
+        assert_eq!(rpc.batch(&calls[..4]).await.unwrap(), expected[..4]);
+        // Four, then two, are refused; four calls one by one.
+        assert_eq!(members_hits.load(Ordering::SeqCst), 2 + 4);
+        assert_eq!(rpc.batch_limits.lock().unwrap()[0], 1);
+        // An HTTP error that does not name batches, and a rate limit, are the endpoint's answer to any batch: the read
+        // fails over to the next endpoint without a smaller chunk being asked.
+        for (status, body) in [(503, json!({})), (429, json!({}))] {
+            let (down, down_hits, d) = endpoint(Arc::new(move |_| (status, body.clone()))).await;
+            let (up, up_hits, e) = answering(|call| json!(call["params"][0])).await;
+            let rpc = Rpc::new(vec![down, up]).unwrap();
+            assert_eq!(rpc.batch(&calls).await.unwrap(), expected, "{status}");
+            assert_eq!(
+                (
+                    down_hits.load(Ordering::SeqCst),
+                    up_hits.load(Ordering::SeqCst)
+                ),
+                (1, 1),
+                "{status}"
+            );
+            assert_eq!(rpc.batch_limits.lock().unwrap()[0], usize::MAX, "{status}");
+            d.abort();
+            e.abort();
+        }
+        // A revert that names a batch is the call's answer, not a refusal.
+        let (reverting, reverting_hits, f) = endpoint(Arc::new(move |body| {
+            (
+                200,
+                Value::Array(body.as_array().unwrap().iter().map(|call| json!({"jsonrpc":"2.0","id":call["id"],"error":{"code":3,"message":"execution reverted: batch member"}})).collect()),
+            )
+        }))
+        .await;
+        let rpc = Rpc::new(vec![reverting]).unwrap();
+        assert!(rpc.batch(&calls).await.is_err());
+        assert_eq!(reverting_hits.load(Ordering::SeqCst), 1);
+        for task in [a, b, c, f] {
+            task.abort();
+        }
+    }
+
+    /// What a read asked of a node, in the order it asked it: `method tag`, for a block, a call and a nonce.
+    type Asked = Arc<Mutex<Vec<String>>>;
+    /// An endpoint serving a chain whose latest block is `latest` and whose finalized block is `finalized`. A block's
+    /// hash is its number's low byte xor `salt`: endpoints on one chain agree, and a fork differs. A number past the
+    /// latest block is not served yet (null). A call and a nonce answer with the number of the block they are read at,
+    /// 1 at `latest` and 2 at `finalized`. Hits count HTTP requests, so a batch is one.
+    async fn chain_node(
+        latest: u64,
+        finalized: u64,
+        salt: u8,
+    ) -> (String, Arc<AtomicUsize>, Asked, tokio::task::JoinHandle<()>) {
+        let asked = Asked::default();
+        let log = asked.clone();
+        let (url, hits, task) = answering(move |call| {
+            let method = call["method"].as_str().unwrap();
+            let tag = match method {
+                "eth_getBlockByNumber" => &call["params"][0],
+                _ => &call["params"][1],
+            }
+            .as_str()
+            .unwrap();
+            log.lock().unwrap().push(format!("{method} {tag}"));
+            let number = match tag {
+                "latest" => Some(latest),
+                "finalized" => Some(finalized),
+                number => u64::from_str_radix(number.trim_start_matches("0x"), 16).ok(),
+            };
+            let read_at = match tag {
+                "latest" => 1,
+                "finalized" => 2,
+                _ => number.unwrap(),
+            };
+            match method {
+                "eth_getBlockByNumber" => number
+                    .filter(|number| *number <= latest)
+                    .map_or(Value::Null, |number| block(number, number as u8 ^ salt)),
+                "eth_getTransactionCount" => json!(format!("0x{read_at:x}")),
+                _ => json!(format!("0x{read_at:064x}")),
+            }
+        })
+        .await;
+        (url, hits, asked, task)
+    }
+    fn soft(url: &str, depth: u64) -> Rpc {
+        Rpc::new(vec![url.to_owned()])
+            .unwrap()
+            .with_finality(FinalityMode::Soft, depth)
+    }
+    fn asked(asked: &Asked) -> Vec<String> {
+        std::mem::take(&mut *asked.lock().unwrap())
+    }
+    #[tokio::test]
+    async fn soft_mode_decides_on_the_latest_block_and_finalized_mode_on_the_finalized_one() {
+        let (url, hits, log, node) = chain_node(20, 8, 0).await;
+        let rpc = soft(&url, 0);
+        assert_eq!(rpc.finality(), FinalityMode::Soft);
+        let head = rpc.decision_head().await.unwrap();
+        assert_eq!((head.number, head.hash), (20, B256::repeat_byte(20)));
+        assert_eq!(asked(&log), ["eth_getBlockByNumber latest"]);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // The finalized head stays what it is in soft mode: the block the audit compares the decisions against.
+        assert_eq!(rpc.finalized_head().await.unwrap().number, 8);
+        assert_eq!(asked(&log), ["eth_getBlockByNumber finalized"]);
+
+        // A client that has not been told a mode is a finalized one: exactly the finalized head, a depth means nothing.
+        for finalized in [
+            Rpc::new(vec![url.clone()]).unwrap(),
+            Rpc::new(vec![url.clone()])
+                .unwrap()
+                .with_finality(FinalityMode::Finalized, 5),
+        ] {
+            assert_eq!(finalized.finality(), FinalityMode::Finalized);
+            assert_eq!(finalized.decision_head().await.unwrap().number, 8);
+            assert_eq!(asked(&log), ["eth_getBlockByNumber finalized"]);
+        }
+        node.abort();
+    }
+    #[tokio::test]
+    async fn a_soft_depth_takes_the_block_below_the_latest_from_the_endpoint_that_named_the_latest()
+    {
+        let (url, hits, log, node) = chain_node(20, 8, 0).await;
+        let head = soft(&url, 3).decision_head().await.unwrap();
+        assert_eq!((head.number, head.hash), (17, B256::repeat_byte(17)));
+        // The second read depends on the first, so they are two requests, by number the second.
+        assert_eq!(
+            asked(&log),
+            ["eth_getBlockByNumber latest", "eth_getBlockByNumber 0x11"]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // Near the start of a chain the decision head is the first block.
+        let (young, _, _, young_node) = chain_node(2, 0, 0).await;
+        assert_eq!(soft(&young, 5).decision_head().await.unwrap().number, 0);
+
+        // The two blocks are one endpoint's: one that names a latest block and then does not serve the one below it is
+        // passed over whole, and nothing of it is combined with the next endpoint's answer.
+        let (stuck, stuck_hits, stuck_node) = answering(|call| match call["params"][0].as_str() {
+            Some("latest") => block(30, 0xa0),
+            _ => Value::Null,
+        })
+        .await;
+        let (healthy, healthy_hits, _, healthy_node) = chain_node(21, 8, 0).await;
+        let rpc = Rpc::new(vec![stuck, healthy])
+            .unwrap()
+            .with_finality(FinalityMode::Soft, 3);
+        let head = rpc.decision_head().await.unwrap();
+        assert_eq!((head.number, head.hash), (18, B256::repeat_byte(18)));
+        assert_eq!(stuck_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(healthy_hits.load(Ordering::SeqCst), 2);
+        // The endpoint that answered is the one reads start at now.
+        assert_eq!(rpc.active.load(Ordering::Relaxed), 1);
+        for task in [node, young_node, stuck_node, healthy_node] {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn the_soft_decision_head_and_its_checkpoint_come_from_one_usable_answer() {
+        // The first endpoint has not reached the checkpoint block, the second answers it with another block, and the
+        // third is on the chain.
+        let (behind, behind_hits, _, a) = chain_node(8, 3, 0).await;
+        let (confused, confused_hits, b) = answering(|call| match call["params"][0].as_str() {
+            Some("latest") => block(12, 0xdd),
+            _ => block(6, 0xdd),
+        })
+        .await;
+        let (healthy, healthy_hits, log, c) = chain_node(12, 3, 0).await;
+        let rpc = Rpc::new(vec![behind.clone(), confused, healthy.clone()])
+            .unwrap()
+            .with_finality(FinalityMode::Soft, 0);
+        let (head, checkpoint) = rpc.decision_head_with(Some(10)).await.unwrap();
+        // Both blocks are the third endpoint's, in one batch each, and the checkpoint is the block it was asked for.
+        assert_eq!((head.number, head.hash), (12, B256::repeat_byte(12)));
+        let checkpoint = checkpoint.unwrap();
+        assert_eq!(
+            (checkpoint.number, checkpoint.hash),
+            (10, B256::repeat_byte(10))
+        );
+        for hits in [behind_hits, confused_hits, healthy_hits.clone()] {
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "one batched request each");
+        }
+        assert_eq!(
+            asked(&log),
+            ["eth_getBlockByNumber latest", "eth_getBlockByNumber 0xa"]
+        );
+        // Without a checkpoint it is the head alone.
+        let (head, checkpoint) = soft(&healthy, 0).decision_head_with(None).await.unwrap();
+        assert_eq!((head.number, checkpoint.is_none()), (12, true));
+        // A depth reads the decision head first and the checkpoint beside it, still from the one endpoint.
+        let hits = healthy_hits.load(Ordering::SeqCst);
+        asked(&log);
+        let (head, checkpoint) = soft(&healthy, 2).decision_head_with(Some(9)).await.unwrap();
+        assert_eq!((head.number, checkpoint.unwrap().number), (10, 9));
+        assert_eq!(
+            asked(&log),
+            [
+                "eth_getBlockByNumber latest",
+                "eth_getBlockByNumber 0xa",
+                "eth_getBlockByNumber 0x9"
+            ]
+        );
+        assert_eq!(healthy_hits.load(Ordering::SeqCst) - hits, 2);
+        // Every endpoint failing is a delivery failure, not an answer about the chain.
+        let error = soft(&behind, 0)
+            .decision_head_with(Some(10))
+            .await
+            .unwrap_err();
+        assert!(
+            is_delivery_failure(&error) && !is_rate_limited(&error),
+            "{error:#}"
+        );
+        for task in [a, b, c] {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn in_finalized_mode_the_decision_head_with_its_checkpoint_is_the_finalized_read() {
+        let (url, hits, log, node) = chain_node(12, 8, 0).await;
+        let rpc = Rpc::new(vec![url]).unwrap();
+        let (head, checkpoint) = rpc.decision_head_with(Some(5)).await.unwrap();
+        assert_eq!((head.number, checkpoint.unwrap().number), (8, 5));
+        // Exactly finalized_head_with: one batch of the finalized head and the checkpoint block by number.
+        assert_eq!(
+            asked(&log),
+            ["eth_getBlockByNumber finalized", "eth_getBlockByNumber 0x5"]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        node.abort();
+    }
+    #[tokio::test]
+    async fn views_are_read_at_latest_in_soft_mode_and_finalized_otherwise() {
+        use crate::abi::Coordinator;
+        let (url, _, log, node) = chain_node(20, 8, 0).await;
+        let finalized = Rpc::new(vec![url.clone()]).unwrap();
+        let word = |rpc: &Rpc| {
+            let rpc = rpc.clone();
+            async move {
+                rpc.call(Address::ZERO, Coordinator::nextRequestIdCall {})
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(word(&finalized).await, U256::from(2));
+        assert_eq!(asked(&log), ["eth_call finalized"]);
+        // Soft mode's default tag is latest, whatever the depth.
+        for depth in [0, 3] {
+            let rpc = soft(&url, depth);
+            assert_eq!(word(&rpc).await, U256::from(1));
+            assert_eq!(asked(&log), ["eth_call latest"]);
+        }
+        // A named block is that block in both, and the runtime-check clone keeps the mode.
+        for rpc in [&finalized, &soft(&url, 0)] {
+            let at = rpc
+                .call_at(Address::ZERO, Coordinator::nextRequestIdCall {}, 9)
+                .await
+                .unwrap();
+            assert_eq!(at, U256::from(9));
+            assert_eq!(asked(&log), ["eth_call 0x9"]);
+        }
+        assert_eq!(
+            soft(&url, 2).for_runtime_checks().finality(),
+            FinalityMode::Soft
+        );
+        // A view at the block the keeper decides on: the finalized tag, the latest block when the depth is 0, and the
+        // decision head's number under a depth.
+        let decided = |rpc: &Rpc| {
+            let rpc = rpc.clone();
+            async move {
+                rpc.call_decided(Address::ZERO, Coordinator::nextRequestIdCall {})
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(decided(&finalized).await, U256::from(2));
+        assert_eq!(asked(&log), ["eth_call finalized"]);
+        assert_eq!(decided(&soft(&url, 0)).await, U256::from(1));
+        assert_eq!(asked(&log), ["eth_call latest"]);
+        assert_eq!(decided(&soft(&url, 3)).await, U256::from(17));
+        assert_eq!(
+            asked(&log),
+            [
+                "eth_getBlockByNumber latest",
+                "eth_getBlockByNumber 0x11",
+                "eth_call 0x11"
+            ]
+        );
+        node.abort();
+    }
+    #[tokio::test]
+    async fn requests_and_nonces_are_read_at_the_block_the_tick_decided_on() {
+        let (url, hits, log, node) = chain_node(20, 8, 0).await;
+        let head = Head::from_block(&block(17, 0x11)).unwrap();
+        let wallet = Address::repeat_byte(0x24);
+        let finalized = Rpc::new(vec![url.clone()]).unwrap();
+        let rpc = soft(&url, 3);
+        assert_eq!(finalized.decision_tag(&head), "finalized");
+        assert_eq!(rpc.decision_tag(&head), "0x11");
+        // The consumed nonce: the finalized one as ever, or the one at the decision head's number.
+        assert_eq!(finalized.decision_nonce(wallet, &head).await.unwrap(), 2);
+        assert_eq!(asked(&log), ["eth_getTransactionCount finalized"]);
+        assert_eq!(rpc.decision_nonce(wallet, &head).await.unwrap(), 17);
+        assert_eq!(asked(&log), ["eth_getTransactionCount 0x11"]);
+        // Without a head in hand: finalized needs no read, a depth 0 is the latest block, and a depth reads the head.
+        let before = hits.load(Ordering::SeqCst);
+        assert_eq!(finalized.current_decision_tag().await.unwrap(), "finalized");
+        assert_eq!(
+            soft(&url, 0).current_decision_tag().await.unwrap(),
+            "latest"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), before);
+        assert_eq!(rpc.current_decision_tag().await.unwrap(), "0x11");
+        assert_eq!(hits.load(Ordering::SeqCst), before + 2);
+        node.abort();
+    }
+    fn receipt(tx: B256, block: u64, hash: u8) -> Value {
+        json!({"transactionHash":tx,"blockNumber":format!("0x{block:x}"),"blockHash":B256::repeat_byte(hash),"status":"0x1"})
+    }
+    #[tokio::test]
+    async fn a_soft_receipt_is_settled_at_the_decision_head_when_its_block_is_the_chains() {
+        let tx = B256::repeat_byte(0x77);
+        let receipt = receipt(tx, 10, 10);
+        let settled = |rpc: Rpc, receipt: Value| async move {
+            rpc.receipt_is_settled(&tx.to_string(), &receipt).await
+        };
+        // Block 10 is the chain's, and the latest block is 12 while the finalized one is 3: settled at once in soft mode,
+        // in one batch from one endpoint, and not in finalized mode.
+        let (url, hits, log, a) = chain_node(12, 3, 0).await;
+        assert!(settled(soft(&url, 0), receipt.clone()).await.unwrap());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            asked(&log),
+            ["eth_getBlockByNumber latest", "eth_getBlockByNumber 0xa"]
+        );
+        assert!(
+            !settled(Rpc::new(vec![url.clone()]).unwrap(), receipt.clone())
+                .await
+                .unwrap()
+        );
+        // A depth of 2 puts the decision head at 10, the receipt's block, and a depth of 3 below it.
+        assert!(settled(soft(&url, 2), receipt.clone()).await.unwrap());
+        assert!(!settled(soft(&url, 3), receipt.clone()).await.unwrap());
+
+        // The block of that number is another block on this endpoint: the receipt is an orphan, and never settles.
+        let (forked, _, _, b) = chain_node(12, 3, 0xff).await;
+        assert!(!settled(soft(&forked, 0), receipt.clone()).await.unwrap());
+        // An endpoint that has not reached the receipt's block says it is not settled yet, without failing.
+        let (behind, behind_hits, _, c) = chain_node(9, 3, 0).await;
+        assert!(!settled(soft(&behind, 0), receipt.clone()).await.unwrap());
+        assert_eq!(behind_hits.load(Ordering::SeqCst), 1);
+        // The receipt's block is the decision head itself: its hash is judged as well, whichever answer it came from.
+        let (split, _, d) = answering(|call| match call["params"][0].as_str() {
+            Some("latest") => block(10, 0xbb),
+            _ => block(10, 10),
+        })
+        .await;
+        assert!(!settled(soft(&split, 0), receipt.clone()).await.unwrap());
+
+        // An endpoint that serves a latest block but not a block below it is unusable, not an answer: the next endpoint
+        // answers, and with no other the read fails as a delivery failure.
+        let (broken, _, e) = answering(|call| match call["params"][0].as_str() {
+            Some("latest") => block(12, 12),
+            _ => Value::Null,
+        })
+        .await;
+        let both = Rpc::new(vec![broken.clone(), url.clone()])
+            .unwrap()
+            .with_finality(FinalityMode::Soft, 0);
+        assert!(settled(both, receipt.clone()).await.unwrap());
+        let error = settled(soft(&broken, 0), receipt.clone())
+            .await
+            .unwrap_err();
+        assert!(is_delivery_failure(&error), "{error:#}");
+
+        // Another transaction's receipt, and one with a status that is not a status, are errors, never a verdict.
+        assert!(
+            settled(soft(&url, 0), self::receipt(B256::ZERO, 10, 10))
+                .await
+                .is_err()
+        );
+        let mut odd = receipt.clone();
+        odd["status"] = json!("0x2");
+        assert!(settled(soft(&url, 0), odd).await.is_err());
+        for task in [a, b, c, d, e] {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn in_finalized_mode_a_receipt_is_settled_by_exactly_the_finalized_check() {
+        let tx = B256::repeat_byte(0x77);
+        let (url, hits, log, node) = chain_node(12, 11, 0).await;
+        let rpc = Rpc::new(vec![url]).unwrap();
+        let receipt = receipt(tx, 10, 10);
+        assert!(
+            rpc.receipt_is_finalized(&tx.to_string(), &receipt)
+                .await
+                .unwrap()
+        );
+        let finalized = asked(&log);
+        assert_eq!(
+            finalized,
+            ["eth_getBlockByNumber finalized", "eth_getBlockByNumber 0xa"]
+        );
+        let requests = hits.load(Ordering::SeqCst);
+        assert!(
+            rpc.receipt_is_settled(&tx.to_string(), &receipt)
+                .await
+                .unwrap()
+        );
+        // The same calls, in the same requests: the finalized head, then the block by number.
+        assert_eq!(asked(&log), finalized);
+        assert_eq!(hits.load(Ordering::SeqCst), 2 * requests);
+        node.abort();
+    }
+    #[tokio::test]
+    async fn block_hashes_are_one_endpoints_answer_to_one_batch_in_the_order_asked() {
+        let (url, hits, log, node) = chain_node(20, 8, 0).await;
+        let rpc = Rpc::new(vec![url]).unwrap();
+        assert_eq!(
+            rpc.block_hashes(&[12, 3, 8]).await.unwrap(),
+            [
+                B256::repeat_byte(12),
+                B256::repeat_byte(3),
+                B256::repeat_byte(8)
+            ]
+        );
+        assert_eq!(
+            asked(&log),
+            [
+                "eth_getBlockByNumber 0xc",
+                "eth_getBlockByNumber 0x3",
+                "eth_getBlockByNumber 0x8"
+            ]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // Sixty-four blocks are one batch as well, past the 32 calls of `batch`; more, or none, are refused unsent.
+        let (long, long_hits, _, long_node) = chain_node(100, 90, 0).await;
+        let rpc = Rpc::new(vec![long]).unwrap();
+        let page: Vec<u64> = (0..MAX_BLOCK_HASHES as u64).collect();
+        let hashes = rpc.block_hashes(&page).await.unwrap();
+        assert_eq!(hashes.len(), 64);
+        assert_eq!(hashes[63], B256::repeat_byte(63));
+        assert_eq!(long_hits.load(Ordering::SeqCst), 1);
+        assert!(
+            rpc.block_hashes(&(0..65).collect::<Vec<u64>>())
+                .await
+                .is_err()
+        );
+        assert!(rpc.block_hashes(&[]).await.is_err());
+        assert_eq!(long_hits.load(Ordering::SeqCst), 1);
+
+        // One block that an endpoint has not reached fails that endpoint whole, and the next endpoint answers every block:
+        // nothing the first one said is kept.
+        let (behind, behind_hits, _, a) = chain_node(10, 3, 0).await;
+        let (ahead, ahead_hits, _, b) = chain_node(20, 8, 0).await;
+        let rpc = Rpc::new(vec![behind, ahead]).unwrap();
+        assert_eq!(
+            rpc.block_hashes(&[3, 12]).await.unwrap(),
+            [B256::repeat_byte(3), B256::repeat_byte(12)]
+        );
+        assert_eq!(
+            (
+                behind_hits.load(Ordering::SeqCst),
+                ahead_hits.load(Ordering::SeqCst)
+            ),
+            (1, 1)
+        );
+        // Every endpoint short of a block is a delivery failure, not an answer about the chain.
+        let error = Rpc::new(vec![
+            chain_node(10, 3, 0).await.0,
+            chain_node(11, 3, 0).await.0,
+        ])
+        .unwrap()
+        .block_hashes(&[3, 12])
+        .await
+        .unwrap_err();
+        assert!(
+            is_delivery_failure(&error) && !is_rate_limited(&error),
+            "{error:#}"
+        );
+        // An endpoint on another fork is believed: whether its hashes are the keeper's is for the audit to say.
+        let (fork, _, _, c) = chain_node(20, 8, 0xff).await;
+        assert_eq!(
+            Rpc::new(vec![fork])
+                .unwrap()
+                .block_hashes(&[3])
+                .await
+                .unwrap(),
+            [B256::repeat_byte(3 ^ 0xff)]
+        );
+        // An answer for another block than the one asked is no answer.
+        let (confused, _, d) = answering(|_| block(7, 1)).await;
+        assert!(
+            Rpc::new(vec![confused])
+                .unwrap()
+                .block_hashes(&[3])
+                .await
+                .is_err()
+        );
+        for task in [node, long_node, a, b, c, d] {
             task.abort();
         }
     }

@@ -1,6 +1,9 @@
 * text=auto eol=lf
 contracts/vendor/VRF.sol -text
 contracts/vendor/CHAINLINK-LICENSE -text -whitespace
+contracts/vendor/bls-bn254/BLS.sol -text
+contracts/vendor/bls-bn254/ModExp.sol -text
+contracts/vendor/bls-bn254/LICENSE -text -whitespace
 
 # Preserve the reviewed upstream kernel including its existing whitespace.
 /scripts/vanity/vendor/keccak256.cl -whitespace

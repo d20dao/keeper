@@ -3,8 +3,10 @@ import {readFileSync,writeFileSync,mkdirSync} from "node:fs";
 import {resolve} from "node:path";
 import assert from "node:assert/strict";
 const write=process.argv.includes("--write");
-for(const name of ["EpochEntropy","D20VRFCoordinator"]){
-  const artifact=JSON.parse(readFileSync(`artifacts/contracts/${name}.sol/${name}.json`,"utf8"));
+// The Robinhood round coordinator keeps BeaconBook's state in an ERC-7201 namespace, which the compiler's layout of the coordinator does
+// not show: BeaconBookStorageProbe declares the namespace struct as its only state variable, so its baseline records the struct's members.
+for(const [directory,name] of [["","EpochEntropy"],["","D20VRFCoordinator"],["robinhood/","D20VRFCoordinatorRobinhood"],["robinhood/test/","BeaconBookStorageProbe"]]){
+  const artifact=JSON.parse(readFileSync(`artifacts/contracts/${directory}${name}.sol/${name}.json`,"utf8"));
   const build=JSON.parse(readFileSync(`artifacts/build-info/${artifact.buildInfoId}.output.json`,"utf8"));
   const output=(build.output??build).contracts[artifact.inputSourceName][name];
   assert.equal("0x"+output.evm.bytecode.object,artifact.bytecode,"Compile current artifacts first");

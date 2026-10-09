@@ -7,18 +7,20 @@
   "owner": "0xcA35c280c5DF22958Adb74DD03911C8A0ec3eA03",
   "feeRecipient": "0xcA35c280c5DF22958Adb74DD03911C8A0ec3eA03",
   "keeper": "0x61659d9A9A85dA07C36e7d1B35CF0d96CF199Cac",
-  "epochImplementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
+  "epochImplementation": "0xD20dA0853a6f894c0cdc9018fD4F8F67Eac15704",
   "coordinatorImplementation": "0xD20da000125643B4db5A6A36A3b853c17745DF44",
   "clientImplementation": "0xD20DA00A872acfDe3e4721Fc1051BD23CC84B66b",
   "registry": "0xD20Da00B47A7cD2211dC4683E306913b05903756",
   "coordinator": "0xd20DA0FF9087d053f0291524Eac12abA1ADBd945",
   "client": "0xD20da026090B8472579a2B93030F1fC4c94807F1",
-  "epochImplementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
+  "beaconVerifier": "0xd20dA01Aa16AeD6b77Cd8DDb869151802599100a",
+  "epochImplementationCodeHash": "0xb5e125e3b0f63ffe516d781266c1cbacebe3d131148b69f8736d3ca78bcddb12",
   "coordinatorImplementationCodeHash": "0x3dda400d8360d7e03b8dacd8ba1ffad7ad672e07628bee7de4542d754dd5348c",
   "clientImplementationCodeHash": "0xb30bd76592fc6def770bf8599a4dcfa827ce4fe1e951000d462c74d488b53e91",
   "registryCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
   "coordinatorCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
   "clientCodeHash": "0x1e98fe55cc7d87073e415635715100988aad79cbb84e39b18f96f3727d1c716f",
+  "beaconVerifierCodeHash": "0x4388250d26298224c4a39d030263550655390ca831ab44c4124f8b0be1f65351",
   "protocolConfigurationHash": "0xd88dcce845ab5eb09e95f2512c76c4b1b34306a697c31ac3d1d45deeb499daa4",
   "firstEpochStart": "62449859",
   "publicKey": [
@@ -162,6 +164,25 @@
       },
       "reason": "Batch gas guard: fulfillRandomnessBatch budgets every served member's callback before revealing any result; setPricing rejects a zero minimum fee with a zero multiplier",
       "upgradedAt": "2026-09-22T14:53:53.000Z"
+    },
+    {
+      "contract": "registry",
+      "proxy": "0xD20Da00B47A7cD2211dC4683E306913b05903756",
+      "previousImplementation": "0xd20dA048C969e5aDcC703Dfdf8220cc9dCB2f865",
+      "previousImplementationCodeHash": "0xd41d69a60a991c0384e5ecb959422a5e8964dbfce80b6aeddc95a975b392430f",
+      "implementation": "0xD20dA0853a6f894c0cdc9018fD4F8F67Eac15704",
+      "implementationCodeHash": "0xb5e125e3b0f63ffe516d781266c1cbacebe3d131148b69f8736d3ca78bcddb12",
+      "contractSourceCommit": "b69dbf3862c7114e76ba165e2c7dd306556d4690",
+      "deployment": {
+        "hash": "0x5a96b02818d425ec075bdfdc8f5ec49884af4160f71a9d3fda2490b685a46bdb",
+        "block": 64706822
+      },
+      "upgrade": {
+        "hash": "0x751797af884715214dd4a4e339dbd3355c935b64afe7a6b1eaf38e7e18895140",
+        "block": 64712965
+      },
+      "reason": "drand evmnet beacon recipes, verified on chain by the stateless D20BeaconVerifier",
+      "upgradedAt": "2026-09-30T03:19:57.000Z"
     }
   ],
   "consumerAccess": {

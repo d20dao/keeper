@@ -1,0 +1,240 @@
+# The chain reads of the public explorer's indexer in keeper 0.4.1: registration and three rounds.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+# Each round is `index_once`: the schema, the registration of the deployment and one scan of at most 128 blocks.
+# `database` lines count the rows the indexer left in a disposable PostgreSQL after the round.
+
+## 1. round 1
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber finalized full=false
+{
+  eth_call #latest-3/finalized coordinator 0x308c2d6b initialFeeRecipient
+  eth_call #latest-3/finalized coordinator 0x460a58aa confirmationBlocks
+  eth_call #latest-3/finalized coordinator 0x61728f39 keyHash
+  eth_call #latest-3/finalized coordinator 0xb3839295 initialMinFee
+  eth_call #latest-3/finalized coordinator 0xd7a6f6e8 publicKeyY
+  eth_call #latest-3/finalized coordinator 0xfa6df55d publicKeyX
+  eth_call #latest-3/finalized registry 0x219f2428 firstEpochStart
+  eth_call #latest-3/finalized registry 0x830c083a catalogHash
+}
+{
+  eth_call #latest-3/finalized coordinator 0x155cf49b protocolConfigurationHash
+  eth_call #latest-3/finalized registry 0x3a700168 ethTradeSigner
+  eth_call #latest-3/finalized registry 0xb3b9cbb0 btcTradeSigner
+  eth_call #latest-3/finalized registry 0xd25eacfc ethereumBlockSigner
+  eth_call #latest-3/finalized registry 0xf2a12563 hyperliquidSigner
+}
+eth_getBlockByNumber finalized full=false
+eth_getLogs from=#latest-300/finalized-297 to=#latest-173/finalized-170 addresses=[coordinator,registry]
+{
+  eth_getBlockByNumber #latest-182/finalized-179 full=false
+  eth_getBlockByNumber #latest-183/finalized-180 full=false
+  eth_getBlockByNumber #latest-184/finalized-181 full=false
+  eth_getBlockByNumber #latest-185/finalized-182 full=false
+}
+{
+  eth_getBlockByNumber #latest-178/finalized-175 full=false
+  eth_getBlockByNumber #latest-179/finalized-176 full=false
+  eth_getBlockByNumber #latest-180/finalized-177 full=false
+  eth_getBlockByNumber #latest-181/finalized-178 full=false
+}
+{
+  eth_getBlockByNumber #latest-174/finalized-171 full=false
+  eth_getBlockByNumber #latest-175/finalized-172 full=false
+  eth_getBlockByNumber #latest-176/finalized-173 full=false
+  eth_getBlockByNumber #latest-177/finalized-174 full=false
+}
+eth_getBlockByNumber #latest-173/finalized-170 full=false
+eth_getBlockByNumber #latest-173/finalized-170 full=false
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+database cursor=928 blocks=13 events=0 epochs=0 requests=[]
+
+## 2. round 2
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber finalized full=false
+{
+  eth_call #latest-3/finalized coordinator 0x308c2d6b initialFeeRecipient
+  eth_call #latest-3/finalized coordinator 0x460a58aa confirmationBlocks
+  eth_call #latest-3/finalized coordinator 0x61728f39 keyHash
+  eth_call #latest-3/finalized coordinator 0xb3839295 initialMinFee
+  eth_call #latest-3/finalized coordinator 0xd7a6f6e8 publicKeyY
+  eth_call #latest-3/finalized coordinator 0xfa6df55d publicKeyX
+  eth_call #latest-3/finalized registry 0x219f2428 firstEpochStart
+  eth_call #latest-3/finalized registry 0x830c083a catalogHash
+}
+{
+  eth_call #latest-3/finalized coordinator 0x155cf49b protocolConfigurationHash
+  eth_call #latest-3/finalized registry 0x3a700168 ethTradeSigner
+  eth_call #latest-3/finalized registry 0xb3b9cbb0 btcTradeSigner
+  eth_call #latest-3/finalized registry 0xd25eacfc ethereumBlockSigner
+  eth_call #latest-3/finalized registry 0xf2a12563 hyperliquidSigner
+}
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-173/finalized-170 full=false
+eth_getLogs from=#latest-172/finalized-169 to=#latest-45/finalized-42 addresses=[coordinator,registry]
+{
+  eth_getBlockByNumber #latest-90/finalized-87 full=false
+  eth_getBlockByNumber #latest-96/finalized-93 full=false
+  eth_getBlockByNumber #latest-97/finalized-94 full=false
+  eth_getBlockByNumber #latest-98/finalized-95 full=false
+}
+{
+  eth_getBlockByNumber #latest-54/finalized-51 full=false
+  eth_getBlockByNumber #latest-55/finalized-52 full=false
+  eth_getBlockByNumber #latest-56/finalized-53 full=false
+  eth_getBlockByNumber #latest-57/finalized-54 full=false
+}
+{
+  eth_getBlockByNumber #latest-50/finalized-47 full=false
+  eth_getBlockByNumber #latest-51/finalized-48 full=false
+  eth_getBlockByNumber #latest-52/finalized-49 full=false
+  eth_getBlockByNumber #latest-53/finalized-50 full=false
+}
+{
+  eth_getBlockByNumber #latest-46/finalized-43 full=false
+  eth_getBlockByNumber #latest-47/finalized-44 full=false
+  eth_getBlockByNumber #latest-48/finalized-45 full=false
+  eth_getBlockByNumber #latest-49/finalized-46 full=false
+}
+eth_getBlockByNumber #latest-45/finalized-42 full=false
+eth_getStorageAt #latest-98/finalized-95 registry slot=eip1967.implementation
+{
+  eth_getCode #latest-98/finalized-95 registry
+  eth_getCode #latest-98/finalized-95 registry_implementation
+}
+eth_call #latest-98/finalized-95 registry 0x12a02c82 getEpoch args=[1]
+eth_call finalized registry 0xec993599 catalogAt args=[1]
+eth_getStorageAt #latest-97/finalized-94 coordinator slot=eip1967.implementation
+{
+  eth_getCode #latest-97/finalized-94 coordinator
+  eth_getCode #latest-97/finalized-94 coordinator_implementation
+}
+eth_getStorageAt #latest-96/finalized-93 coordinator slot=eip1967.implementation
+{
+  eth_getCode #latest-96/finalized-93 coordinator
+  eth_getCode #latest-96/finalized-93 coordinator_implementation
+}
+eth_getStorageAt #latest-90/finalized-87 coordinator slot=eip1967.implementation
+{
+  eth_getCode #latest-90/finalized-87 coordinator
+  eth_getCode #latest-90/finalized-87 coordinator_implementation
+}
+eth_getStorageAt #latest-45/finalized-42 coordinator slot=eip1967.implementation
+{
+  eth_getCode #latest-45/finalized-42 coordinator
+  eth_getCode #latest-45/finalized-42 coordinator_implementation
+}
+eth_getBlockByNumber #latest-45/finalized-42 full=false
+{
+  eth_call #latest-45/finalized-42 coordinator 0xc58343ef getRequest args=[1]
+  eth_call #latest-45/finalized-42 coordinator 0xc58343ef getRequest args=[2]
+  eth_call #latest-45/finalized-42 coordinator 0xede9ba8b getMapping args=[1]
+  eth_call #latest-45/finalized-42 coordinator 0xede9ba8b getMapping args=[2]
+  eth_call #latest-45/finalized-42 coordinator 0xef7cc992 requestFeePaid args=[1]
+  eth_call #latest-45/finalized-42 coordinator 0xef7cc992 requestFeePaid args=[2]
+}
+eth_getBlockByNumber #latest-45/finalized-42 full=false
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+database cursor=1056 blocks=17 events=5 epochs=1 requests=[1@1003 served@1010, 2@1004]
+
+## 3. round 3
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber finalized full=false
+{
+  eth_call #latest-3/finalized coordinator 0x308c2d6b initialFeeRecipient
+  eth_call #latest-3/finalized coordinator 0x460a58aa confirmationBlocks
+  eth_call #latest-3/finalized coordinator 0x61728f39 keyHash
+  eth_call #latest-3/finalized coordinator 0xb3839295 initialMinFee
+  eth_call #latest-3/finalized coordinator 0xd7a6f6e8 publicKeyY
+  eth_call #latest-3/finalized coordinator 0xfa6df55d publicKeyX
+  eth_call #latest-3/finalized registry 0x219f2428 firstEpochStart
+  eth_call #latest-3/finalized registry 0x830c083a catalogHash
+}
+{
+  eth_call #latest-3/finalized coordinator 0x155cf49b protocolConfigurationHash
+  eth_call #latest-3/finalized registry 0x3a700168 ethTradeSigner
+  eth_call #latest-3/finalized registry 0xb3b9cbb0 btcTradeSigner
+  eth_call #latest-3/finalized registry 0xd25eacfc ethereumBlockSigner
+  eth_call #latest-3/finalized registry 0xf2a12563 hyperliquidSigner
+}
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-45/finalized-42 full=false
+eth_getLogs from=#latest-44/finalized-41 to=#latest-3/finalized addresses=[coordinator,registry]
+{
+  eth_getBlockByNumber #latest-12/finalized-9 full=false
+  eth_getBlockByNumber #latest-13/finalized-10 full=false
+  eth_getBlockByNumber #latest-14/finalized-11 full=false
+  eth_getBlockByNumber #latest-15/finalized-12 full=false
+}
+{
+  eth_getBlockByNumber #latest-10/finalized-7 full=false
+  eth_getBlockByNumber #latest-11/finalized-8 full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+}
+{
+  eth_getBlockByNumber #latest-4/finalized-1 full=false
+  eth_getBlockByNumber #latest-5/finalized-2 full=false
+  eth_getBlockByNumber #latest-6/finalized-3 full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+}
+eth_getBlockByNumber #latest-3/finalized full=false
+eth_getBlockByNumber #latest-3/finalized full=false
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+database cursor=1098 blocks=26 events=5 epochs=1 requests=[1@1003 served@1010, 2@1004]

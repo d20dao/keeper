@@ -1,0 +1,954 @@
+{
+ "about": "The ABI of the compiled round coordinator (contracts/robinhood/D20VRFCoordinatorRobinhood.sol with BeaconBook.sol): every function with its selector and outputs, every event with its topic and indexed inputs, every error with its selector. keeper/src/abi_round.rs must match it exactly.",
+ "regenerate": "npx hardhat compile; node keeper/tests/fixtures/round-coordinator-abi.gen.mjs artifacts/contracts/robinhood/D20VRFCoordinatorRobinhood.sol/D20VRFCoordinatorRobinhood.json > keeper/tests/fixtures/round-coordinator-abi.json, in a tree with the round contracts",
+ "source": "rh/round-contracts at a8a0757, contracts/robinhood/D20VRFCoordinatorRobinhood.sol",
+ "abiSha256": "f90ff705725432ad05039f23292c1f5ae20de424f2eb1ac69b0bb28fabc1d28b",
+ "functions": [
+  {
+   "signature": "CONFIG_DOMAIN()",
+   "selector": "0x3624ffed",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_BACKUP_KEEPERS()",
+   "selector": "0xa54ab074",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_BEACONS()",
+   "selector": "0xb374a5a4",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_BEACON_PERIOD()",
+   "selector": "0x396a9d65",
+   "outputs": "(uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_CALLBACK_GAS()",
+   "selector": "0x6d9809a0",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_EVIDENCE_PACKET_BYTES()",
+   "selector": "0x7fcf2f33",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_FEE_MULTIPLIER()",
+   "selector": "0xb6994144",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_FULFILL_BATCH()",
+   "selector": "0x1d7e0cc4",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_FULFILL_GAS_OVERHEAD()",
+   "selector": "0x2a06b47d",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MAX_MIN_FEE()",
+   "selector": "0x8483d43e",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MIN_CALLBACK_GAS()",
+   "selector": "0x4374e10c",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MIN_FULFILL_GAS_OVERHEAD()",
+   "selector": "0x35ccd0b4",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MIN_REFUND_BPS()",
+   "selector": "0xaf7718f1",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "MIN_SCHEDULE_LEAD()",
+   "selector": "0xdf1b8fae",
+   "outputs": "(uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "REFUND_CALLBACK_GAS()",
+   "selector": "0x8a8ae284",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "RESPONSE_TIMEOUT()",
+   "selector": "0x11e219d7",
+   "outputs": "(uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "ROUND_BEACON_DOMAIN()",
+   "selector": "0x39ae070f",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "ROUND_LEAD()",
+   "selector": "0x9da45184",
+   "outputs": "(uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "ROUND_VERIFY_GAS()",
+   "selector": "0x61e8702c",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "SEED_DOMAIN()",
+   "selector": "0x6000054d",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "TRANSCRIPT_DOMAIN()",
+   "selector": "0xab2fde00",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "UPGRADE_INTERFACE_VERSION()",
+   "selector": "0xad3cb1cc",
+   "outputs": "(string)",
+   "mutability": "view"
+  },
+  {
+   "signature": "acceptOwnership()",
+   "selector": "0x79ba5097",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "backupKeeperCount()",
+   "selector": "0x3b9cbca9",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "beaconCount()",
+   "selector": "0x7201fa80",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "beaconIdentity(uint8)",
+   "selector": "0x78fdf6f2",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "beaconSchedule()",
+   "selector": "0x463116f7",
+   "outputs": "(uint8,uint64,uint8,uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "cancelBeaconSchedule()",
+   "selector": "0x83263877",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "checkRoundSignature(uint8,uint64,bytes)",
+   "selector": "0x4cec5bb9",
+   "outputs": "(bool)",
+   "mutability": "view"
+  },
+  {
+   "signature": "earnedFees()",
+   "selector": "0xb1b3ffd9",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "feeMultiplier()",
+   "selector": "0xe5a70ef7",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "feeRecipient()",
+   "selector": "0x46904840",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "fulfillGasOverhead()",
+   "selector": "0x19d40839",
+   "outputs": "(uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "fulfillRandomness(uint256,(uint256[2],uint256[2],uint256,uint256,uint256,address,uint256[2],uint256[2],uint256),bytes)",
+   "selector": "0x5a58c410",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "fulfillRandomnessBatch((uint8,uint64,bytes)[],uint256[],(uint256[2],uint256[2],uint256,uint256,uint256,address,uint256[2],uint256[2],uint256)[])",
+   "selector": "0xfdec2a74",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "getBeacon(uint8)",
+   "selector": "0x3e27abc4",
+   "outputs": "((address,uint64,uint64,bytes32,bytes))",
+   "mutability": "view"
+  },
+  {
+   "signature": "getMappedResult(uint256)",
+   "selector": "0x8f09a3e6",
+   "outputs": "(uint256[])",
+   "mutability": "view"
+  },
+  {
+   "signature": "getMapping(uint256)",
+   "selector": "0xede9ba8b",
+   "outputs": "((uint8,uint256,uint256,uint32,uint32))",
+   "mutability": "view"
+  },
+  {
+   "signature": "getPendingRequestIds(uint256,uint256)",
+   "selector": "0xfdfe72e6",
+   "outputs": "(uint256[],uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "getProofContext(uint256,bytes)",
+   "selector": "0x4421f88c",
+   "outputs": "(uint256,uint64,bool,bool)",
+   "mutability": "view"
+  },
+  {
+   "signature": "getRoundRequest(uint256)",
+   "selector": "0x46293dec",
+   "outputs": "((address,uint32,uint64,uint64,address,bytes32,bytes32,uint8,uint64,bytes32,bytes32,bytes32,bytes32,uint256,bool,bool,bool))",
+   "mutability": "view"
+  },
+  {
+   "signature": "initialFeeRecipient()",
+   "selector": "0x308c2d6b",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "initialMinFee()",
+   "selector": "0xb3839295",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "initialize((uint256[2],address,address,address,uint16,uint256,uint16,uint32),(address,bytes32,bytes,uint64,uint64,uint64,bytes))",
+   "selector": "0xf7e64d50",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "isAuthorizedKeeper(address)",
+   "selector": "0xb290eff6",
+   "outputs": "(bool)",
+   "mutability": "view"
+  },
+  {
+   "signature": "isBackupKeeper(address)",
+   "selector": "0x4fc12619",
+   "outputs": "(bool)",
+   "mutability": "view"
+  },
+  {
+   "signature": "keeper()",
+   "selector": "0xaced1661",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "keeperCredits(address)",
+   "selector": "0xf5c764f6",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "keeperFeeBps()",
+   "selector": "0x0eab7d63",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "keyHash()",
+   "selector": "0x61728f39",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "lastServedIndex()",
+   "selector": "0x7e176eed",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "lastServedRequestId()",
+   "selector": "0xef54e226",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "mapRandomness(bytes32,(uint8,uint256,uint256,uint32,uint32))",
+   "selector": "0x41c2a199",
+   "outputs": "(uint256[])",
+   "mutability": "pure"
+  },
+  {
+   "signature": "minFee()",
+   "selector": "0x24ec7590",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "nextRequestId()",
+   "selector": "0x6a84a985",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "owner()",
+   "selector": "0x8da5cb5b",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "pendingOwner()",
+   "selector": "0xe30c3978",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "pricing()",
+   "selector": "0x7ce91411",
+   "outputs": "(uint256,uint16,uint32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "proofVerifier()",
+   "selector": "0x7fa417b3",
+   "outputs": "(address)",
+   "mutability": "view"
+  },
+  {
+   "signature": "protocolConfigurationHash()",
+   "selector": "0x155cf49b",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "proxiableUUID()",
+   "selector": "0x52d1902d",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "publicKeyX()",
+   "selector": "0xfa6df55d",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "publicKeyY()",
+   "selector": "0xd7a6f6e8",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "quoteFee(uint32)",
+   "selector": "0xc9caa0c3",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "quoteFeeAt(uint32,uint256)",
+   "selector": "0x26fa8481",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "refundBps()",
+   "selector": "0xec8c9a0b",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "refundCallbackDelivered(uint256)",
+   "selector": "0x281d3157",
+   "outputs": "(bool)",
+   "mutability": "view"
+  },
+  {
+   "signature": "refundCredits(address)",
+   "selector": "0x61137e40",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "refundRequest(uint256)",
+   "selector": "0x7411484e",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "registerBeacon((address,bytes32,bytes,uint64,uint64,uint64,bytes))",
+   "selector": "0x7858297d",
+   "outputs": "(uint8)",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "renounceOwnership()",
+   "selector": "0x715018a6",
+   "outputs": "()",
+   "mutability": "view"
+  },
+  {
+   "signature": "requestFeePaid(uint256)",
+   "selector": "0xef7cc992",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "requestMappedRandomness(bytes32,uint32,address,(uint8,uint256,uint256,uint32,uint32))",
+   "selector": "0xe6b41a8c",
+   "outputs": "(uint256)",
+   "mutability": "payable"
+  },
+  {
+   "signature": "requestRandomness(bytes32,uint32,address)",
+   "selector": "0x9849d1e5",
+   "outputs": "(uint256)",
+   "mutability": "payable"
+  },
+  {
+   "signature": "requestRefundBps(uint256)",
+   "selector": "0x5d170fd7",
+   "outputs": "(uint16)",
+   "mutability": "view"
+  },
+  {
+   "signature": "requestSeed(uint256)",
+   "selector": "0xa9df851a",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "retryCallback(uint256,uint32)",
+   "selector": "0xdd11c275",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "retryRefundCallback(uint256,uint32)",
+   "selector": "0x054f6962",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "roundAt(uint64)",
+   "selector": "0xefe99a24",
+   "outputs": "(uint8,uint64)",
+   "mutability": "view"
+  },
+  {
+   "signature": "roundRandomness(uint8,uint64)",
+   "selector": "0x32183cad",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "roundTime(uint8,uint64)",
+   "selector": "0x104b9489",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "scheduleBeacon(uint8,uint64)",
+   "selector": "0x4c4e656d",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "servedRequestAt(uint256)",
+   "selector": "0xf9a4acc6",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "setBackupKeeper(address,bool)",
+   "selector": "0xdc791117",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "setFeeRecipient(address)",
+   "selector": "0xe74b981b",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "setKeeper(address)",
+   "selector": "0x748747e6",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "setKeeperFeeBps(uint16)",
+   "selector": "0xe140f0ca",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "setPricing(uint256,uint16,uint32)",
+   "selector": "0x4c729ce6",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "setRefundBps(uint16)",
+   "selector": "0x55a94d1b",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "totalKeeperCredits()",
+   "selector": "0xc7281b7a",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "totalRefundCredits()",
+   "selector": "0x6e0842e1",
+   "outputs": "(uint256)",
+   "mutability": "view"
+  },
+  {
+   "signature": "transferOwnership(address)",
+   "selector": "0xf2fde38b",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "upgradeToAndCall(address,bytes)",
+   "selector": "0x4f1ef286",
+   "outputs": "()",
+   "mutability": "payable"
+  },
+  {
+   "signature": "verifyRequestProof(uint256,(uint256[2],uint256[2],uint256,uint256,uint256,address,uint256[2],uint256[2],uint256))",
+   "selector": "0x0846de99",
+   "outputs": "(bytes32)",
+   "mutability": "view"
+  },
+  {
+   "signature": "withdrawFees(address)",
+   "selector": "0x164e68de",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "withdrawKeeperCredit(address)",
+   "selector": "0xf62c546b",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  },
+  {
+   "signature": "withdrawRefundCredit(address)",
+   "selector": "0x445071f2",
+   "outputs": "()",
+   "mutability": "nonpayable"
+  }
+ ],
+ "events": [
+  {
+   "signature": "BackupKeeperSet(address,bool)",
+   "topic": "0x1ba1efd7a51a239ff09790d82b8156dfaec79ee9d15512b0b34f999957f47c6b",
+   "indexed": 1,
+   "anonymous": false
+  },
+  {
+   "signature": "BeaconRegistered(uint8,bytes32,address,bytes32,bytes,uint64,uint64)",
+   "topic": "0x7a777ff22bcc578a738224901ed2c8f447d770ae0f027935bc5c2a3f74c7b1fe",
+   "indexed": 3,
+   "anonymous": false
+  },
+  {
+   "signature": "BeaconScheduleCancelled(uint8,uint64)",
+   "topic": "0xe0af97f2989aa80bac131b57b8a729254f6af8b07c0fc0d90c66248ef10a692e",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "BeaconScheduled(uint8,uint64)",
+   "topic": "0xe7cc373095cb3ada85ceb1a34c44c7f7632bfbddcf88ff8a2f4149d2de1d3dc1",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "CallbackAttempted(uint256,bool,uint32)",
+   "topic": "0x70f64c0739e827900ae6f2e1317601653f4080bc857f423671fc58d5822f1f4a",
+   "indexed": 1,
+   "anonymous": false
+  },
+  {
+   "signature": "FeeOverpaymentCredited(uint256,address,uint256)",
+   "topic": "0x8ae693db98f043f48e8f427375449ed5576aba97575e4f7f93ff2c1f6c75dcb5",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "FeeRecipientChanged(address,address)",
+   "topic": "0x0bc21fe5c3ab742ff1d15b5c4477ffbacf1167e618228078fa625edebe7f331d",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "FeesWithdrawn(address,uint256)",
+   "topic": "0xc0819c13be868895eb93e40eaceb96de976442fa1d404e5c55f14bb65a8c489a",
+   "indexed": 1,
+   "anonymous": false
+  },
+  {
+   "signature": "FulfillmentEvidence(uint256,bytes32,bytes)",
+   "topic": "0xa121bbea897439460dfb08c3e6d6af064bc1f31e9477471828a87c5596b92e77",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "FulfillmentSkipped(uint256,uint8)",
+   "topic": "0x45d96bda73a91db41bdeab56114e5d7b9f42c9f38add9e2d2c6d6f5761203ca3",
+   "indexed": 1,
+   "anonymous": false
+  },
+  {
+   "signature": "Initialized(uint64)",
+   "topic": "0xc7f505b2f371ae2175ee4913f4499e1f2633a7b5936321eed1cdaeb6115181d2",
+   "indexed": 0,
+   "anonymous": false
+  },
+  {
+   "signature": "KeeperChanged(address,address)",
+   "topic": "0x068b48a2fe7f498b57ff6da64f075ae658fde8d77124b092e62b3dc58d91ce35",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "KeeperCreditWithdrawn(address,address,uint256)",
+   "topic": "0x22f05c41968705c032a86a65f8fda7e64483ea5e6b6b27a920d1fbfab94267ba",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "KeeperFeeBpsChanged(uint16,uint16)",
+   "topic": "0xa648a60f1d22511c1cc898ca69b633d1a1114079e83734b9ab9a13e0e28c68b7",
+   "indexed": 0,
+   "anonymous": false
+  },
+  {
+   "signature": "KeeperFeePaid(uint256,address,uint256,bool)",
+   "topic": "0x7605929b04963e0365f647d9ab12e7ac4aeba5474bb80f1e1554fccad0584683",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "MappingRequested(uint256,bytes32,(uint8,uint256,uint256,uint32,uint32))",
+   "topic": "0xbe1c93f40bd74ff9acd22dc40818e36d04e0b8a49b8238d0537c63219c2336dd",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "OwnershipTransferStarted(address,address)",
+   "topic": "0x38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e22700",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "OwnershipTransferred(address,address)",
+   "topic": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "PricingChanged(uint256,uint16,uint32)",
+   "topic": "0x32806eb5e21ac2f5fb7d11f898c2995e19fdf203c8a5aeed8b824506cd0d44ff",
+   "indexed": 0,
+   "anonymous": false
+  },
+  {
+   "signature": "ProofVerified(uint256,bytes32,uint256,bytes32)",
+   "topic": "0x55bb25be3ecd9f68ceae7cdabf4eabe2e0940bd8fc1c26c0d68ad5f7c5d08d22",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RandomnessFulfilled(uint256,bytes32,address)",
+   "topic": "0x9c82683ee7932041c254d206bcce4241d66a811d53ee7191799cc120777b2b87",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RandomnessRequested(uint256,address,bytes32,bytes32,uint64,uint32,uint256,address,uint64)",
+   "topic": "0xaf91b17376114a36689aa115062983bda7b43263a891fb8de0cc69d30d4240ad",
+   "indexed": 3,
+   "anonymous": false
+  },
+  {
+   "signature": "RefundBpsChanged(uint16,uint16)",
+   "topic": "0x21e3c4cf3007c4ee385a3936593ff4cfa23fc17bca1175b6350c546f9810e0d8",
+   "indexed": 0,
+   "anonymous": false
+  },
+  {
+   "signature": "RefundCallbackAttempted(uint256,address,bool,uint32)",
+   "topic": "0x88448c9fbcfc67f28f0266e82766e402ccd28115fbb84edb6e5b2597effe83d8",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RefundCreditWithdrawn(address,address,uint256)",
+   "topic": "0x9d520065b24fda0469128acd3f3078de7e43d70ab762aeea8c741bde25070192",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RequestRefundedTo(uint256,address,uint256,bool)",
+   "topic": "0x0f6107d218fea62a20553f3700dba7c94dcf653bd2027c0bf1ebe0832f42a506",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RequestServed(uint256,uint256)",
+   "topic": "0x2012511e6cebd578bcabff1ef3346edb032cbab8622e9f23d9f15d7d1037267f",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "RoundAssigned(uint256,uint8,uint64)",
+   "topic": "0x5e3418368ffb7c4ee005abcb3bb1d95fb4ea184d0bb611d52f778106dabbdda2",
+   "indexed": 3,
+   "anonymous": false
+  },
+  {
+   "signature": "RoundVerified(uint8,uint64,bytes32,bytes)",
+   "topic": "0x6fb8f55aaaf4c29053cc66d695883f59ed9baf5be1e6132d2645760bf37dd101",
+   "indexed": 2,
+   "anonymous": false
+  },
+  {
+   "signature": "Upgraded(address)",
+   "topic": "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b",
+   "indexed": 1,
+   "anonymous": false
+  }
+ ],
+ "errors": [
+  {
+   "signature": "AddressEmptyCode(address)",
+   "selector": "0x9996b315"
+  },
+  {
+   "signature": "AlreadyDelivered()",
+   "selector": "0xb9f79653"
+  },
+  {
+   "signature": "AlreadyFulfilled()",
+   "selector": "0x4a4117f9"
+  },
+  {
+   "signature": "BeaconGasTooLow()",
+   "selector": "0x919ddbf6"
+  },
+  {
+   "signature": "BeaconVerifierFailed()",
+   "selector": "0x2abeeb6e"
+  },
+  {
+   "signature": "ContractConsumerRequired()",
+   "selector": "0x2b99db1e"
+  },
+  {
+   "signature": "ERC1967InvalidImplementation(address)",
+   "selector": "0x4c9c8ce3"
+  },
+  {
+   "signature": "ERC1967NonPayable()",
+   "selector": "0xb398979f"
+  },
+  {
+   "signature": "EvidencePacketTooLarge()",
+   "selector": "0xcfbc3ebf"
+  },
+  {
+   "signature": "FailedCall()",
+   "selector": "0xd6bda275"
+  },
+  {
+   "signature": "FeeOverflow()",
+   "selector": "0x8181adca"
+  },
+  {
+   "signature": "IncorrectFee(uint256,uint256)",
+   "selector": "0xdcf6afcb"
+  },
+  {
+   "signature": "InsufficientCallbackGas()",
+   "selector": "0xa2c23f0d"
+  },
+  {
+   "signature": "InvalidBatch()",
+   "selector": "0x33b094a1"
+  },
+  {
+   "signature": "InvalidBeacon()",
+   "selector": "0x30740e75"
+  },
+  {
+   "signature": "InvalidCallbackGas()",
+   "selector": "0x35883c54"
+  },
+  {
+   "signature": "InvalidConfig()",
+   "selector": "0x35be3ac8"
+  },
+  {
+   "signature": "InvalidInitialization()",
+   "selector": "0xf92ee8a9"
+  },
+  {
+   "signature": "InvalidMapping()",
+   "selector": "0x07a966e0"
+  },
+  {
+   "signature": "InvalidPublicKey()",
+   "selector": "0xa2d0fee8"
+  },
+  {
+   "signature": "InvalidRefundAddress()",
+   "selector": "0xe2fe2726"
+  },
+  {
+   "signature": "InvalidRoundSignature()",
+   "selector": "0x6302234e"
+  },
+  {
+   "signature": "InvalidScan()",
+   "selector": "0x3e6249a2"
+  },
+  {
+   "signature": "InvalidSchedule()",
+   "selector": "0xdba16ce8"
+  },
+  {
+   "signature": "NoKeeperCredit()",
+   "selector": "0x0d106640"
+  },
+  {
+   "signature": "NoRefundCredit()",
+   "selector": "0x1d59da8e"
+  },
+  {
+   "signature": "NotFulfilled()",
+   "selector": "0x07bc6c3e"
+  },
+  {
+   "signature": "NotInitializing()",
+   "selector": "0xd7e6bcf8"
+  },
+  {
+   "signature": "NotRefunded()",
+   "selector": "0xfae7079c"
+  },
+  {
+   "signature": "OnlyFeeRecipient()",
+   "selector": "0x07d8ed3d"
+  },
+  {
+   "signature": "OwnableInvalidOwner(address)",
+   "selector": "0x1e4fbdf7"
+  },
+  {
+   "signature": "OwnableUnauthorizedAccount(address)",
+   "selector": "0x118cdaa7"
+  },
+  {
+   "signature": "ReentrancyGuardReentrantCall()",
+   "selector": "0x3ee5aeb5"
+  },
+  {
+   "signature": "RefundCallbackAlreadyDelivered()",
+   "selector": "0x6502f8ae"
+  },
+  {
+   "signature": "RefundNotAvailable()",
+   "selector": "0x0b4d6981"
+  },
+  {
+   "signature": "RenounceDisabled()",
+   "selector": "0x89051165"
+  },
+  {
+   "signature": "RequestExpired()",
+   "selector": "0xfef01cd2"
+  },
+  {
+   "signature": "RequestRefunded()",
+   "selector": "0xe0dec416"
+  },
+  {
+   "signature": "RoundUnavailable()",
+   "selector": "0x48d36664"
+  },
+  {
+   "signature": "TransferFailed()",
+   "selector": "0x90b8ec18"
+  },
+  {
+   "signature": "UUPSUnauthorizedCallContext()",
+   "selector": "0xe07c8dba"
+  },
+  {
+   "signature": "UUPSUnsupportedProxiableUUID(bytes32)",
+   "selector": "0xaa1d49a4"
+  },
+  {
+   "signature": "UnknownRequest()",
+   "selector": "0x6d080297"
+  },
+  {
+   "signature": "WrongPublicKey()",
+   "selector": "0x2b0bb68e"
+  },
+  {
+   "signature": "WrongSeed()",
+   "selector": "0xf36cbea4"
+  }
+ ]
+}

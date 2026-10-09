@@ -1,0 +1,50 @@
+{
+  "description": "TickerLayer BTCUSD last trade through the gateway's passthrough (/api): built-in recipe 2's record and template under the passthrough request hash",
+  "signer": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+  "body": [
+    "passthrough",
+    "GET",
+    "/crypto/trade/last/BTCUSD",
+    [],
+    ""
+  ],
+  "template": [
+    {
+      "literal": "{\"symbol\":\"BTCUSD\",\"price\":"
+    },
+    {
+      "decimal": {
+        "fraction": true,
+        "exponent": true
+      }
+    },
+    {
+      "literal": ",\"size\":"
+    },
+    {
+      "decimal": {
+        "fraction": true,
+        "exponent": true
+      }
+    },
+    {
+      "literal": ",\"timestamp\":"
+    },
+    {
+      "integer": {
+        "minDigits": 1,
+        "maxDigits": 16
+      }
+    },
+    {
+      "literal": "}"
+    }
+  ],
+  "sample": {
+    "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+    "requestHash": "0xe1e2347d559b1bfed675541dd5b126ddce9fb850babd48d6807989b1d1f4be10",
+    "timestamp": "1790609617",
+    "data": "{\"symbol\":\"BTCUSD\",\"price\":83099.99,\"size\":0.00029791,\"timestamp\":1790609617009}",
+    "signature": "0x96340970a55e0197cf24580209fe21854d8901dbb9c186a2bd051fd4c36daa321ad7f7888188017a56b431d033790d6379a5eb59a18d420645188f8e2f62fc441b"
+  }
+}

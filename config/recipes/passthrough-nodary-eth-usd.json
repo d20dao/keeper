@@ -1,0 +1,46 @@
+{
+  "description": "Nodary ETH/USD feed through the gateway's passthrough (/api): built-in recipe 4's record and template under the passthrough request hash",
+  "signer": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+  "body": [
+    "passthrough",
+    "GET",
+    "/feed/latest",
+    [
+      [
+        "name",
+        "ETH/USD"
+      ]
+    ],
+    ""
+  ],
+  "template": [
+    {
+      "literal": "{\"ETH/USD\":{\"value\":"
+    },
+    {
+      "decimal": {
+        "fraction": true,
+        "exponent": true
+      }
+    },
+    {
+      "literal": ",\"timestamp\":"
+    },
+    {
+      "integer": {
+        "minDigits": 13,
+        "maxDigits": 13
+      }
+    },
+    {
+      "literal": ",\"category\":\"crypto\"}}"
+    }
+  ],
+  "sample": {
+    "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+    "requestHash": "0x908f3045e21de65da74dd2efae703b7dd0491aac91731fa58e1d2318067a6b29",
+    "timestamp": "1790609624",
+    "data": "{\"ETH/USD\":{\"value\":2669.64,\"timestamp\":1790609624391,\"category\":\"crypto\"}}",
+    "signature": "0x3af0b87d493a417f2d2d5d84a2bd23a95e2c5034521cd826352b6cffb499ec8126e94c19249e9f0da80194466202dd815ca569531d9ed2d4a9d50eb94218ba691c"
+  }
+}

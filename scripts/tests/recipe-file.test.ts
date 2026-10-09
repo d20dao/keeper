@@ -4,7 +4,7 @@ import {readFileSync,readdirSync} from "node:fs";
 import {Wallet,getBytes,hexlify,id,toBeHex,toUtf8Bytes} from "ethers";
 import {checkRecipeFile,RecipeFileError} from "../lib/recipe-file.ts";
 import {attestationDigest} from "../../src/sources.ts";
-import {BUILTIN_EPOCH_RECIPES} from "../../src/epoch.ts";
+import {BUILTIN_EPOCH_RECIPES,passthroughEpochRecipe} from "../../src/epoch.ts";
 
 const example=JSON.parse(readFileSync("config/recipes/nodary-btc-usd.json","utf8"));
 const rejects=(file:unknown,message:RegExp)=>assert.throws(()=>checkRecipeFile(JSON.stringify(file)),(error:Error)=>error instanceof RecipeFileError&&message.test(error.message),String(message));
@@ -39,6 +39,29 @@ test("every failed self-check names the rule it broke",()=>{
   rejects({...example,sample:{...example.sample,data:text}},/recovers to .* not the signer/);
   const oversized={...example,body:{operation:"latestFeeds",parameters:{name:"x".repeat(1100)}}};
   rejects(oversized,/exceeds the registry bounds: A recipe canonical request must be 1 to 1024 bytes/);
+});
+
+test("passthrough recipe files register the built-in records under their /api request hashes",()=>{
+  const files=readdirSync("config/recipes").filter(name=>name.startsWith("passthrough-"));
+  assert.equal(files.length,5);
+  const samples=JSON.parse(readFileSync("test/fixtures/airnode-passthrough-2026-09-28.json","utf8"));
+  for(const name of files){
+    const file=JSON.parse(readFileSync(`config/recipes/${name}`,"utf8")),checked=checkRecipeFile(JSON.stringify(file));
+    const entry=samples.recipes.find((recipe:{name:string})=>`passthrough-${recipe.name}.json`===name);
+    // The canonical request is the body, the gateway's passthrough preimage; the template is the built-in recipe's.
+    assert.equal(checked.recipe.body,checked.recipe.canonicalRequest);
+    assert.deepEqual(checked.recipe,passthroughEpochRecipe(entry.builtinRecipe));
+    assert.equal(checked.queryHash,entry.requestHash);
+    assert.notEqual(checked.queryHash,id(BUILTIN_EPOCH_RECIPES[entry.builtinRecipe].canonicalRequest));
+    // The signed body text is kept exactly; parsed and re-serialized data is refused.
+    rejects({...file,sample:{...file.sample,data:JSON.parse(file.sample.data)}},/response body text exactly as received/);
+    // The POST / request hash of the same listing does not match this request.
+    rejects({...file,sample:{...file.sample,requestHash:id(BUILTIN_EPOCH_RECIPES[entry.builtinRecipe].canonicalRequest)}},/is not the canonical request hash/);
+  }
+  const nodary=JSON.parse(readFileSync("config/recipes/passthrough-nodary-eth-usd.json","utf8"));
+  rejects({...nodary,body:["passthrough","GET","/feed/latest",[["name","ETH/USD"]]]},/body is not a gateway request/);
+  rejects({...nodary,body:["passthrough","GET","/feed/latest",[["x-airnode-sign","false"]],""]},/body is not a gateway request: x-airnode- query parameters belong to the gateway/);
+  rejects({...nodary,body:'["passthrough", "GET","/feed/latest",[["name","ETH/USD"]],""]'},/body is not a gateway request/);
 });
 
 test("a correctly signed record outside the template is refused",async()=>{

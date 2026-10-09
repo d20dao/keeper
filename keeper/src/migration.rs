@@ -2,7 +2,8 @@
 //! Markers are a fail-closed write-ahead protocol, not an atomic multi-file rename.
 use crate::{
     abi::{Coordinator as C, EpochRegistry as E},
-    config::Config,
+    abi_round::RoundCoordinator as RC,
+    config::{Config, CoordinatorKind},
     journal::Journal,
     prover,
     rpc::{Rpc, quantity},
@@ -370,7 +371,9 @@ async fn verified_plan(cfg: &Config, source: &Journal, from: PathBuf, to: PathBu
     let mut observed = None;
     for url in &cfg.rpc_urls {
         // Every configured endpoint must agree; no failover hides an ambiguous nonce.
-        let rpc = Rpc::new(vec![url.clone()])?;
+        // Its contract reads follow the keeper's finality mode, like the keeper's own.
+        let rpc = Rpc::new(vec![url.clone()])?
+            .with_finality(cfg.chain.finality_mode, cfg.chain.soft_depth_blocks);
         ensure!(
             quantity(&rpc.request("eth_chainId", json!([])).await?)? == chain,
             "RPC chain mismatch"
@@ -385,22 +388,39 @@ async fn verified_plan(cfg: &Config, source: &Journal, from: PathBuf, to: PathBu
             cfg.code_hash.is_none_or(|hash| hash == code_hash),
             "Destination code pin mismatch"
         );
-        ensure!(
-            rpc.call(cfg.coordinator, C::publicKeyXCall {}).await? == public_key[0]
-                && rpc.call(cfg.coordinator, C::publicKeyYCall {}).await? == public_key[1],
-            "Destination VRF key mismatch"
-        );
+        let kind = cfg.chain.coordinator_kind;
+        match kind {
+            CoordinatorKind::Epoch => ensure!(
+                rpc.call(cfg.coordinator, C::publicKeyXCall {}).await? == public_key[0]
+                    && rpc.call(cfg.coordinator, C::publicKeyYCall {}).await? == public_key[1],
+                "Destination VRF key mismatch"
+            ),
+            CoordinatorKind::Round => ensure!(
+                rpc.call(cfg.coordinator, RC::publicKeyXCall {}).await? == public_key[0]
+                    && rpc.call(cfg.coordinator, RC::publicKeyYCall {}).await? == public_key[1],
+                "Destination VRF key mismatch"
+            ),
+        }
         let runtime_pins = crate::proxy::RuntimePins::observe(&rpc, cfg).await?;
         let protocol_hash = crate::worker::validate_configuration_pin(&rpc, cfg).await?;
-        let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
-        ensure!(
-            rpc.call(registry, E::committerCall {}).await? == new_sender,
-            "Destination epoch committer does not match transaction wallet"
-        );
+        match kind {
+            CoordinatorKind::Epoch => {
+                let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
+                ensure!(
+                    rpc.call(registry, E::committerCall {}).await? == new_sender,
+                    "Destination epoch committer does not match transaction wallet"
+                );
+            }
+            // A round coordinator names its primary keeper wallet itself: there is no registry.
+            CoordinatorKind::Round => ensure!(
+                rpc.call(cfg.coordinator, RC::keeperCall {}).await? == new_sender,
+                "Destination coordinator's keeper does not match transaction wallet"
+            ),
+        }
         let old_nonce = drained(
             &rpc,
             source,
-            old_coordinator,
+            (old_coordinator, kind),
             old_sender,
             cfg.approved_next(),
         )
@@ -440,10 +460,97 @@ async fn verified_plan(cfg: &Config, source: &Journal, from: PathBuf, to: PathBu
         public_key,
     })
 }
+/// Soft finality: what the source journal still owes the finality audit. A soft keeper keeps the signed bytes of every
+/// receipt it settled until the audit has checked the receipt's block against L1 finality, since a block the sequencer
+/// replaces is recovered from by broadcasting those bytes again; and a mismatch on record is an incident the keeper has not
+/// recovered from. Changing the sender deletes the transactions with the rest of `txs`, so a source that owes the audit
+/// anything is not migrated. The `head` mark is rewritten by every tick, is never behind, and is no debt. A journal from
+/// before soft finality has no marks.
+///
+/// A mark need not wait for L1 finality, only for the sequencer to be unable to replace its block: a block at or below the
+/// chain's `safe` head is in a batch posted to L1, and a mark there whose hash is the chain's owes nothing. So a stall of
+/// L1 finality (`finality_audit_stalled`) does not block a migration; a stall of the batches reaching L1 still does, and
+/// so does a marked block the chain has with another hash, which the old keeper recovers from by itself.
+async fn ensure_audited(rpc: &Rpc, source: &Journal) -> Result<()> {
+    if let Some(found) = source.finality_mismatch().await? {
+        bail!(
+            "Source has a finality mismatch on record (id {}): its keeper is recovering from it. Changing the sender deletes the signed transactions that the recovery broadcasts again. Keep the old keeper running until it has recovered and cleared the record (`d20dao-keeper finality --db <old-db> --status` reads clear), and migrate afterwards",
+            found.id()
+        );
+    }
+    let table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='soft_marks'",
+    )
+    .fetch_one(&source.pool)
+    .await?;
+    let marks: Vec<(i64, String)> = if table == 0 {
+        Vec::new()
+    } else {
+        sqlx::query_as("SELECT number,hash FROM soft_marks WHERE kind!='head' ORDER BY number")
+            .fetch_all(&source.pool)
+            .await?
+    };
+    if marks.is_empty() {
+        return Ok(());
+    }
+    let marks: Vec<(u64, String)> = marks
+        .into_iter()
+        .map(|(number, hash)| Ok((u64::try_from(number)?, hash)))
+        .collect::<Result<_>>()?;
+    // Without the chain's word on the marked blocks, every mark is owed.
+    let posted = async {
+        let safe = rpc.safe_head().await?.number;
+        let numbers: Vec<u64> = marks
+            .iter()
+            .map(|(number, _)| *number)
+            .filter(|number| *number <= safe)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut canonical = std::collections::BTreeMap::new();
+        for chunk in numbers.chunks(crate::rpc::MAX_BLOCK_HASHES) {
+            for (number, hash) in chunk.iter().zip(rpc.block_hashes(chunk).await?) {
+                canonical.insert(*number, hash.to_string());
+            }
+        }
+        Ok::<_, anyhow::Error>((safe, canonical))
+    };
+    let (safe, canonical) = posted.await.unwrap_or_default();
+    settled_on_l1(&marks, safe, &canonical)
+}
+/// Whether every one of the source's `marks` (block number and hash) is on L1: at or below the `safe` head, and with
+/// the hash the chain has for its block (`canonical`). See `ensure_audited`.
+fn settled_on_l1(
+    marks: &[(u64, String)],
+    safe: u64,
+    canonical: &std::collections::BTreeMap<u64, String>,
+) -> Result<()> {
+    let replaced = marks.iter().find(|(number, hash)| {
+        canonical
+            .get(number)
+            .is_some_and(|chain| !chain.eq_ignore_ascii_case(hash))
+    });
+    if let Some((number, _)) = replaced {
+        bail!(
+            "Source has a soft-finality mark of block {number}, which the chain has with another hash: the sequencer replaced a block the old keeper acted on. Keep the old keeper running with its ingress stopped; it recovers from it by itself. Migrate once `d20dao-keeper finality --db <old-db> --status` reads clear"
+        );
+    }
+    let unaudited = marks
+        .iter()
+        .filter(|(number, _)| *number > safe || !canonical.contains_key(number))
+        .count();
+    ensure!(
+        unaudited == 0,
+        "Source has {unaudited} soft-finality marks that the finality audit has not checked yet, in blocks the chain has not posted to L1. Changing the sender deletes the signed transactions of unaudited receipts, which the recovery from a replaced block broadcasts again. Keep the old keeper running with its ingress stopped until the chain's safe head has passed them, or `d20dao-keeper finality --db <old-db> --status` lists no marks beyond the head mark, then migrate"
+    );
+    Ok(())
+}
+/// Whether the source journal and its coordinator are drained. `coordinator` is the source's coordinator and the kind of
+/// coordinator it is (the kind of the keeper's configuration: a migration never changes the kind).
 async fn drained(
     rpc: &Rpc,
     source: &Journal,
-    coordinator: Address,
+    (coordinator, kind): (Address, CoordinatorKind),
     sender: Address,
     approved: crate::proxy::ApprovedNext,
 ) -> Result<u64> {
@@ -458,6 +565,7 @@ async fn drained(
             tracing::info!(service=upgrade.service.name(),from=%upgrade.from,to=%upgrade.to,"Source journal predates the approved implementation upgrade");
         }
     }
+    ensure_audited(rpc, source).await?;
     let unresolved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM txs WHERE state != 'resolved'")
         .fetch_one(&source.pool)
         .await?;
@@ -480,39 +588,48 @@ async fn drained(
         "Old wallet on-chain nonce is behind durable nonce floor"
     );
     let head = rpc.head().await?;
-    let live_epochs: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM epoch_work WHERE start>? AND state NOT IN ('committed','expired')",
-    )
-    .bind(i64::try_from(head.number)?)
-    .fetch_one(&source.pool)
-    .await?;
-    ensure!(
-        live_epochs == 0,
-        "Source has still-live epoch preparation; stop the publisher and wait until its preparation window ends before migrating"
-    );
+    // A round coordinator's keeper publishes no epochs.
+    if kind == CoordinatorKind::Epoch {
+        let live_epochs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM epoch_work WHERE start>? AND state NOT IN ('committed','expired')",
+        )
+        .bind(i64::try_from(head.number)?)
+        .fetch_one(&source.pool)
+        .await?;
+        ensure!(
+            live_epochs == 0,
+            "Source has still-live epoch preparation; stop the publisher and wait until its preparation window ends before migrating"
+        );
+    }
     let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE deadline>=? AND state NOT IN ('served','refunded','expired')")
         .bind(i64::try_from(head.timestamp)?).fetch_one(&source.pool).await?;
     ensure!(
         live == 0,
         "Source has still-live saved game work/proofs; drain it before migrating"
     );
-    let end: u64 = rpc
-        .call(coordinator, C::nextRequestIdCall {})
-        .await?
-        .try_into()?;
+    let end: u64 = match kind {
+        CoordinatorKind::Epoch => rpc.call(coordinator, C::nextRequestIdCall {}).await?,
+        CoordinatorKind::Round => rpc.call(coordinator, RC::nextRequestIdCall {}).await?,
+    }
+    .try_into()?;
     // Latest request is a conservative global drain barrier. Requiring it to expire
     // avoids skipping undiscovered gaps, fulfilled-tail ordering, or truncated pages.
     if end > 1 {
-        let last = rpc
-            .call(
-                coordinator,
-                C::getRequestCall {
-                    id: U256::from(end - 1),
-                },
-            )
-            .await?;
+        let id = U256::from(end - 1);
+        let deadline = match kind {
+            CoordinatorKind::Epoch => {
+                rpc.call(coordinator, C::getRequestCall { id })
+                    .await?
+                    .deadline
+            }
+            CoordinatorKind::Round => {
+                rpc.call(coordinator, RC::getRoundRequestCall { requestId: id })
+                    .await?
+                    .deadline
+            }
+        };
         ensure!(
-            last.deadline < head.timestamp,
+            deadline < head.timestamp,
             "Old coordinator request ingress is not drained: stop new requests and wait until the newest request deadline has passed"
         );
     }
@@ -1300,6 +1417,201 @@ mod tests {
             Mode::Prepare
         );
     }
+    /// An endpoint that does not answer: the chain says nothing of the marked blocks.
+    fn offline() -> Rpc {
+        Rpc::new(vec!["http://127.0.0.1:9".into()]).unwrap()
+    }
+    /// R2/R3 L9: a mark in a block the chain has posted to L1, with the chain's hash, owes nothing, whatever L1 finality
+    /// does; one above the safe head, or one the chain has under another hash, is owed.
+    #[test]
+    fn marks_in_blocks_posted_to_l1_with_the_chains_hash_owe_nothing() {
+        let marks = |list: &[(u64, &str)]| -> Vec<(u64, String)> {
+            list.iter().map(|(n, h)| (*n, (*h).to_owned())).collect()
+        };
+        let chain: std::collections::BTreeMap<u64, String> =
+            [(80, "0xh80".to_owned()), (85, "0xh85".to_owned())].into();
+        settled_on_l1(&marks(&[(80, "0xh80"), (85, "0xH85")]), 85, &chain).unwrap();
+        let above = settled_on_l1(&marks(&[(80, "0xh80"), (86, "0xh86")]), 85, &chain)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            above.contains(
+                "Source has 1 soft-finality marks that the finality audit has not checked yet"
+            ),
+            "{above}"
+        );
+        let replaced = settled_on_l1(&marks(&[(80, "0xother")]), 85, &chain)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            replaced.contains("block 80, which the chain has with another hash"),
+            "{replaced}"
+        );
+        // No word from the chain: every mark is owed.
+        assert!(settled_on_l1(&marks(&[(80, "0xh80")]), 0, &Default::default()).is_err());
+    }
+    /// A source journal with a head mark and the marks given, as a soft keeper leaves them, opened read-only as the
+    /// migration opens it.
+    async fn soft_source(dir: &Path, marks: &[(&str, i64)]) -> (PathBuf, Journal) {
+        let path = dir.join("soft-source.sqlite");
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        journal.soft_decision(90, "0xh90", 5).await.unwrap();
+        for (kind, number) in marks {
+            sqlx::query(
+                "INSERT INTO soft_marks(number,hash,kind,ref,created,status) VALUES(?,?,?,?,5,1)",
+            )
+            .bind(number)
+            .bind(format!("0xh{number}"))
+            .bind(kind)
+            .bind("0xtx")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+        }
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        (path, source)
+    }
+    #[tokio::test]
+    async fn a_source_that_owes_the_finality_audit_something_is_not_migrated() {
+        // Only the head mark, which every tick rewrites: nothing is owed.
+        let dir = tempfile::tempdir().unwrap();
+        let (_, source) = soft_source(dir.path(), &[]).await;
+        ensure_audited(&offline(), &source).await.unwrap();
+        source.pool.close().await;
+
+        // The mark of a receipt, of a signature or of a nonce that the audit has not checked is owed, and the refusal
+        // says what to do.
+        for kind in ["receipt", "sign", "nonce"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, source) = soft_source(dir.path(), &[(kind, 80)]).await;
+            let refused = ensure_audited(&offline(), &source)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains(
+                    "Source has 1 soft-finality marks that the finality audit has not checked yet"
+                ),
+                "{kind}: {refused}"
+            );
+            assert!(
+                refused.contains("deletes the signed transactions"),
+                "{refused}"
+            );
+            assert!(
+                refused.contains("finality --db <old-db> --status"),
+                "{refused}"
+            );
+            source.pool.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn a_source_with_a_finality_mismatch_on_record_is_not_migrated_before_it_has_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("halted.sqlite");
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        let found = crate::journal::Mismatch {
+            kind: "receipt".into(),
+            number: 3,
+            reference: "0xtx".into(),
+            expected: "0xa".into(),
+            actual: "0xb".into(),
+            detected_at: 1,
+        };
+        journal.record_finality_mismatch(&found).await.unwrap();
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        let refused = ensure_audited(&offline(), &source)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(&format!("(id {})", found.id())),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("finality --db <old-db> --status"),
+            "{refused}"
+        );
+        source.pool.close().await;
+        // Acknowledged is not recovered: the record stands until the recovery has cleared it.
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        journal.acknowledge_finality(&found.id(), 2).await.unwrap();
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        assert!(ensure_audited(&offline(), &source).await.is_err());
+        source.pool.close().await;
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        journal
+            .clear_finality_incident(&serde_json::json!({}))
+            .await
+            .unwrap();
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        ensure_audited(&offline(), &source).await.unwrap();
+        source.pool.close().await;
+    }
+    #[tokio::test]
+    async fn a_journal_from_before_soft_finality_owes_the_audit_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite");
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        sqlx::raw_sql("DROP TABLE soft_marks")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        ensure_audited(&offline(), &source).await.unwrap();
+        source.pool.close().await;
+    }
+    #[tokio::test]
+    async fn the_drained_check_that_prepare_apply_and_resume_share_refuses_while_the_audit_is_owed()
+    {
+        use crate::proxy::{ApprovedNext, tests as chain};
+        let (_state, rpc) = chain::local_chain().await;
+        let pins = chain::pins();
+        let (coordinator, sender) = (pins.coordinator.proxy, Address::repeat_byte(0x55));
+        let dir = tempfile::tempdir().unwrap();
+        let (path, source) = soft_source(dir.path(), &[("receipt", 80)]).await;
+        let refused = drained(
+            &rpc,
+            &source,
+            (coordinator, CoordinatorKind::Epoch),
+            sender,
+            ApprovedNext::default(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("soft-finality marks that the finality audit has not checked yet"),
+            "{refused}"
+        );
+        source.pool.close().await;
+        // The old keeper ran on until L1 finalized the block: the audit checked the mark and deleted it.
+        let journal = Journal::open(&path, "scope").await.unwrap();
+        journal
+            .audit_marks(&[(80, "0xh80".into())], 10)
+            .await
+            .unwrap();
+        journal.pool.close().await;
+        let source = open_readonly(&path).await.unwrap();
+        assert_eq!(
+            drained(
+                &rpc,
+                &source,
+                (coordinator, CoordinatorKind::Epoch),
+                sender,
+                ApprovedNext::default()
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        source.pool.close().await;
+    }
     #[tokio::test]
     async fn a_drained_source_recorded_before_an_approved_upgrade_still_migrates() {
         use crate::proxy::{ApprovedNext, tests as chain};
@@ -1327,30 +1639,98 @@ mod tests {
                 .insert(coordinator, Address::repeat_byte(implementation));
         };
         assert_eq!(
-            drained(&rpc, &source, coordinator, sender, approved)
-                .await
-                .unwrap(),
+            drained(
+                &rpc,
+                &source,
+                (coordinator, CoordinatorKind::Epoch),
+                sender,
+                approved
+            )
+            .await
+            .unwrap(),
             0
         );
         // After the source last ran, the coordinator moved to the approved next implementation.
         move_to(0xc3);
         assert_eq!(
-            drained(&rpc, &source, coordinator, sender, approved)
-                .await
-                .unwrap(),
+            drained(
+                &rpc,
+                &source,
+                (coordinator, CoordinatorKind::Epoch),
+                sender,
+                approved
+            )
+            .await
+            .unwrap(),
             0
         );
         // Without the approval, or to any other implementation, the source still refuses as before.
         for (implementation, approval) in [(0xc3, ApprovedNext::default()), (0xc4, approved)] {
             move_to(implementation);
-            let refused = drained(&rpc, &source, coordinator, sender, approval)
-                .await
-                .unwrap_err();
+            let refused = drained(
+                &rpc,
+                &source,
+                (coordinator, CoordinatorKind::Epoch),
+                sender,
+                approval,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 refused.to_string(),
                 "Proxy implementation changed; review and update pins before restarting"
             );
         }
+        source.pool.close().await;
+    }
+    #[tokio::test]
+    async fn a_round_coordinators_journal_is_planned_on_the_round_coordinators_reads_and_keeper_role()
+     {
+        let rig = crate::round_mode::round_rig().await.unheld();
+        let id = rig.request();
+        rig.chain(|chain| chain.mine(1));
+        rig.run(false, false).await;
+        // The request expires and the old keeper sees it: the source is drained.
+        rig.chain(|chain| chain.mine(crate::config::RESPONSE_TIMEOUT_SECONDS + 1));
+        let run = rig.run(false, false).await;
+        assert!(
+            run.journal.contains(&format!("jobs [{id}=expired]")),
+            "{}",
+            run.journal
+        );
+        let cfg = rig.config(false);
+        let from = std::fs::canonicalize(&cfg.db).unwrap();
+        let to = from.with_file_name("moved.sqlite");
+        let source = open_readonly(&from).await.unwrap();
+        rig.node.take();
+        let plan = verified_plan(&cfg, &source, from.clone(), to.clone())
+            .await
+            .unwrap();
+        let asked = crate::scripted::render(&rig.node.take());
+        assert_eq!(plan.runtime_pins.registry, None);
+        // The destination's primary keeper wallet is read from the round coordinator, and the drain barrier is its
+        // newest request, read with getRoundRequest; nothing of an epoch coordinator or a registry is asked.
+        for read in [
+            "keeper",
+            &format!("getRoundRequest args=[{id}]"),
+            "nextRequestId",
+        ] {
+            assert!(
+                asked.iter().any(|line| line.ends_with(read)),
+                "{read}: {asked:#?}"
+            );
+        }
+        let epoch = crate::round_mode::epoch_calls(&asked);
+        assert!(epoch.is_empty(), "{epoch:#?}");
+        // A wallet that is not the coordinator's keeper is refused as a destination.
+        rig.chain(|chain| chain.committer = Address::repeat_byte(0x91));
+        let refused = verified_plan(&cfg, &source, from, to).await.unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("Destination coordinator's keeper does not match transaction wallet"),
+            "{refused}"
+        );
         source.pool.close().await;
     }
 }

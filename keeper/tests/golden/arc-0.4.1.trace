@@ -1,0 +1,1390 @@
+# The calls keeper 0.4.1 makes on Arc: finalized reads, standard gas model, EpochEntropy.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+
+## 1. startup (the first calls of every run that follows)
+eth_chainId
+eth_getCode latest coordinator
+{
+  eth_getCode latest coordinator
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+}
+eth_getCode latest coordinator_implementation
+eth_call finalized coordinator 0x2b12cb69 epochRegistry
+{
+  eth_getCode latest registry
+  eth_getStorageAt latest registry slot=eip1967.implementation
+}
+eth_getCode latest registry_implementation
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_call finalized coordinator 0xfa6df55d publicKeyX
+eth_call finalized coordinator 0xd7a6f6e8 publicKeyY
+eth_call finalized coordinator 0x155cf49b protocolConfigurationHash
+eth_call finalized coordinator 0x460a58aa confirmationBlocks
+eth_call finalized coordinator 0x2b12cb69 epochRegistry
+eth_call finalized registry 0x5bc8e8f9 committer
+eth_call finalized registry 0x830c083a catalogHash
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber finalized full=false
+
+## 2. an idle tick
+### the epoch's snapshot is fetched
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[1,0]
+eth_getBlockByNumber latest full=false
+eth_call finalized registry 0xba01b103 getRecipe args=[6]
+eth_call finalized registry 0x87533a48 beaconOf args=[6]
+eth_getBlockByNumber #latest-8/finalized-5 full=false
+relay GET /<chain hash>/public/1000334
+eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=d99c7c70
+journal
+jobs []
+txs []
+epochs [1=prepared]
+sweep queued=false in_flight=false last=none
+cursor=1 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+### the snapshot is prepared and nothing waits
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+journal
+jobs []
+txs []
+epochs [1=prepared]
+sweep queued=false in_flight=false last=none
+cursor=1 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+
+## 3. a request served singly, then two in a batch
+### the request is proved and fulfilled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-13/finalized-10 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[1,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[1]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[1]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 type=2 chain=5042002 nonce=0 gas=810000 maxFee=4140000000 maxPriority=2000000000 value=0
+journal
+jobs [1=submitted]
+txs [1:fulfill@0=submitted]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=2 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+### the receipt settles the request; the next is proved, not sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-14/finalized-11 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-10/finalized-7 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[2,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[2]
+eth_getBlockByNumber latest full=false
+journal
+jobs [1=served 2=prepared]
+txs [1:fulfill@0=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=1
+health healthy=true faults=[] send_enabled=false
+### a third request is proved, not sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[3,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[3]
+eth_getBlockByNumber latest full=false
+journal
+jobs [1=served 2=prepared 3=prepared]
+txs [1:fulfill@0=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=1
+health healthy=true faults=[] send_enabled=false
+### the two prepared requests go out in one batch
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+{
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+]
+{
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[2]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[3]
+}
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_estimateGas - coordinator 0x9497b180 fulfillRandomnessBatch ids=[2,3] seeds=[75a28a54,4aa4bdfe] bytes=1028 from=keeper
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0x9497b180 fulfillRandomnessBatch ids=[2,3] seeds=[75a28a54,4aa4bdfe] bytes=1028 type=2 chain=5042002 nonce=1 gas=1400000 maxFee=4000000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=submitted 3=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=submitted]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=1
+health healthy=true faults=[] send_enabled=true
+### the receipt settles both
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0x9497b180 fulfillRandomnessBatch
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+journal
+jobs [1=served 2=served 3=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=2
+health healthy=true faults=[] send_enabled=true
+
+## 4. an epoch commit
+### the next epoch's snapshot is fetched
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-168/finalized-165 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[2,0]
+eth_getBlockByNumber latest full=false
+eth_call finalized registry 0xba01b103 getRecipe args=[6]
+eth_call finalized registry 0x87533a48 beaconOf args=[6]
+eth_getBlockByNumber #latest-5/finalized-2 full=false
+relay GET /<chain hash>/public/1000401
+eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=9f8b4c02
+journal
+jobs [1=served 2=served 3=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved]
+epochs [1=committed 2=prepared]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=2
+health healthy=true faults=[] send_enabled=true
+### a request in the unpublished epoch makes the keeper commit it
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[4,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - registry 0xb1580277 commitEpoch epoch=2 timestamp=4000001200 data=1000401 signature=8d48d6ff bytes=324 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - registry 0xb1580277 commitEpoch epoch=2 timestamp=4000001200 data=1000401 signature=8d48d6ff bytes=324 type=2 chain=5042002 nonce=2 gas=650000 maxFee=4120000000 maxPriority=2000000000 value=0
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+eth_getBlockByNumber finalized full=false
+journal
+jobs [1=served 2=served 3=served 4=pending]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=submitted]
+epochs [1=committed 2=submitted]
+sweep queued=false in_flight=false last=none
+cursor=5 nonce_floor=2
+health healthy=true faults=[] send_enabled=true
+### the commit's receipt settles; the request is proved and fulfilled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+eth_getTransactionReceipt 0xb1580277 commitEpoch
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-5/finalized-2 full=false
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[4]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=4 seed=9ab75282 bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[4]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=4 seed=9ab75282 bytes=452 type=2 chain=5042002 nonce=3 gas=810000 maxFee=4080000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=served 3=served 4=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=submitted]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=5 nonce_floor=3
+health healthy=true faults=[] send_enabled=true
+### the receipt settles the request
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=5 nonce_floor=4
+health healthy=true faults=[] send_enabled=true
+
+## 5. a sweep
+### the sweep is signed and sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+{
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_call finalized coordinator 0x46904840 feeRecipient
+eth_getBalance latest keeper
+eth_estimateGas - fee_recipient transfer from=keeper value=0x1
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - fee_recipient sweep type=2 chain=5042002 nonce=4 gas=25200 maxFee=4020000000 maxPriority=2000000000 value=2000000000000000000
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=true last=none
+cursor=5 nonce_floor=4
+health healthy=true faults=[] send_enabled=true
+### the receipt settles the sweep
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt sweep
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=sent
+cursor=5 nonce_floor=5
+health healthy=true faults=[] send_enabled=true
+### a second sweep is signed and sent, and never included
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+{
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_call finalized coordinator 0x46904840 feeRecipient
+eth_getBalance latest keeper
+eth_estimateGas - fee_recipient transfer from=keeper value=0x1
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - fee_recipient sweep type=2 chain=5042002 nonce=5 gas=25200 maxFee=4120000000 maxPriority=2000000000 value=1000000000000000000
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=true last=sent
+cursor=5 nonce_floor=5
+health healthy=true faults=[] send_enabled=true
+### the sweep waited too long: its nonce is cancelled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+eth_getTransactionReceipt sweep
+eth_getTransactionCount finalized keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - keeper cancel type=2 chain=5042002 nonce=5 gas=21000 maxFee=4635000001 maxPriority=2250000001 value=0
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=true last=sent
+cursor=5 nonce_floor=5
+health healthy=true faults=[] send_enabled=true
+### the receipt settles the cancellation
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt sweep
+eth_getTransactionReceipt cancel
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=5 nonce_floor=6
+health healthy=true faults=[] send_enabled=true
+
+## 6. the refund paths
+### a request is proved and fulfilled, and the fulfillment is never included
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[5,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[5]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=5 seed=0038c2fa bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[5]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[5]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=5 seed=0038c2fa bytes=452 type=2 chain=5042002 nonce=6 gas=810000 maxFee=4020000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=served 3=served 4=served 5=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=submitted]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=6 nonce_floor=6
+health healthy=true faults=[] send_enabled=true
+### the request was refunded: the fulfillment's nonce is cancelled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_call finalized coordinator 0xc58343ef getRequest args=[5]
+eth_getTransactionCount finalized keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - keeper cancel type=2 chain=5042002 nonce=6 gas=21000 maxFee=4522500001 maxPriority=2250000001 value=0
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=submitted 5:cancel@6=submitted]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=6 nonce_floor=6
+health healthy=true faults=[] send_enabled=true
+### the cancellation settles the refund; the next request is proved, not sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-14/finalized-11 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getTransactionReceipt cancel
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-10/finalized-7 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[6,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[6]
+eth_getBlockByNumber latest full=false
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=prepared]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=7 nonce_floor=7
+health healthy=true faults=[] send_enabled=false
+### a second request is proved, not sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[7,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[7]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[7]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[7]
+eth_getBlockByNumber latest full=false
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=prepared 7=prepared]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=8 nonce_floor=7
+health healthy=true faults=[] send_enabled=false
+### the two go out in a batch that is never included
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-3/finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+{
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[6]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[7]
+]
+{
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[6]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[7]
+}
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_estimateGas - coordinator 0x9497b180 fulfillRandomnessBatch ids=[6,7] seeds=[dddfbe36,54f46dcf] bytes=1028 from=keeper
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[6]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[7]
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0x9497b180 fulfillRandomnessBatch ids=[6,7] seeds=[dddfbe36,54f46dcf] bytes=1028 type=2 chain=5042002 nonce=7 gas=1400000 maxFee=4120000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=submitted 7=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=submitted]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=8 nonce_floor=7
+health healthy=true faults=[] send_enabled=true
+### both were refunded: the batch's nonce is cancelled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+]
+eth_getTransactionReceipt 0x9497b180 fulfillRandomnessBatch
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[6]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[7]
+]
+eth_getTransactionCount finalized keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - keeper cancel type=2 chain=5042002 nonce=7 gas=21000 maxFee=4635000001 maxPriority=2250000001 value=0
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=submitted 7=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=submitted batch:6:2:ad27f01903602303:cancel@7=submitted]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=8 nonce_floor=7
+health healthy=true faults=[] send_enabled=true
+### the cancellation settles the refunds
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0x9497b180 fulfillRandomnessBatch
+eth_getTransactionReceipt cancel
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[7]
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved]
+epochs [1=committed 2=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=8 nonce_floor=8
+health healthy=true faults=[] send_enabled=true
+### the next epoch's snapshot is fetched
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-142/finalized-139 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[3,0]
+eth_getBlockByNumber latest full=false
+eth_call finalized registry 0xba01b103 getRecipe args=[6]
+eth_call finalized registry 0x87533a48 beaconOf args=[6]
+eth_getBlockByNumber #latest-5/finalized-2 full=false
+relay GET /<chain hash>/public/1000467
+eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=007c53ae
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved]
+epochs [1=committed 2=committed 3=prepared]
+sweep queued=false in_flight=false last=cancelled
+cursor=8 nonce_floor=8
+health healthy=true faults=[] send_enabled=true
+### a request makes the keeper commit the epoch; the commit is never included
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[8,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[8]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - registry 0xb1580277 commitEpoch epoch=3 timestamp=4000001398 data=1000467 signature=6a632b3a bytes=324 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xc58343ef getRequest args=[8]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[8]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - registry 0xb1580277 commitEpoch epoch=3 timestamp=4000001398 data=1000467 signature=6a632b3a bytes=324 type=2 chain=5042002 nonce=8 gas=650000 maxFee=4120000000 maxPriority=2000000000 value=0
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[8]
+eth_getBlockByNumber finalized full=false
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=pending]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=submitted]
+epochs [1=committed 2=committed 3=submitted]
+sweep queued=false in_flight=false last=cancelled
+cursor=9 nonce_floor=8
+health healthy=true faults=[] send_enabled=true
+### the request was refunded and no demand is left: the commit's nonce is cancelled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-7/finalized-4 full=false
+]
+eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+eth_call finalized coordinator 0xc58343ef getRequest args=[8]
+eth_getTransactionReceipt 0xb1580277 commitEpoch
+eth_getTransactionCount finalized keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - keeper cancel type=2 chain=5042002 nonce=8 gas=21000 maxFee=4635000001 maxPriority=2250000001 value=0
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[8]
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=submitted epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=submitted]
+epochs [1=committed 2=committed 3=submitted]
+sweep queued=false in_flight=false last=cancelled
+cursor=9 nonce_floor=8
+health healthy=true faults=[] send_enabled=true
+### the cancellation settles
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+eth_getTransactionReceipt 0xb1580277 commitEpoch
+eth_getTransactionReceipt cancel
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved]
+epochs [1=committed 2=committed 3=prepared]
+sweep queued=false in_flight=false last=cancelled
+cursor=9 nonce_floor=9
+health healthy=true faults=[] send_enabled=true
+
+## 7. what is not final yet
+### a request is in the latest block and not in the finalized one: it is not seen
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=9 nonce_floor=9
+health healthy=true faults=[] send_enabled=true
+### the request is final and its target block is not: it waits
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-4/finalized-1 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[9,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[9]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[9]
+eth_getBlockByNumber finalized full=false
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=pending]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=10 nonce_floor=9
+health healthy=true faults=[] send_enabled=true
+### the target block is final: the request is proved and fulfilled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-4/finalized-1 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[9]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[9]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[9]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=9 seed=698bab9b bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[9]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[9]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=9 seed=698bab9b bytes=452 type=2 chain=5042002 nonce=9 gas=810000 maxFee=4140000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=submitted]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=10 nonce_floor=9
+health healthy=true faults=[] send_enabled=true
+### the receipt is in a block that is not final: the nonce stays busy
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-5/finalized-2 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=submitted]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=10 nonce_floor=9
+health healthy=true faults=[] send_enabled=true
+### the receipt's block is final: the request is served
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-6/finalized-3 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[9]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=served]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=resolved]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=10 nonce_floor=10
+health healthy=true faults=[] send_enabled=true
+### another request is proved and fulfilled, and the fulfillment is never included
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[10,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[10]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[10]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[10]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[10]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=10 seed=bc47ecd5 bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[10]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[10]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=10 seed=bc47ecd5 bytes=452 type=2 chain=5042002 nonce=10 gas=810000 maxFee=4040000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=served 10=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=resolved 10:fulfill@10=submitted]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=11 nonce_floor=10
+health healthy=true faults=[] send_enabled=true
+### the refund is in the latest block only: the keeper still holds the fulfillment
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-5/finalized-2 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_call finalized coordinator 0xc58343ef getRequest args=[10]
+eth_getTransactionCount finalized keeper
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=served 10=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=resolved 10:fulfill@10=submitted]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=11 nonce_floor=10
+health healthy=true faults=[] send_enabled=true
+### the refund is final: the fulfillment's nonce is cancelled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-6/finalized-3 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_call finalized coordinator 0xc58343ef getRequest args=[10]
+eth_getTransactionCount finalized keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_sendRawTransaction - keeper cancel type=2 chain=5042002 nonce=10 gas=21000 maxFee=4545000001 maxPriority=2250000001 value=0
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=served 10=submitted]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=resolved 10:fulfill@10=submitted 10:cancel@10=submitted]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=11 nonce_floor=10
+health healthy=true faults=[] send_enabled=true
+### the cancellation settles
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getTransactionReceipt cancel
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[10]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[3]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[3]
+  eth_call finalized registry 0xa1587509 epochStart args=[3]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=refunded 6=refunded 7=refunded 8=refunded 9=served 10=refunded]
+txs [1:fulfill@0=resolved batch:2:2:f37dbce589a3f107:fulfill_batch@1=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:2:epoch@2=resolved 4:fulfill@3=resolved 5:fulfill@6=resolved 5:cancel@6=resolved batch:6:2:ad27f01903602303:fulfill_batch@7=resolved batch:6:2:ad27f01903602303:cancel@7=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch@8=resolved epoch:0xe0E0e0e0e0E0E0e0E0e0e0e0e0e0E0e0e0e0e0e0:0x3008fb275c733cdc87418577be6d84f1f68338931fc126096912559dea84aa81:3:epoch_cancel@8=resolved 9:fulfill@9=resolved 10:fulfill@10=resolved 10:cancel@10=resolved]
+epochs [1=committed 2=committed 3=committed]
+sweep queued=false in_flight=false last=cancelled
+cursor=11 nonce_floor=11
+health healthy=true faults=[] send_enabled=true

@@ -1,0 +1,585 @@
+{
+  "contract": "D20VRFCoordinatorRobinhood",
+  "openzeppelin": "5.6.1",
+  "storage": [
+    {
+      "label": "protocolConfigurationHash",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "bytes32",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "publicKeyX",
+      "slot": "1",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "publicKeyY",
+      "slot": "2",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "keyHash",
+      "slot": "3",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "bytes32",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "initialFeeRecipient",
+      "slot": "4",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "feeRecipient",
+      "slot": "5",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "keeperFeeBps",
+      "slot": "5",
+      "offset": 20,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint16",
+        "numberOfBytes": "2"
+      }
+    },
+    {
+      "label": "keeperCredits",
+      "slot": "6",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(address => uint256)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      }
+    },
+    {
+      "label": "totalKeeperCredits",
+      "slot": "7",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "minFee",
+      "slot": "8",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "feeMultiplier",
+      "slot": "9",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint16",
+        "numberOfBytes": "2"
+      }
+    },
+    {
+      "label": "fulfillGasOverhead",
+      "slot": "9",
+      "offset": 2,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint32",
+        "numberOfBytes": "4"
+      }
+    },
+    {
+      "label": "refundBps",
+      "slot": "9",
+      "offset": 6,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint16",
+        "numberOfBytes": "2"
+      }
+    },
+    {
+      "label": "nextRequestId",
+      "slot": "10",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "earnedFees",
+      "slot": "11",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "lastServedRequestId",
+      "slot": "12",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "lastServedIndex",
+      "slot": "13",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "servedRequestAt",
+      "slot": "14",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => uint256)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      }
+    },
+    {
+      "label": "totalRefundCredits",
+      "slot": "15",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "refundCredits",
+      "slot": "16",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(address => uint256)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      }
+    },
+    {
+      "label": "requests",
+      "slot": "17",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => struct D20VRFCoordinatorRobinhood.StoredRequest)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "struct D20VRFCoordinatorRobinhood.StoredRequest",
+          "numberOfBytes": "256",
+          "members": [
+            {
+              "label": "consumer",
+              "slot": "0",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "address",
+                "numberOfBytes": "20"
+              }
+            },
+            {
+              "label": "callbackGasLimit",
+              "slot": "0",
+              "offset": 20,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint32",
+                "numberOfBytes": "4"
+              }
+            },
+            {
+              "label": "requestBlock",
+              "slot": "0",
+              "offset": 24,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint64",
+                "numberOfBytes": "8"
+              }
+            },
+            {
+              "label": "deadline",
+              "slot": "1",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint40",
+                "numberOfBytes": "5"
+              }
+            },
+            {
+              "label": "round",
+              "slot": "1",
+              "offset": 5,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint64",
+                "numberOfBytes": "8"
+              }
+            },
+            {
+              "label": "beaconId",
+              "slot": "1",
+              "offset": 13,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint8",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "feePaid",
+              "slot": "1",
+              "offset": 14,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint96",
+                "numberOfBytes": "12"
+              }
+            },
+            {
+              "label": "refundBps",
+              "slot": "1",
+              "offset": 26,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint16",
+                "numberOfBytes": "2"
+              }
+            },
+            {
+              "label": "fulfilled",
+              "slot": "1",
+              "offset": 28,
+              "type": {
+                "encoding": "inplace",
+                "label": "bool",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "delivered",
+              "slot": "1",
+              "offset": 29,
+              "type": {
+                "encoding": "inplace",
+                "label": "bool",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "refunded",
+              "slot": "1",
+              "offset": 30,
+              "type": {
+                "encoding": "inplace",
+                "label": "bool",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "refundAddress",
+              "slot": "2",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "address",
+                "numberOfBytes": "20"
+              }
+            },
+            {
+              "label": "clientSeed",
+              "slot": "3",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "mappingHash",
+              "slot": "4",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "randomness",
+              "slot": "5",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "proofHash",
+              "slot": "6",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "transcriptHash",
+              "slot": "7",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "mappingSpecs",
+      "slot": "18",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => struct RandomnessMapping.Spec)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "struct RandomnessMapping.Spec",
+          "numberOfBytes": "128",
+          "members": [
+            {
+              "label": "operation",
+              "slot": "0",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "enum RandomnessMapping.Operation",
+                "numberOfBytes": "1"
+              }
+            },
+            {
+              "label": "lower",
+              "slot": "1",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint256",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "upper",
+              "slot": "2",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint256",
+                "numberOfBytes": "32"
+              }
+            },
+            {
+              "label": "count",
+              "slot": "3",
+              "offset": 0,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint32",
+                "numberOfBytes": "4"
+              }
+            },
+            {
+              "label": "population",
+              "slot": "3",
+              "offset": 4,
+              "type": {
+                "encoding": "inplace",
+                "label": "uint32",
+                "numberOfBytes": "4"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refundCallbackDelivered",
+      "slot": "19",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => bool)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "bool",
+          "numberOfBytes": "1"
+        }
+      }
+    },
+    {
+      "label": "initialMinFee",
+      "slot": "20",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "keeper",
+      "slot": "21",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      }
+    },
+    {
+      "label": "backupKeepers",
+      "slot": "22",
+      "offset": 0,
+      "type": {
+        "encoding": "mapping",
+        "label": "mapping(address => bool)",
+        "numberOfBytes": "32",
+        "key": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        },
+        "value": {
+          "encoding": "inplace",
+          "label": "bool",
+          "numberOfBytes": "1"
+        }
+      }
+    },
+    {
+      "label": "backupKeeperCount",
+      "slot": "23",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    },
+    {
+      "label": "__gap",
+      "slot": "24",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "uint256[40]",
+        "numberOfBytes": "1280",
+        "base": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      }
+    }
+  ]
+}

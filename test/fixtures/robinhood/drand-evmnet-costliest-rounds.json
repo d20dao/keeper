@@ -1,0 +1,55 @@
+{
+  "source": "Real drand evmnet rounds whose hash-to-curve takes the costliest path of D20BeaconVerifier.roundMessage: both field elements map through the second Shallue-van de Woestijne candidate (two Legendre symbols each) and both y coordinates are negated. Chosen among rounds 21057000 to 21059999 by that path; fetched on 2026-10-06 from api.drand.sh and drand.cloudflare.com, which served the same signatures, each verified under the evmnet group key, its randomness equal to sha256 of its signature.",
+  "rounds": [
+    {
+      "round": 21057029,
+      "randomness": "df126ff6971637f98d0d48a2284fe45604c9aa822fdb37e1a4f691a7fb28a71e",
+      "signature": "2db12d4e6745e0ac1a733aa5c61f85aeff0bf4aa1250bc58458a1349444841c42b4414b4bf3e0164f83c0f2543de7037f2cdcbf591acffc10e847943b8b74d23"
+    },
+    {
+      "round": 21057086,
+      "randomness": "329d7fbdedd8ab86fcf98b161d9859baea5827b7d2ff85225cd38d07ad458cff",
+      "signature": "23dc1139dca5c4ef19cf25cac0d80684c8aaf7969f2852383f1ca4474ab8dc37108960287b0fd2c1f31c352d32fd5a5aa2ecfefa535f130e171c0d419eed250d"
+    },
+    {
+      "round": 21057094,
+      "randomness": "dcf84edeacf751b4bd4be56bf3954f3dc6763a805963929d3898c6d7e4242e17",
+      "signature": "1722155d2d6c5de04ca6071ee4cff185b132ca58ddfed5dee4e81b808843eee31ea67eef69d368052c643f1063c3f8b542510450dfa750d179d6d1a2e248ca44"
+    },
+    {
+      "round": 21057110,
+      "randomness": "c9c1b07e2de2f73d6bae4b6ab503470d765ebc95158042d9d37833ca41fd9cac",
+      "signature": "0159e7fbd3aaa923bf88628f293f25926701a791265db4a68e6a0cf4b54f09ed0adb6de7004e0d73f9cb5710c915ecd24dc714865ce955641d2dfd291d52ed82"
+    },
+    {
+      "round": 21057158,
+      "randomness": "c1079cd58a9f71462a709972458f9c21739a0ecfcb469e035d4c25936b0b21b1",
+      "signature": "1102d183306e61448def52678afa1dd8571467c2f81776d169d517392854631e1a89334a66144e77864e16ffb3a275d587249c975a7cc93a68cc3b002a5c8d9a"
+    },
+    {
+      "round": 21057374,
+      "randomness": "db934ecdb68554fe543b50c2cda5f14e52f530bc97d99b924baa6bfcb685b2f5",
+      "signature": "2b5d57690cf091d96b7743ad196b769e6e207db678140de966a2daaa3594bd3128060afc64c5c0eaf9a8f4caaf3eb63dc4e1f07f3c260b82feb3c866192d6f5d"
+    },
+    {
+      "round": 21057458,
+      "randomness": "a94b179d8fd670c962a9788ef74097c6a0ab8f1dd8268651248e04c4e0181946",
+      "signature": "2f0c4e5edf3f3e89c800e94a3f90af30516a04ffdc47c6e0d90c94c8c65b3d7928c454f8026949d691c58117563ec1a2abe6bf378d6e940c9fc82ac1fc52ef97"
+    },
+    {
+      "round": 21057587,
+      "randomness": "8216f4240afe2e8f60da89b5e895da78b657312575661796372ecceb262d5e6b",
+      "signature": "13eb741684f5999a8f2027e5de99ef8fb1e2de8fa9bfa51a1955fec9483690011bd360d9fd40d12817b6f888a8beffa3693a9f5024447c75b08ea41bc2f8213f"
+    },
+    {
+      "round": 21057599,
+      "randomness": "e0feaa47559ba3cdf269a9d92072850379033941a5e8406be5394d0c0c3ec90d",
+      "signature": "0a79a2c2af37e11d6f52dc94f22dafdd4b64325367388f55e408adc9e5c2595c1de7ea507bb623a683c98643aa804352b213052a0745f0ebad432cf5e147f3a6"
+    },
+    {
+      "round": 21057674,
+      "randomness": "3cc47835c2eb60b454289eac691e088405e2bfbc2d2fdeff9eba0c3481005772",
+      "signature": "2c755a42c64852404fad27cee0fe157d05ba4aa01f455fd534bd30c4013bd8aa2b12c7cfd68ffbbaf631c0484cac1a3742e2e2d2f307b770ef6aaab408936ed2"
+    }
+  ]
+}

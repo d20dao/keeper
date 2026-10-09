@@ -1,10 +1,12 @@
 use crate::{
     abi::{ApiProof, Coordinator as C, EpochRegistry as ER, Request, VrfProof},
+    abi_round::{RoundCoordinator as RC, RoundRequest},
     config::{
-        Config, FOLLOWER_LEAVE_AGE_SECONDS, FOLLOWER_LEAVE_PENDING, FeeBudget, FeeCap,
-        RESPONSE_TIMEOUT_SECONDS, Role, SAFETY_AGE_SECONDS,
+        CANCEL_GAS, CANCEL_GAS_BOUND, Config, FOLLOWER_LEAVE_AGE_SECONDS, FOLLOWER_LEAVE_PENDING,
+        FeeBudget, FeeCap, FinalityMode, GasModel, RESPONSE_TIMEOUT_SECONDS, Role,
+        SAFETY_AGE_SECONDS,
     },
-    journal::{Attempt, Job, Journal, is_batch_job},
+    journal::{Attempt, FinalityState, Job, Journal, Mark, MarkKind, Mismatch, is_batch_job},
     prover,
     rpc::{Head, Rpc, quantity},
 };
@@ -20,6 +22,19 @@ use k256::SecretKey;
 use serde_json::json;
 use std::future::Future;
 
+mod recovery;
+mod rounds;
+#[cfg(test)]
+pub(crate) use rounds::LOW_FUNDS_KEY;
+use rounds::Readmission;
+mod suspicion;
+pub use recovery::CoordinatorKind;
+use recovery::Recovery;
+#[cfg(test)]
+mod finality_review;
+#[cfg(test)]
+mod halt_tests;
+
 pub struct Worker {
     pub cfg: Config,
     pub rpc: Rpc,
@@ -27,7 +42,8 @@ pub struct Worker {
     vrf_key: SecretKey,
     tx_key: PrivateKeySigner,
     _scope_locks: Vec<std::fs::File>,
-    epoch: crate::epoch::Publisher,
+    /// What the tick runs after discovery: the epoch lane of an epoch coordinator, or the round lane of a round one.
+    lane: Lane,
     telegram: Option<crate::telegram::TelegramNotifier>,
     discord: Option<crate::discord::Notifier>,
     proof_slots: std::sync::Arc<tokio::sync::Semaphore>,
@@ -50,11 +66,168 @@ pub struct Worker {
     upgrade_notice: Option<String>,
     /// The last publishing-right check and the role-event generation it covered.
     authorization_checked: std::sync::Mutex<(tokio::time::Instant, u64)>,
-    /// The finalized block the last tick read. Work events above it keep the loop in its busy cadence.
-    last_finalized: std::sync::atomic::AtomicU64,
-    /// The coordinator's confirmationBlocks, fixed at its initialization: a request's proof input is readable from
-    /// its target block plus this many blocks on.
-    confirmation_blocks: u64,
+    /// The block the last tick decided on (the finalized head, or in soft mode the decision head). Work events above it
+    /// keep the loop in its busy cadence.
+    last_decided: std::sync::atomic::AtomicU64,
+    /// Soft mode: when the finality audit is next due. None until the first audit, which is due at the first tick; kept in
+    /// memory, so that a restarted keeper audits at once what the last one left.
+    finality_audit_due: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// Soft mode: a finality mismatch is on record (the keeper recovers from it), or one is suspected (the keeper holds
+    /// its sends). The tick sets it before it decides anything, so that the sync checks of the tick (`may_send`) need no
+    /// read; false in finalized mode.
+    finality_open: std::sync::atomic::AtomicBool,
+    /// Soft mode: the recovery has the nonce lane (it reopened a nonce or fills one, or is about to). The tick reconciles
+    /// that lane and starts nothing beside it, an operator sweep included.
+    recovery_lane: std::sync::atomic::AtomicBool,
+    /// How long a tick's recovery reads before it leaves the rest to the next tick; `recovery::STEP_BUDGET`.
+    recovery_budget: std::time::Duration,
+    /// Soft mode: a mismatch one endpoint showed that the endpoints have not settled yet (`suspicion`). While it stands
+    /// nothing is signed or broadcast. It lives in memory: a restart finds it again from the journal and the chain, or
+    /// does not when the endpoints show the journal's block again.
+    suspicion: std::sync::Mutex<Option<suspicion::Suspicion>>,
+    /// A round keeper's endpoints held out of reads since startup (`Rpc::held`): by position, since when, and when each is
+    /// probed next and after what wait (`readmit_endpoints`).
+    readmission: rounds::Held,
+    /// The first wait before the endpoints are asked again about a suspicion they did not settle, doubled at each try up
+    /// to `suspicion::RETRY_MAX`; `suspicion::RETRY_FIRST`.
+    suspicion_retry: std::time::Duration,
+    /// How long the endpoints must not have a block before they confirm that the chain is shorter;
+    /// `suspicion::ABSENT_WINDOW`.
+    absent_window: std::time::Duration,
+    /// How long a suspicion stays unsettled, or a recovery keeps failing, before the owner is asked to act;
+    /// `suspicion::PAGE_AFTER`.
+    finality_page_after: std::time::Duration,
+}
+/// The lane of the coordinator the keeper serves (COORDINATOR_KIND). An epoch coordinator's keeper publishes the epochs its
+/// requests wait on: the publisher, and the coordinator's confirmationBlocks, fixed at its initialization (a request's
+/// proof input is readable from its target block plus this many blocks on). A round coordinator's keeper has no registry,
+/// epoch or target block: its round lane (`round::Lane`) waits on drand rounds instead.
+enum Lane {
+    Epoch {
+        publisher: crate::epoch::Publisher,
+        confirmation_blocks: u64,
+    },
+    Round(crate::round::Lane),
+}
+impl Lane {
+    fn kind(&self) -> CoordinatorKind {
+        match self {
+            Self::Epoch { .. } => CoordinatorKind::Epoch,
+            Self::Round(_) => CoordinatorKind::Round,
+        }
+    }
+    /// Whether the lane may sign and send: always for an epoch coordinator, and for a round coordinator once task K3 has
+    /// brought its fulfillments (`round::SENDS`).
+    fn sends(&self) -> bool {
+        match self {
+            Self::Epoch { .. } => true,
+            Self::Round(_) => crate::round::SENDS,
+        }
+    }
+}
+/// What a keeper refuses to sign when its lane does not send (`round::SENDS` false): anything.
+#[derive(Debug)]
+pub struct RoundSendsDisabled;
+impl std::fmt::Display for RoundSendsDisabled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "A round coordinator's keeper signs and sends nothing yet: it discovers and tracks requests only"
+        )
+    }
+}
+impl std::error::Error for RoundSendsDisabled {}
+/// What the keeper decides on of a request, whichever coordinator holds it: when it expires and whether the chain has
+/// settled it. `terminal` and `timely` read it.
+pub trait Settlement {
+    fn deadline(&self) -> u64;
+    fn fulfilled(&self) -> bool;
+    fn delivered(&self) -> bool;
+    fn refunded(&self) -> bool;
+    /// Whether the coordinator does not have the request at all: a round coordinator refuses to read an id it does not
+    /// have (`UnknownRequest`), which after a replaced block can be one the journal holds. An epoch coordinator reads
+    /// every id, as all zero when it has none, so its requests are never missing.
+    fn missing(&self) -> bool {
+        false
+    }
+}
+impl Settlement for Request {
+    fn deadline(&self) -> u64 {
+        self.deadline
+    }
+    fn fulfilled(&self) -> bool {
+        self.fulfilled
+    }
+    fn delivered(&self) -> bool {
+        self.delivered
+    }
+    fn refunded(&self) -> bool {
+        self.refunded
+    }
+}
+impl Settlement for RoundRequest {
+    fn deadline(&self) -> u64 {
+        self.deadline
+    }
+    fn fulfilled(&self) -> bool {
+        self.fulfilled
+    }
+    fn delivered(&self) -> bool {
+        self.delivered
+    }
+    fn refunded(&self) -> bool {
+        self.refunded
+    }
+}
+/// A request's settlement as a value, read from either coordinator. A request an epoch coordinator does not have is all
+/// zero, as its `getRequest` answers it: past its deadline, so `expired`. One a round coordinator does not have is
+/// `missing`, and `vanished`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub deadline: u64,
+    pub fulfilled: bool,
+    pub delivered: bool,
+    pub refunded: bool,
+    pub missing: bool,
+}
+impl Status {
+    pub fn of(request: &impl Settlement) -> Self {
+        Self {
+            deadline: request.deadline(),
+            fulfilled: request.fulfilled(),
+            delivered: request.delivered(),
+            refunded: request.refunded(),
+            missing: request.missing(),
+        }
+    }
+    /// A round coordinator's request that it does not have.
+    pub fn missing() -> Self {
+        Self {
+            missing: true,
+            ..Self::default()
+        }
+    }
+    /// A round coordinator's request as `getRoundRequest` read it, `None` when the coordinator refused it.
+    pub fn of_round(request: Option<&RoundRequest>) -> Self {
+        request.map_or_else(Self::missing, Self::of)
+    }
+}
+impl Settlement for Status {
+    fn deadline(&self) -> u64 {
+        self.deadline
+    }
+    fn fulfilled(&self) -> bool {
+        self.fulfilled
+    }
+    fn delivered(&self) -> bool {
+        self.delivered
+    }
+    fn refunded(&self) -> bool {
+        self.refunded
+    }
+    fn missing(&self) -> bool {
+        self.missing
+    }
 }
 /// Without any send, the runtime pins are still re-verified this often, so an idle keeper notices a proxy upgrade
 /// within about 15 seconds even when no Upgraded event reaches it (no subscription, or one whose log stream has
@@ -64,6 +237,10 @@ const PIN_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(15);
 /// How old the publishing-right check may be when work is open, and when it is not. A role event forces it.
 const AUTHORIZATION_BUSY: std::time::Duration = std::time::Duration::from_secs(2);
 const AUTHORIZATION_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+/// A round keeper with nothing open and a live subscription re-checks its runtime pins and its publishing right this
+/// often instead of PIN_BACKSTOP and AUTHORIZATION_IDLE: the subscription pushes the coordinator's upgrades and role
+/// changes, and a resubscription, open work and every signature check them at once.
+const ROUND_QUIET_RECHECK: std::time::Duration = std::time::Duration::from_secs(120);
 /// Request reads per JSON-RPC batch: a fulfillment batch's members, or one slice of a discovery page.
 const REQUEST_BATCH: usize = 16;
 struct TxPlan {
@@ -94,12 +271,133 @@ impl SendDeferred {
         }
     }
 }
+/// A read that a send depended on and could not be delivered defers the send, as a failed estimate does.
+fn deferred(error: anyhow::Error) -> anyhow::Error {
+    if crate::rpc::is_delivery_failure(&error) {
+        SendDeferred::new(error).into()
+    } else {
+        error
+    }
+}
 impl std::fmt::Display for SendDeferred {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.error)
     }
 }
 impl std::error::Error for SendDeferred {}
+/// The block a previous tick decided on is not on the chain any more, as the endpoint that answered tells it. In
+/// finalized mode that is a finality or RPC incident, and it stops the tick as it always has. In soft mode it is the
+/// sequencer having replaced a block the keeper acted on, or an endpoint that serves another fork: the tick suspects a
+/// finality mismatch of kind `soft_checkpoint`, holds its sends while it asks the other endpoints, and goes on without
+/// failing.
+#[derive(Debug)]
+pub struct CheckpointChanged {
+    pub mode: FinalityMode,
+    pub number: u64,
+    /// The hash the journal saved for the block, and the hash the chain has for that number now.
+    pub saved: String,
+    pub actual: String,
+}
+impl std::fmt::Display for CheckpointChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.mode {
+            FinalityMode::Finalized => write!(
+                f,
+                "Finalized chain checkpoint changed; preserve journal and investigate RPC/finality before resuming"
+            ),
+            FinalityMode::Soft => write!(
+                f,
+                "Soft chain checkpoint changed at block {}: the journal has {} and the chain has {}; the sequencer replaced a block this keeper decided on, or this endpoint serves another fork. Nothing is sent while the other endpoints are asked",
+                self.number, self.saved, self.actual
+            ),
+        }
+    }
+}
+impl std::error::Error for CheckpointChanged {}
+/// A signature or a broadcast was asked for while a finality mismatch is suspected: one endpoint showed that a block
+/// this keeper acted on is not the chain's, and the endpoints have not settled it yet. The tick does not get as far as
+/// asking: this is the refusal of the four places that sign and broadcast, for any path that does. It is not a failure
+/// of the tick, and the process does not count it as one.
+#[derive(Debug)]
+pub struct FinalityHalted;
+impl std::fmt::Display for FinalityHalted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Finality hold: an endpoint shows that a block this keeper acted on is not the chain's any more, and nothing is signed or broadcast until the endpoints have settled it (d20dao-keeper finality --status)"
+        )
+    }
+}
+impl std::error::Error for FinalityHalted {}
+/// Whether the run loop ends the process after a failed tick. A one-shot run does. Otherwise the process ends after
+/// `limit` consecutive failed ticks, for its supervisor to restart, unless a finality mismatch is on record or suspected:
+/// a restart comes back to the same journal and the same incident, which the keeper settles and recovers from by
+/// itself while it runs. During that incident failed ticks are reported and not counted, so that the process never exits
+/// on a mismatch.
+pub fn tick_failure_ends_the_run(once: bool, incident: bool, failures: u64, limit: u64) -> bool {
+    once || (!incident && failures >= limit)
+}
+/// What the run loop does with a tick that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailedTick {
+    /// Every RPC endpoint was rate limiting: deferred with back-off and not counted, in every mode.
+    RateLimited,
+    /// A round keeper's tick failed only because the endpoints failed as providers do when they are overloaded or down
+    /// (`rpc::is_provider_failure`): deferred with back-off and not counted, and reported as `rpc_unavailable` once the
+    /// run of them has lasted PROGRESS_STUCK_SECONDS.
+    ProviderUnavailable,
+    /// Anything else, a pin, chain or configuration mismatch or a failed send among it, and every failure of an epoch
+    /// keeper that is not a rate limit: counted toward MAX_TICK_FAILURES.
+    Counted,
+}
+impl FailedTick {
+    pub fn of(kind: CoordinatorKind, error: &anyhow::Error) -> Self {
+        if crate::rpc::is_rate_limited(error) {
+            Self::RateLimited
+        } else if kind == CoordinatorKind::Round && crate::rpc::is_provider_failure(error) {
+            Self::ProviderUnavailable
+        } else {
+            Self::Counted
+        }
+    }
+}
+/// A run of a round keeper's ticks deferred because the endpoints failed as providers do (`FailedTick::ProviderUnavailable`).
+#[derive(Debug, Default)]
+pub struct ProviderOutage {
+    deferred: u32,
+    since: Option<tokio::time::Instant>,
+    reported: bool,
+}
+/// One more tick deferred by a `ProviderOutage`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deferral {
+    /// The deferred ticks of the run so far, this one included: the back-off follows it (1 s doubling to 30 s).
+    pub attempt: u32,
+    /// The run has now lasted `stuck`, and is reported (`rpc_unavailable`) for the first time.
+    pub report: bool,
+}
+impl ProviderOutage {
+    /// Record a deferred tick of a run that is reported once it has lasted `stuck`.
+    pub fn defer(&mut self, stuck: std::time::Duration) -> Deferral {
+        self.deferred = self.deferred.saturating_add(1);
+        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
+        let report = !self.reported && since.elapsed() >= stuck;
+        self.reported |= report;
+        Deferral {
+            attempt: self.deferred,
+            report,
+        }
+    }
+    /// Whether the run has been reported, and so `rpc_unavailable` stands until a tick runs.
+    pub fn reported(&self) -> bool {
+        self.reported
+    }
+    /// A tick ran: the run ends. The ticks it deferred, if any.
+    pub fn end(&mut self) -> Option<u32> {
+        let deferred = std::mem::take(self).deferred;
+        (deferred > 0).then_some(deferred)
+    }
+}
 /// Recent blocks whose median tip prices new sends and replacements.
 const PRIORITY_FEE_BLOCKS: u64 = 20;
 /// Verified endpoints can briefly disagree: one reports a consumed nonce before another serves
@@ -187,25 +485,45 @@ fn over_budget(
         }),
     }
 }
-pub fn terminal(r: &Request, now: u64) -> Option<&'static str> {
-    if r.fulfilled {
+pub fn terminal(r: &impl Settlement, now: u64) -> Option<&'static str> {
+    if r.missing() {
+        Some("vanished")
+    } else if r.fulfilled() {
         Some("served")
-    } else if r.refunded {
+    } else if r.refunded() {
         Some("refunded")
-    } else if now > r.deadline {
+    } else if now > r.deadline() {
         Some("expired")
     } else {
         None
     }
 }
+/// `terminal` for a job whose deadline the journal holds as `job_deadline`: a round coordinator's request read missing
+/// settles it as `vanished` only once that deadline has passed. Before, nothing is settled on that one read: an endpoint
+/// behind the others answers so for a request it has not seen, and only the finality recovery, on a replacement the
+/// endpoints confirmed, takes a live job as vanished (review M1). An epoch coordinator's request is never missing.
+fn settled(r: &Status, job_deadline: i64, now: u64) -> Option<&'static str> {
+    if r.missing {
+        (i64::try_from(now).unwrap_or(i64::MAX) > job_deadline).then_some("vanished")
+    } else {
+        terminal(r, now)
+    }
+}
 /// A request that may still be sent: neither terminal nor inside the send margin.
-fn timely(r: &Request, now: u64, margin: u64) -> bool {
-    terminal(r, now).is_none() && now.saturating_add(margin) < r.deadline
+fn timely(r: &impl Settlement, now: u64, margin: u64) -> bool {
+    terminal(r, now).is_none() && now.saturating_add(margin) < r.deadline()
+}
+/// Whether reconciliation would send attempt `latest`'s bytes again or replace them at `now`: it rebroadcasts after 2
+/// seconds and replaces after 10. A cancellation carries no proof.
+fn resend_due(latest: &Attempt, now: u64) -> bool {
+    latest.kind != "cancel"
+        && (now.saturating_sub(latest.broadcast as u64) >= 2
+            || now.saturating_sub(latest.created as u64) >= 10)
 }
 /// Journal state a request receives when its own nonce resolves: chain state wins; otherwise a
 /// cancelled or reverted attempt blocks the job and a successful attempt that left no terminal
 /// state is inconsistent. A single attempt that reverts failed on its own.
-fn resolved_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static str {
+fn resolved_state(r: &impl Settlement, now: u64, kind: &str, status: u64) -> &'static str {
     terminal(r, now).unwrap_or(if kind == "cancel" || status == 0 {
         "blocked"
     } else {
@@ -218,7 +536,7 @@ fn resolved_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static st
 /// is left out of later batches and is resent one at a time; the proof is already public and the
 /// result fixed by the VRF, so the resend reveals nothing new. Only its own single attempt
 /// reverting blocks it.
-fn batch_member_state(r: &Request, now: u64, kind: &str, status: u64) -> &'static str {
+fn batch_member_state(r: &impl Settlement, now: u64, kind: &str, status: u64) -> &'static str {
     if kind == "fulfill_batch" && status == 0 {
         terminal(r, now).unwrap_or("prepared")
     } else {
@@ -270,16 +588,51 @@ fn fulfillment_floor(limits: &[u32]) -> Option<u64> {
 /// guard revert. The guarded coordinator's estimate already contains that budget, so the padding
 /// covers only the rest of the estimate: a fifth of it, and at least 50,000. A single fulfillment
 /// follows the same rule.
-fn fulfillment_gas(estimate: u64, limits: &[u32]) -> Result<u64> {
+///
+/// On a chain that charges the L1 component of a transaction before it runs (the arbitrum gas model) the guard's budget
+/// counts L2 gas only, and `gasleft()` never sees the L1 gas. When the floor wins over the estimate (a callback that is
+/// cheap in the simulation and costly on chain), the floor must hold the L1 component too, or the gas left after that
+/// charge is below the guard's budget and the batch reverts. `l1` is that component of this exact payload with the
+/// margin added; the standard gas model has none (0).
+fn fulfillment_gas_l1(estimate: u64, limits: &[u32], l1: u64) -> Result<u64> {
     ensure!(!limits.is_empty(), "A fulfillment has members");
     let (Some(budget), Some(floor)) = (guard_budget(limits), fulfillment_floor(limits)) else {
         bail!("Gas overflow");
     };
+    let floor = floor
+        .checked_add(l1)
+        .ok_or_else(|| anyhow::anyhow!("Gas overflow"))?;
     let padding = (estimate.saturating_sub(budget) / 5).max(50_000);
     let padded = estimate
         .checked_add(padding)
         .ok_or_else(|| anyhow::anyhow!("Gas overflow"))?;
     Ok(padded.max(floor))
+}
+/// `fulfillment_gas_l1` of the standard gas model, which has no L1 component.
+#[cfg(test)]
+fn fulfillment_gas(estimate: u64, limits: &[u32]) -> Result<u64> {
+    fulfillment_gas_l1(estimate, limits, 0)
+}
+/// The gas limit of a cancellation under the arbitrum model, given the gas the node says the transfer needs (with the
+/// margin). It is clamped to CANCEL_GAS_BOUND when the node asks for more, which is logged: the budget checked at
+/// startup pays for that much at the cancellation fee cap and no more, so more would only be refused later as over
+/// budget, and an answer that large is the node's error or an L1 price beyond anything measured. It is floored at
+/// the bound when the node asks for less, so a cancellation always has room for the L1 price to rise before it is
+/// replaced, and costs only the gas it uses. The limit is the bound either way.
+fn arbitrum_cancel_gas(needed: u64) -> u64 {
+    if needed > CANCEL_GAS_BOUND {
+        tracing::warn!(
+            needed_gas = needed,
+            bound = CANCEL_GAS_BOUND,
+            "The node prices a cancellation above the bound the startup budget pays for; it carries the bound"
+        );
+    }
+    CANCEL_GAS_BOUND
+}
+/// An L1 gas component with the margin added: l1 × (10,000 + margin) / 10,000, rounded up.
+fn with_l1_margin(l1: u64, margin_bps: u64) -> u64 {
+    let grown = (u128::from(l1) * u128::from(10_000 + margin_bps)).div_ceil(10_000);
+    u64::try_from(grown).unwrap_or(u64::MAX)
 }
 /// The largest gas limit the configured caps allow at this price per gas: MAX_GAS, and
 /// MAX_TX_COST_WEI divided by the price.
@@ -293,8 +646,9 @@ fn gas_cap(max_gas: u64, max_cost: u128, fee: u128) -> u64 {
 /// estimate predicted from the whole batch's at an even share per member and never below their
 /// floor, which the guarded coordinator's estimate reaches. With no estimate yet (0) the floor
 /// alone predicts it. The caller re-estimates the shorter batch and shrinks it again if the
-/// prediction was short.
-fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
+/// prediction was short. On a chain that charges the L1 component of a transaction before it runs, every member
+/// adds its share of the payload's, `l1_each` (with the margin), to the floor and to the gas limit.
+fn members_within_l1(estimate: u64, limits: &[u32], cap: u64, l1_each: u64) -> usize {
     let Some(share) = u64::try_from(limits.len())
         .ok()
         .filter(|&count| count > 0)
@@ -305,15 +659,25 @@ fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
     (1..=limits.len())
         .take_while(|&count| {
             let members = &limits[..count];
-            u64::try_from(count)
-                .ok()
-                .and_then(|count| share.checked_mul(count))
-                .zip(fulfillment_floor(members))
-                .and_then(|(estimate, floor)| fulfillment_gas(estimate.max(floor), members).ok())
+            let Ok(count) = u64::try_from(count) else {
+                return false;
+            };
+            let l1 = l1_each.saturating_mul(count);
+            share
+                .checked_mul(count)
+                .zip(fulfillment_floor(members).and_then(|floor| floor.checked_add(l1)))
+                .and_then(|(estimate, floor)| {
+                    fulfillment_gas_l1(estimate.max(floor), members, l1).ok()
+                })
                 .is_some_and(|gas| gas <= cap)
         })
         .last()
         .unwrap_or(0)
+}
+/// `members_within_l1` of the standard gas model, which has no L1 component.
+#[cfg(test)]
+fn members_within(estimate: u64, limits: &[u32], cap: u64) -> usize {
+    members_within_l1(estimate, limits, cap, 0)
 }
 /// A batch is shrunk at most this many times, to the members that fit a cap or to half after an
 /// estimate the node refused without a revert, before the single path takes over.
@@ -321,7 +685,8 @@ const MAX_BATCH_SHRINKS: u32 = 4;
 /// Journal state epoch work receives when its nonce resolves: the registry's record or the packet's
 /// own freshness wins; otherwise a successful nonce cancellation leaves the saved packet publishable,
 /// because paid demand can arrive after the cancellation was signed, a reverted attempt blocks the
-/// work, and a successful publication that left no epoch record is inconsistent.
+/// work, and a successful publication that left no epoch record is inconsistent. A beacon packet that
+/// went stale is not lost by blocking: refresh_blocked_beacons prepares it again once demand waits.
 fn epoch_resolved_state(terminal: Option<&'static str>, kind: &str, status: u64) -> &'static str {
     terminal.unwrap_or(if kind == "epoch_cancel" && status == 1 {
         "prepared"
@@ -331,18 +696,19 @@ fn epoch_resolved_state(terminal: Option<&'static str>, kind: &str, status: u64)
         "inconsistent"
     })
 }
-/// Request IDs a finalized receipt actually served, from the coordinator's own
+/// Request IDs a settled receipt actually served, from the coordinator's own
 /// RandomnessFulfilled logs. A member skipped on chain has no such log.
 fn fulfilled_in_receipt(
     receipt: &serde_json::Value,
     coordinator: alloy_primitives::Address,
+    fulfilled: B256,
 ) -> Result<std::collections::BTreeSet<U256>> {
     let mut served = std::collections::BTreeSet::new();
     for log in receipt["logs"].as_array().into_iter().flatten() {
         let address: alloy_primitives::Address = serde_json::from_value(log["address"].clone())?;
         let topics: Vec<B256> = serde_json::from_value(log["topics"].clone())?;
         if address == coordinator
-            && topics.first() == Some(&C::RandomnessFulfilled::SIGNATURE_HASH)
+            && topics.first() == Some(&fulfilled)
             && let Some(id) = topics.get(1)
         {
             served.insert(U256::from_be_bytes(id.0));
@@ -546,8 +912,36 @@ fn lane_of(id: &str, lanes: u64) -> Option<u64> {
     let lanes = U256::from(lanes);
     id.parse::<U256>().ok().map(|id| (id % lanes).to::<u64>())
 }
+/// Where the keeper's publishing right is read: the committer roles of an epoch coordinator's registry, or the keeper
+/// roles of a round coordinator (`keeper()`, `isBackupKeeper`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Roles {
+    Registry(Address),
+    Coordinator(Address),
+}
+/// The primary wallet the roles name: the registry's committer, or the round coordinator's keeper.
+pub(crate) async fn primary_wallet(rpc: &Rpc, roles: Roles) -> Result<Address> {
+    match roles {
+        Roles::Registry(registry) => rpc.call(registry, ER::committerCall {}).await,
+        Roles::Coordinator(coordinator) => rpc.call(coordinator, RC::keeperCall {}).await,
+    }
+}
+/// Whether `wallet` is an allowed backup of the roles: a backup committer of the registry, or a backup keeper of the round
+/// coordinator.
+async fn is_backup(rpc: &Rpc, roles: Roles, wallet: Address) -> Result<bool> {
+    match roles {
+        Roles::Registry(registry) => {
+            rpc.call(registry, ER::isBackupCommitterCall { account: wallet })
+                .await
+        }
+        Roles::Coordinator(coordinator) => {
+            rpc.call(coordinator, RC::isBackupKeeperCall { account: wallet })
+                .await
+        }
+    }
+}
 /// Whether the transaction wallet may publish in its role: as committer() for a primary, or as an allowed backup
-/// committer other than committer() for a follower.
+/// committer other than committer() for a follower; on a round coordinator, as its keeper() or an allowed backup keeper.
 pub(crate) enum WalletStatus {
     Authorized,
     /// The owner has not (or no longer) granted this wallet its role's right to publish. The keeper keeps running
@@ -558,10 +952,13 @@ pub(crate) enum WalletStatus {
 }
 pub(crate) async fn wallet_status(
     rpc: &Rpc,
-    registry: Address,
+    roles: Roles,
     wallet: Address,
     role: Role,
 ) -> Result<WalletStatus> {
+    let Roles::Registry(registry) = roles else {
+        return keeper_status(rpc, roles, wallet, role).await;
+    };
     let committer = rpc.call(registry, ER::committerCall {}).await?;
     Ok(match role {
         Role::Primary if committer == wallet => WalletStatus::Authorized,
@@ -597,14 +994,49 @@ pub(crate) async fn wallet_status(
         }
     })
 }
+/// `wallet_status` on a round coordinator: its keeper roles, in a round coordinator's words.
+async fn keeper_status(
+    rpc: &Rpc,
+    roles: Roles,
+    wallet: Address,
+    role: Role,
+) -> Result<WalletStatus> {
+    let primary = primary_wallet(rpc, roles).await?;
+    Ok(match role {
+        Role::Primary if primary == wallet => WalletStatus::Authorized,
+        Role::Primary => {
+            if is_backup(rpc, roles, wallet).await.unwrap_or(false) {
+                WalletStatus::Misconfigured(
+                    "The primary transaction wallet is an allowed backup keeper, not the coordinator's keeper; run it with KEEPER_ROLE=follower".into(),
+                )
+            } else {
+                WalletStatus::Unauthorized(
+                    "The coordinator's keeper is not the primary keeper wallet".into(),
+                )
+            }
+        }
+        Role::Follower { .. } if primary == wallet => WalletStatus::Misconfigured(
+            "The follower transaction wallet is the coordinator's keeper; run it with KEEPER_ROLE=primary".into(),
+        ),
+        Role::Follower { .. } => {
+            if is_backup(rpc, roles, wallet).await? {
+                WalletStatus::Authorized
+            } else {
+                WalletStatus::Unauthorized(
+                    "The follower transaction wallet is not an allowed backup keeper; the coordinator owner must call setBackupKeeper(wallet, true)".into(),
+                )
+            }
+        }
+    })
+}
 /// The same check as a plain result, for the status snapshot and for callers that only need the verdict.
 pub(crate) async fn authorize_wallet(
     rpc: &Rpc,
-    registry: Address,
+    roles: Roles,
     wallet: Address,
     role: Role,
 ) -> Result<()> {
-    match wallet_status(rpc, registry, wallet, role).await? {
+    match wallet_status(rpc, roles, wallet, role).await? {
         WalletStatus::Authorized => Ok(()),
         WalletStatus::Unauthorized(reason) | WalletStatus::Misconfigured(reason) => {
             Err(anyhow::anyhow!(reason))
@@ -612,6 +1044,11 @@ pub(crate) async fn authorize_wallet(
     }
 }
 fn epoch_terminal(work: &crate::epoch::Work, head: &Head) -> Result<Option<&'static str>> {
+    // A stale beacon packet with no commit in flight is refreshed (by send_epoch, or for blocked work by
+    // refresh_blocked_beacons), so it is not terminal.
+    if work.stale_beacon(head.timestamp) {
+        return Ok(None);
+    }
     if let Some(json) = &work.api {
         let api: ApiProof = serde_json::from_str(json)?;
         if U256::from(head.timestamp) > api.timestamp.saturating_add(U256::from(240)) {
@@ -621,22 +1058,81 @@ fn epoch_terminal(work: &crate::epoch::Work, head: &Head) -> Result<Option<&'sta
     Ok(None)
 }
 
+/// Work the fleet could act on right now, which is what a silent committer has to be judged against: an open request
+/// with live paid demand for an epoch attempt. Three kinds of open request are not such work. One whose epoch has no
+/// packet and whose next fallback window has not opened yet: no keeper can publish for it, so the primary standing still
+/// says nothing about its health. A `pending` one whose epoch's work is blocked because its source was refused as an
+/// unsupported recipe (a signed API recipe, see epoch::UNSUPPORTED_RECIPE): every keeper of this release refuses the same
+/// recipe, a healthy primary as much as a follower, so its silence is no sign of death. Any other block keeps counting, a
+/// source ladder that has run out included, because the refusal may be this node's own (a `beaconOf` that reverted on one
+/// of its RPC endpoints, say) and a follower's other endpoints may still read the last source. And a `pending` one whose
+/// epoch has no packet in this journal because this node's fetches of a beacon round keep failing (a run that has not
+/// ended more than RUN_GAP_SECONDS before `now`, see beacon.rs): drand is out of reach, for the primary as much as for
+/// this node, so its silence is no sign of death. A follower that has the packet still counts the work, so it takes over
+/// when only the primary cannot reach drand. A run that failed on the keeper's own read of the chain does not excuse
+/// anything: it says nothing about the primary's reach. Nor does either of the last two kinds excuse a `prepared`
+/// request: its proof is journaled, which needs its epoch published, by whoever did it (the committer can publish an
+/// epoch whose source is refused, from a record it holds), and any node can serve it whatever this one's own fetches say.
+async fn sendable_work_waiting(
+    pool: &sqlx::SqlitePool,
+    registry: Address,
+    catalog: B256,
+    head: &Head,
+    margin: u64,
+    now: u64,
+) -> Result<bool> {
+    let waiting:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs LEFT JOIN epoch_demand ON epoch_demand.job=jobs.id LEFT JOIN epoch_work ON epoch_work.epoch=epoch_demand.epoch AND epoch_work.registry=? AND epoch_work.catalog=? WHERE jobs.state IN ('pending','prepared') AND jobs.deadline>? AND NOT(epoch_work.api IS NULL AND epoch_work.last_error IS NOT NULL AND epoch_work.state NOT IN ('committed','expired') AND epoch_work.fallback+1<epoch_work.sources AND ?<epoch_work.start+(epoch_work.fallback+1)*?) AND NOT(jobs.state='pending' AND COALESCE(epoch_work.state,'')='pending' AND epoch_work.api IS NULL AND epoch_work.failing_since IS NOT NULL AND COALESCE(epoch_work.failed_at,0)>=? AND COALESCE(epoch_work.failed_rpc,0)=0) AND NOT(jobs.state='pending' AND epoch_work.state='blocked' AND COALESCE(INSTR(epoch_work.last_error,?),0)>0))")
+        .bind(registry.to_string()).bind(catalog.to_string())
+        .bind(i64::try_from(head.timestamp.saturating_add(margin))?)
+        .bind(i64::try_from(head.number)?)
+        .bind(i64::try_from(crate::epoch::FALLBACK_DELAY_BLOCKS)?)
+        .bind(i64::try_from(now.saturating_sub(crate::beacon::RUN_GAP_SECONDS))?)
+        .bind(crate::epoch::UNSUPPORTED_RECIPE)
+        .fetch_one(pool).await?;
+    Ok(waiting != 0)
+}
 /// Live paid demand that cannot be published: its epoch work is blocked with no source left to try
-/// (or with a packet that cannot be sent), or its saved packet is already older than the attestation
-/// freshness bound. Transient fetch retries and a blocked source awaiting its fallback are not stalls.
+/// (or with a packet that cannot be sent), its saved packet is already older than the attestation
+/// freshness bound, or its last source is a beacon whose fetches have failed for UNAVAILABLE_SECONDS of
+/// wall-clock time `now` and are still failing (`beacon_unavailable`, or `beacon_rpc_error` when the last
+/// failure was the keeper's own read of the chain, not what the relays did). Blocked work whose source was
+/// refused as a signed API recipe, which the keeper does not prepare, reports `unsupported_recipe` instead of
+/// `blocked`. Transient fetch retries, a blocked source awaiting its fallback, a stale beacon packet that will
+/// be refreshed and a run of failures that stopped more than RUN_GAP_SECONDS ago are not stalls.
 async fn stalled_epoch_demand(
     pool: &sqlx::SqlitePool,
     registry: alloy_primitives::Address,
     catalog: B256,
     head: &Head,
     margin: u64,
+    now: u64,
 ) -> Result<Option<(String, &'static str)>> {
-    let keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT epoch_work.key FROM epoch_demand JOIN jobs ON jobs.id=epoch_demand.job JOIN epoch_work ON epoch_work.epoch=epoch_demand.epoch AND epoch_work.registry=? AND epoch_work.catalog=? WHERE jobs.state IN ('pending','prepared','signed','submitted') AND jobs.deadline>? AND ((epoch_work.state='blocked' AND (epoch_work.api IS NOT NULL OR epoch_work.fallback>=epoch_work.sources-1)) OR (epoch_work.api IS NOT NULL AND epoch_work.state IN ('prepared','signed','submitted'))) ORDER BY epoch_work.epoch LIMIT 16")
-        .bind(registry.to_string()).bind(catalog.to_string()).bind(i64::try_from(head.timestamp.saturating_add(margin))?).fetch_all(pool).await?;
+    let keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT epoch_work.key FROM epoch_demand JOIN jobs ON jobs.id=epoch_demand.job JOIN epoch_work ON epoch_work.epoch=epoch_demand.epoch AND epoch_work.registry=? AND epoch_work.catalog=? WHERE jobs.state IN ('pending','prepared','signed','submitted') AND jobs.deadline>? AND ((epoch_work.state='blocked' AND (epoch_work.api IS NOT NULL OR epoch_work.fallback>=epoch_work.sources-1)) OR (epoch_work.api IS NOT NULL AND epoch_work.state IN ('prepared','signed','submitted')) OR (epoch_work.state='pending' AND epoch_work.api IS NULL AND epoch_work.failing_since<=? AND epoch_work.failed_at>=? AND epoch_work.fallback>=epoch_work.sources-1)) ORDER BY epoch_work.epoch LIMIT 16")
+        .bind(registry.to_string()).bind(catalog.to_string()).bind(i64::try_from(head.timestamp.saturating_add(margin))?)
+        .bind(i64::try_from(now.saturating_sub(crate::beacon::UNAVAILABLE_SECONDS))?)
+        .bind(i64::try_from(now.saturating_sub(crate::beacon::RUN_GAP_SECONDS))?).fetch_all(pool).await?;
     for key in keys {
         let work = crate::epoch::work(pool, &key).await?;
         if work.state == "blocked" {
-            return Ok(Some((key, "blocked")));
+            // A recipe the keeper does not prepare (a signed API recipe) is told apart from a source that failed.
+            let reason = if work
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains(crate::epoch::UNSUPPORTED_RECIPE))
+            {
+                "unsupported_recipe"
+            } else {
+                "blocked"
+            };
+            return Ok(Some((key, reason)));
+        }
+        if work.state == "pending" {
+            let reason = if work.failed_rpc {
+                "beacon_rpc_error"
+            } else {
+                "beacon_unavailable"
+            };
+            return Ok(Some((key, reason)));
         }
         if epoch_terminal(&work, head)?.is_some() {
             return Ok(Some((key, "stale_packet")));
@@ -646,9 +1142,16 @@ async fn stalled_epoch_demand(
 }
 
 pub(crate) async fn validate_configuration_pin(rpc: &Rpc, cfg: &Config) -> Result<B256> {
-    let hash = rpc
-        .call(cfg.coordinator, C::protocolConfigurationHashCall {})
-        .await?;
+    let hash = match cfg.chain.coordinator_kind {
+        CoordinatorKind::Epoch => {
+            rpc.call(cfg.coordinator, C::protocolConfigurationHashCall {})
+                .await?
+        }
+        CoordinatorKind::Round => {
+            rpc.call(cfg.coordinator, RC::protocolConfigurationHashCall {})
+                .await?
+        }
+    };
     ensure!(
         cfg.protocol_hash.is_none_or(|pin| pin == hash),
         "Coordinator configuration hash mismatch"
@@ -662,13 +1165,28 @@ impl Drop for TelegramObserver {
         self.0.abort();
     }
 }
+/// What the status observer reads of the lane: an epoch coordinator's registry and catalog, or a round coordinator's
+/// keeper roles and the round demand of the journal.
+#[derive(Clone, Copy, Debug)]
+enum StatusLane {
+    Epoch { registry: Address, catalog: B256 },
+    Round { coordinator: Address },
+}
+impl StatusLane {
+    fn roles(self) -> Roles {
+        match self {
+            Self::Epoch { registry, .. } => Roles::Registry(registry),
+            Self::Round { coordinator } => Roles::Coordinator(coordinator),
+        }
+    }
+}
 fn spawn_telegram_observer(
     notifier: crate::telegram::TelegramNotifier,
     rpc: Rpc,
     cfg: Config,
     wallet: alloy_primitives::Address,
     pins: crate::proxy::RuntimePins,
-    catalog: B256,
+    lane: StatusLane,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -686,7 +1204,7 @@ fn spawn_telegram_observer(
                             .busy_timeout(std::time::Duration::from_millis(100)),
                     )
                     .await?;
-                let result = telegram_snapshot(&rpc, &pool, wallet, &cfg, pins, catalog).await;
+                let result = telegram_snapshot(&rpc, &pool, wallet, &cfg, pins, lane).await;
                 pool.close().await;
                 result
             })
@@ -722,12 +1240,11 @@ async fn telegram_snapshot(
     wallet: alloy_primitives::Address,
     cfg: &Config,
     pins: crate::proxy::RuntimePins,
-    catalog: B256,
+    lane: StatusLane,
 ) -> Result<(crate::telegram::StatusSnapshot, u128)> {
     use crate::telegram::{EpochState, Health, StatusSnapshot};
     let (chain_id, role) = (cfg.chain_id, cfg.role);
     pins.verify(rpc, cfg.approved_next()).await?;
-    let registry = pins.registry.proxy;
     let head = rpc.head().await?;
     let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE state IN ('pending','prepared','signed','submitted') AND deadline>=?")
         .bind(i64::try_from(head.timestamp)?).fetch_one(pool).await?;
@@ -753,6 +1270,43 @@ async fn telegram_snapshot(
             }
         })
         .unwrap_or(Health::Unknown);
+    let (registry, catalog) = match lane {
+        StatusLane::Epoch { registry, catalog } => (registry, catalog),
+        // A round coordinator has no epoch: its line is the rounds live requests wait on.
+        StatusLane::Round { .. } => {
+            let journal = crate::journal::Journal { pool: pool.clone() };
+            let rounds = journal
+                .round_demand(head.timestamp.saturating_add(cfg.margin))
+                .await?;
+            return Ok((
+                StatusSnapshot {
+                    observed_at_unix: Some(crate::health::now()?),
+                    health,
+                    pending: u64::try_from(pending)?,
+                    served: u64::try_from(served)?,
+                    last_serve_unix: last.map(u64::try_from).transpose()?,
+                    epoch_id: None,
+                    epoch_state: EpochState::Unknown,
+                    rounds_awaited: Some(u64::try_from(rounds.len())?),
+                    transaction_wallet: wallet,
+                    chain_id,
+                    balance_wei: rpc.balance(wallet).await.ok(),
+                    authorized: Some(
+                        authorize_wallet(rpc, lane.roles(), wallet, role)
+                            .await
+                            .is_ok(),
+                    ),
+                    primary_alive: sqlx::query_scalar::<_, String>(
+                        "SELECT value FROM meta WHERE key='keeper:primary_alive'",
+                    )
+                    .fetch_optional(pool)
+                    .await?
+                    .map(|value| value == "true"),
+                },
+                head.base_fee,
+            ));
+        }
+    };
     let epoch = rpc
         .call(
             registry,
@@ -786,7 +1340,11 @@ async fn telegram_snapshot(
         }
     };
     let balance = rpc.balance(wallet).await.ok();
-    let authorized = Some(authorize_wallet(rpc, registry, wallet, role).await.is_ok());
+    let authorized = Some(
+        authorize_wallet(rpc, Roles::Registry(registry), wallet, role)
+            .await
+            .is_ok(),
+    );
     let primary_alive: Option<String> =
         sqlx::query_scalar("SELECT value FROM meta WHERE key='keeper:primary_alive'")
             .fetch_optional(pool)
@@ -800,6 +1358,7 @@ async fn telegram_snapshot(
             last_serve_unix: last.map(u64::try_from).transpose()?,
             epoch_id: (epoch != 0).then_some(epoch),
             epoch_state,
+            rounds_awaited: None,
             transaction_wallet: wallet,
             chain_id,
             balance_wei: balance,
@@ -812,6 +1371,16 @@ async fn telegram_snapshot(
 
 impl Worker {
     pub async fn new(cfg: Config) -> Result<Self> {
+        // The loader refuses a registry's settings with COORDINATOR_KIND=round; a configuration built otherwise is
+        // refused here, before anything is asked of the chain.
+        ensure!(
+            cfg.chain.coordinator_kind == CoordinatorKind::Epoch
+                || (cfg.registry_implementation_code_hash.is_none()
+                    && cfg
+                        .approved_next_registry_implementation_code_hash
+                        .is_none()),
+            "A round coordinator has no registry: its keeper takes no registry implementation pin"
+        );
         let probe_rpc = Rpc::new(cfg.rpc_urls.clone())?;
         let vrf_key = prover::read_key(&cfg.vrf_key_file)?;
         let tx_secret = prover::read_key(&cfg.tx_key_file)?;
@@ -834,16 +1403,25 @@ impl Worker {
             );
         }
         let scope = format!("{}:{}:{}", cfg.chain_id, cfg.coordinator, tx_key.address());
-        let journal = Journal::open(&cfg.db, &scope).await?;
+        let journal = Journal::open_for(
+            &cfg.db,
+            &scope,
+            cfg.chain.coordinator_kind,
+            cfg.chain.finality_mode,
+        )
+        .await?;
         // On rejected startup, finish SQLite shutdown while ownership locks remain
         // held. Dropping the pool alone can leave background WAL handles alive.
-        type Started = (
-            Rpc,
-            crate::epoch::Publisher,
-            crate::proxy::RuntimePins,
-            Option<String>,
-            u64,
-        );
+        type Started = (Rpc, Lane, crate::proxy::RuntimePins, Option<String>);
+        /// What startup read of the coordinator before the role check: an epoch coordinator's registry and
+        /// confirmation blocks, or a round coordinator's facts.
+        enum Read {
+            Epoch {
+                registry: Address,
+                confirmations: u64,
+            },
+            Round(crate::round::Facts, crate::round::Beacons),
+        }
         let startup: Result<Started> = async {
             let instance = journal
                 .meta("instance_id")
@@ -906,7 +1484,13 @@ impl Worker {
                 ));
             }
             ensure!(!healthy.is_empty(), "No healthy verified RPC endpoint");
-            let probed = Rpc::new(healthy)?;
+            // From here the endpoints make contract reads, which follow the finality mode: `epochRegistry` is read by the
+            // identity check below, for one endpoint as for all of them.
+            let deciding = |urls: Vec<String>| -> Result<Rpc> {
+                Ok(Rpc::new(urls)?
+                    .with_finality(cfg.chain.finality_mode, cfg.chain.soft_depth_blocks))
+            };
+            let probed = deciding(healthy)?;
             let approved = cfg.approved_next();
             let pins=crate::proxy::RuntimePins::observe(&probed,&cfg).await?;
             // Startup must not mix disagreeing endpoint implementation identities. While an approved upgrade
@@ -917,7 +1501,7 @@ impl Worker {
             let mut verified = Vec::new();
             let mut limited = 0;
             for url in &probed.urls {
-                let endpoint = Rpc::new(vec![url.clone()])?;
+                let endpoint = deciding(vec![url.clone()])?;
                 match pins.verify(&endpoint, approved).await {
                     Ok(()) => verified.push(url.clone()),
                     Err(error) if crate::rpc::is_delivery_failure(&error) => {
@@ -942,19 +1526,56 @@ impl Worker {
                 ));
             }
             ensure!(!verified.is_empty(), "No healthy verified RPC endpoint");
-            let rpc = Rpc::new(verified)?;
+            // An epoch keeper goes on with the endpoints that answered, as 0.4.1 does. A round keeper keeps every configured
+            // endpoint in its place and holds the ones that did not answer out of its reads until they answer a probe
+            // (`readmit_endpoints`), so that a provider down at startup is not lost until the next restart.
+            let rpc = match cfg.chain.coordinator_kind {
+                CoordinatorKind::Epoch => deciding(verified)?,
+                CoordinatorKind::Round => {
+                    let admitted: Vec<bool> =
+                        cfg.rpc_urls.iter().map(|url| verified.contains(url)).collect();
+                    deciding(cfg.rpc_urls.clone())?.holding(&admitted)
+                }
+            };
             let pk = prover::public_key(&vrf_key);
-            ensure!(
-                rpc.call(cfg.coordinator, C::publicKeyXCall {}).await? == pk[0]
-                    && rpc.call(cfg.coordinator, C::publicKeyYCall {}).await? == pk[1],
-                "VRF key does not match coordinator"
-            );
-            validate_configuration_pin(&rpc, &cfg).await?;
-            // Set once at initialization and bound into the configuration hash checked above.
-            let confirmations =
-                u64::from(rpc.call(cfg.coordinator, C::confirmationBlocksCall {}).await?);
-            let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
-            match wallet_status(&rpc, registry, tx_key.address(), cfg.role).await? {
+            let (roles, read) = match cfg.chain.coordinator_kind {
+                CoordinatorKind::Epoch => {
+                    ensure!(
+                        rpc.call(cfg.coordinator, C::publicKeyXCall {}).await? == pk[0]
+                            && rpc.call(cfg.coordinator, C::publicKeyYCall {}).await? == pk[1],
+                        "VRF key does not match coordinator"
+                    );
+                    validate_configuration_pin(&rpc, &cfg).await?;
+                    // Set once at initialization and bound into the configuration hash checked above.
+                    let confirmations =
+                        u64::from(rpc.call(cfg.coordinator, C::confirmationBlocksCall {}).await?);
+                    let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
+                    (
+                        Roles::Registry(registry),
+                        Read::Epoch {
+                            registry,
+                            confirmations,
+                        },
+                    )
+                }
+                // A round coordinator is read through its own ABI alone: its key, its configuration pin and the facts of
+                // its beacon book. It has no registry and no confirmation blocks, and neither is asked for.
+                CoordinatorKind::Round => {
+                    ensure!(
+                        rpc.call(cfg.coordinator, RC::publicKeyXCall {}).await? == pk[0]
+                            && rpc.call(cfg.coordinator, RC::publicKeyYCall {}).await? == pk[1],
+                        "VRF key does not match coordinator"
+                    );
+                    validate_configuration_pin(&rpc, &cfg).await?;
+                    let (facts, beacons) = crate::round::observe(&rpc, cfg.coordinator, pk).await?;
+                    tracing::info!(round_lead=facts.round_lead,beacon=facts.beacon,beacon_since=facts.beacon_since,
+                        next_beacon=facts.next_beacon,next_from=facts.next_from,min_fee=%facts.min_fee,
+                        fee_multiplier=facts.fee_multiplier,fulfill_gas_overhead=facts.fulfill_gas_overhead,
+                        beacons=beacons.len(),"Round coordinator: requests are bound to drand rounds; this keeper fetches each request's round, proves the request over it and sends the fulfillment with the round's signature");
+                    (Roles::Coordinator(cfg.coordinator), Read::Round(facts, beacons))
+                }
+            };
+            match wallet_status(&rpc, roles, tx_key.address(), cfg.role).await? {
                 WalletStatus::Misconfigured(reason) => bail!(reason),
                 WalletStatus::Unauthorized(reason) => {
                     tracing::error!(reason=%reason,role=cfg.role.name(),"Transaction wallet is not authorized to publish; starting with sending disabled, reconciliation continues");
@@ -973,17 +1594,31 @@ impl Worker {
                     .execute(&journal.pool)
                     .await?;
             }
-            let epoch = crate::epoch::Publisher::new(
-                registry,
-                rpc.call(registry, ER::catalogHashCall {}).await?,
-                cfg.api_endpoints.clone(),
-            );
+            let lane = match read {
+                Read::Epoch {
+                    registry,
+                    confirmations,
+                } => Lane::Epoch {
+                    publisher: crate::epoch::Publisher::new(
+                        registry,
+                        rpc.call(registry, ER::catalogHashCall {}).await?,
+                        cfg.drand_relays.clone(),
+                    )?,
+                    confirmation_blocks: confirmations,
+                },
+                Read::Round(facts, beacons) => Lane::Round(crate::round::Lane::new(
+                    facts,
+                    beacons,
+                    &cfg.drand_relays,
+                    journal.pool.clone(),
+                )?),
+            };
             pins.verify(&rpc, approved).await?;
-            let finalized = rpc.finalized_head().await?;
-            if let Some(exceeded) = fee_headroom(finalized.base_fee, cfg.min_priority_fee, cfg.max_fee) {
-                tracing::warn!(base_fee=%finalized.base_fee,required=%exceeded.required,limit=%exceeded.limit,"Observed base fee exceeds the fulfillment fee cap; sends will be deferred until MAX_FEE_PER_GAS_WEI is raised");
+            let decided = rpc.decision_head().await?;
+            if let Some(exceeded) = fee_headroom(decided.base_fee, cfg.min_priority_fee, cfg.max_fee) {
+                tracing::warn!(base_fee=%decided.base_fee,required=%exceeded.required,limit=%exceeded.limit,"Observed base fee exceeds the fulfillment fee cap; sends will be deferred until MAX_FEE_PER_GAS_WEI is raised");
             }
-            journal.enable_public_service(finalized.timestamp).await?;
+            journal.enable_public_service(decided.timestamp).await?;
             // A proxy accepted through its approved next hash is running the upgraded implementation. The journal's
             // previous identity tells a first start on it, which is announced once, from every later restart.
             let previous: Option<crate::proxy::RuntimePins> = journal
@@ -992,11 +1627,13 @@ impl Worker {
                 .and_then(|saved| serde_json::from_str(&saved).ok());
             let mut notices = Vec::new();
             for service in pins.on_approved_next(&cfg) {
-                let pin = pins.get(service);
+                let Some(pin) = pins.get(service) else {
+                    continue;
+                };
                 tracing::warn!(service=service.name(),implementation=%pin.implementation,code_hash=%pin.implementation_code_hash,
                     "Running on the approved next {} implementation; set {} to its runtime code hash and remove {}",
                     service.name(),service.pin_setting(),service.approval_setting());
-                if previous.is_some_and(|previous| previous.get(service).implementation != pin.implementation) {
+                if previous.is_some_and(|previous| previous.get(service).map(|was| was.implementation) != Some(pin.implementation)) {
                     notices.push(format!(
                         "Keeper restarted on the approved {} implementation {}\nRuntime code hash: {}\nSet {} to it and remove {}.",
                         service.name(),pin.implementation,pin.implementation_code_hash,service.pin_setting(),service.approval_setting()
@@ -1007,14 +1644,13 @@ impl Worker {
                 .bind(serde_json::to_string(&pins)?).execute(&journal.pool).await?;
             Ok((
                 rpc,
-                epoch,
+                lane,
                 pins,
                 (!notices.is_empty()).then(|| notices.join("\n\n")),
-                confirmations,
             ))
         }
         .await;
-        let (rpc, epoch, runtime_pins, upgrade_notice, confirmation_blocks) = match startup {
+        let (rpc, lane, runtime_pins, upgrade_notice) = match startup {
             Ok(rpc) => rpc,
             Err(error) => {
                 journal.pool.close().await;
@@ -1023,9 +1659,37 @@ impl Worker {
         };
         // The startup check recorded the verdict in the journal; sending starts from the same fact.
         let authorized = journal.meta("health:unauthorized").await?.is_none();
+        // An incident stands over a restart: the mismatch is in the journal, and the recovery goes on from where it stood.
+        // Attempts that a recovery parked return to the lane when none is under way (the recovery clears its record and
+        // returns them in one commit, so this only mends a journal that was edited by hand).
+        let finality_open = if cfg.chain.finality_mode == FinalityMode::Soft {
+            let open = journal.finality_mismatch().await?.is_some();
+            if !open && journal.unpark_lanes().await? > 0 {
+                tracing::warn!(
+                    "Attempts parked by a finality recovery were back in the lane with no mismatch on record"
+                );
+            }
+            // Only agreeing endpoints turn a replaced block into a recovery. With one, a replaced block it shows holds
+            // the sends until it shows the journal's block again or an operator acknowledges it.
+            if rpc.admitted() < 2 {
+                tracing::warn!(
+                    configured = cfg.rpc_urls.len(),
+                    usable = rpc.admitted(),
+                    "FINALITY_MODE=soft with fewer than two usable RPC endpoints: a replaced block cannot be confirmed by a second provider, so the keeper holds its sends whenever its endpoint shows one, until the endpoint shows the journal's block again or `finality --acknowledge` is run. Add a second provider to RPC_URLS"
+                );
+            }
+            open
+        } else {
+            false
+        };
+        let readmission = rpc
+            .held()
+            .into_iter()
+            .map(|i| (i, Readmission::new()))
+            .collect();
         Ok(Self {
             _scope_locks: scope_locks,
-            epoch,
+            lane,
             cfg,
             rpc,
             journal,
@@ -1050,8 +1714,16 @@ impl Worker {
             approved_upgrade: std::sync::OnceLock::new(),
             upgrade_notice,
             authorization_checked: std::sync::Mutex::new((tokio::time::Instant::now(), 0)),
-            last_finalized: std::sync::atomic::AtomicU64::new(0),
-            confirmation_blocks,
+            last_decided: std::sync::atomic::AtomicU64::new(0),
+            finality_audit_due: std::sync::Mutex::new(None),
+            finality_open: std::sync::atomic::AtomicBool::new(finality_open),
+            recovery_lane: std::sync::atomic::AtomicBool::new(false),
+            recovery_budget: recovery::STEP_BUDGET,
+            suspicion: std::sync::Mutex::new(None),
+            readmission: std::sync::Arc::new(std::sync::Mutex::new(readmission)),
+            suspicion_retry: suspicion::RETRY_FIRST,
+            absent_window: suspicion::ABSENT_WINDOW,
+            finality_page_after: suspicion::PAGE_AFTER,
         })
     }
     /// The approved implementation upgrade this process has seen, if any. Once set, the run loop exits with
@@ -1071,16 +1743,61 @@ impl Worker {
     pub fn signals(&self) -> std::sync::Arc<crate::events::Signals> {
         self.signals.clone()
     }
-    pub fn registry(&self) -> Address {
-        self.epoch.registry
+    /// Tests: `elapsed` passes on the clocks of the periodic re-checks (the runtime pins, the publishing right and the
+    /// finality audit), as if the process had waited that long between two ticks.
+    #[cfg(test)]
+    pub(crate) fn pass(&self, elapsed: std::time::Duration) {
+        let back = |at: tokio::time::Instant| at.checked_sub(elapsed).unwrap_or(at);
+        if let Ok(mut verified) = self.runtime_verified.lock() {
+            verified.0 = back(verified.0);
+        }
+        if let Ok(mut checked) = self.authorization_checked.lock() {
+            checked.0 = back(checked.0);
+        }
+        if let Ok(mut due) = self.finality_audit_due.lock() {
+            *due = due.map(back);
+        }
+    }
+    /// The service contracts whose logs wake the keeper: the coordinator and, behind an epoch coordinator, its registry.
+    pub fn service_contracts(&self) -> Vec<Address> {
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => vec![self.cfg.coordinator, publisher.registry],
+            Lane::Round(_) => vec![self.cfg.coordinator],
+        }
+    }
+    /// Which coordinator the keeper serves.
+    pub fn coordinator_kind(&self) -> CoordinatorKind {
+        self.lane.kind()
+    }
+    /// The epoch lane's publisher. Only an epoch coordinator's keeper has one; the code that asks for it runs only there,
+    /// so that a round coordinator's keeper never reaches the registry.
+    fn epoch(&self) -> Result<&crate::epoch::Publisher> {
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => Ok(publisher),
+            Lane::Round(_) => bail!("A round coordinator has no epoch lane"),
+        }
+    }
+    /// Where the publishing right is read: the registry's committer roles, or the round coordinator's keeper roles.
+    fn roles(&self) -> Roles {
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => Roles::Registry(publisher.registry),
+            Lane::Round(_) => Roles::Coordinator(self.cfg.coordinator),
+        }
     }
     /// Whether anything is open: a signed or submitted transaction, a live job, an operator sweep, or a pushed
     /// work event on a block no tick has read yet. It decides the loop's cadence only, never what a tick does.
     pub async fn open_work(&self) -> Result<bool> {
-        if self.signals.activity()
-            > self
-                .last_finalized
-                .load(std::sync::atomic::Ordering::SeqCst)
+        if self.signals.activity() > self.last_decided.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(true);
+        }
+        // A mismatch on record or suspected is work: the recovery moves one step at each tick, and the endpoints are
+        // asked again about a suspicion.
+        if self.cfg.chain.finality_mode == FinalityMode::Soft
+            && (self.suspected()?
+                || matches!(
+                    self.journal.finality_state().await?,
+                    FinalityState::Recovering(..)
+                ))
         {
             return Ok(true);
         }
@@ -1096,26 +1813,23 @@ impl Worker {
             .await?;
         Ok(open != 0)
     }
-    /// Once per tick, a follower reads committer()'s confirmed nonce at the finalized block, records it against the
+    /// Once per tick, a follower reads committer()'s confirmed nonce at the decision head, records it against the
     /// work it can see waiting, and decides whether it is joining the queue this tick. The result drives every send
     /// decision below and is published for health and Telegram.
     async fn observe_primary(&self, head: &Head) -> Result<()> {
         let Role::Follower(plan) = self.cfg.role else {
             return Ok(());
         };
-        let committer = self
-            .rpc
-            .call(self.epoch.registry, ER::committerCall {})
-            .await?;
-        // The peer nonce is read at the same finalized block whose timestamp times the comparison, so a lagging
-        // backend cannot produce a false death.
+        let committer = primary_wallet(&self.rpc, self.roles()).await?;
+        // The peer nonce is read at the same block whose timestamp times the comparison, so a lagging backend cannot
+        // produce a false death.
         let nonce = self
             .rpc
             .nonce(committer, &format!("0x{:x}", head.number))
             .await?;
         // Judge the chain's queue, not this node's lag: the primary serves the oldest first, so a follower's
         // stale rows are exactly the oldest ones, and they would both overstate the queue age and count as work
-        // waiting on a primary that already served them. A few of them are re-read at the finalized head.
+        // waiting on a primary that already served them. A few of them are re-read at the decision head.
         if !self.policy()?.joined {
             self.refresh_oldest_pending(head, plan.liveness / 2).await?;
         }
@@ -1173,25 +1887,36 @@ impl Worker {
                 .bind(value).execute(&self.journal.pool).await?;
             // Operationally important and rate-limited to transitions: a follower deciding that the primary is
             // gone, or that it is back, belongs in the log an operator reads by default.
-            tracing::warn!(committer=%committer,nonce,primary_dead=dead,pending,"Primary committer liveness changed");
+            match self.lane.kind() {
+                CoordinatorKind::Epoch => {
+                    tracing::warn!(committer=%committer,nonce,primary_dead=dead,pending,"Primary committer liveness changed")
+                }
+                CoordinatorKind::Round => {
+                    tracing::warn!(keeper=%committer,nonce,primary_dead=dead,pending,"Primary keeper liveness changed")
+                }
+            }
         }
         Ok(())
     }
-    /// Whether an epoch attempt with live paid demand is waiting to be published: work the primary should take.
-    /// Work the fleet could act on right now, which is what a silent committer has to be judged against. An open
-    /// request whose epoch has no packet and whose next fallback window has not opened yet is not such work: no
-    /// keeper can publish for it, so the primary standing still says nothing about its health. A source ladder that
-    /// has run out keeps counting, because a follower's own gateways may still reach the last source.
+    /// Whether an epoch attempt with live paid demand is waiting to be published: work the primary should take. On a
+    /// round coordinator, a live request waiting to be served.
     async fn sendable_work_waiting(&self, head: &Head) -> Result<bool> {
-        let waiting:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs LEFT JOIN epoch_demand ON epoch_demand.job=jobs.id LEFT JOIN epoch_work ON epoch_work.epoch=epoch_demand.epoch AND epoch_work.registry=? AND epoch_work.catalog=? WHERE jobs.state IN ('pending','prepared') AND jobs.deadline>? AND NOT(epoch_work.api IS NULL AND epoch_work.last_error IS NOT NULL AND epoch_work.state NOT IN ('committed','expired') AND epoch_work.fallback+1<epoch_work.sources AND ?<epoch_work.start+(epoch_work.fallback+1)*?))")
-            .bind(self.epoch.registry.to_string()).bind(self.epoch.catalog.to_string())
-            .bind(i64::try_from(head.timestamp.saturating_add(self.cfg.margin))?)
-            .bind(i64::try_from(head.number)?)
-            .bind(i64::try_from(crate::epoch::FALLBACK_DELAY_BLOCKS)?)
-            .fetch_one(&self.journal.pool).await?;
-        Ok(waiting != 0)
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => {
+                sendable_work_waiting(
+                    &self.journal.pool,
+                    publisher.registry,
+                    publisher.catalog,
+                    head,
+                    self.cfg.margin,
+                    crate::health::now()?,
+                )
+                .await
+            }
+            Lane::Round(_) => rounds::work_waiting(&self.journal.pool, head, self.cfg.margin).await,
+        }
     }
-    /// Re-read a bounded number of the oldest open jobs at the finalized head and retire the ones the chain has
+    /// Re-read a bounded number of the oldest open jobs at the decision head and retire the ones the chain has
     /// already settled. Only jobs older than `min_age` are read, so a young queue costs no calls at all.
     async fn refresh_oldest_pending(&self, head: &Head, min_age: u64) -> Result<()> {
         for job in self
@@ -1199,8 +1924,8 @@ impl Worker {
             .pending_oldest(head.timestamp, min_age, LIVENESS_REFRESH_JOBS)
             .await?
         {
-            let request = self.request_at(job.id.parse()?, head.number).await?;
-            let Some(state) = terminal(&request, head.timestamp) else {
+            let request = self.status_at(job.id.parse()?, head.number).await?;
+            let Some(state) = settled(&request, job.deadline, head.timestamp) else {
                 continue;
             };
             if request.fulfilled && !request.delivered {
@@ -1227,13 +1952,22 @@ impl Worker {
         &mut self,
         notifier: crate::telegram::TelegramNotifier,
     ) -> TelegramObserver {
+        let lane = match &self.lane {
+            Lane::Epoch { publisher, .. } => StatusLane::Epoch {
+                registry: publisher.registry,
+                catalog: publisher.catalog,
+            },
+            Lane::Round(_) => StatusLane::Round {
+                coordinator: self.cfg.coordinator,
+            },
+        };
         let task = spawn_telegram_observer(
             notifier.clone(),
             self.rpc.clone(),
             self.cfg.clone(),
             self.tx_key.address(),
             self.runtime_pins,
-            self.epoch.catalog,
+            lane,
         );
         if let Some(notice) = &self.upgrade_notice {
             notifier.notify(crate::telegram::Event::Upgrade(notice.clone()));
@@ -1242,6 +1976,15 @@ impl Worker {
         TelegramObserver(task)
     }
     pub fn spawn_explorer(&self) -> Option<crate::explorer::Task> {
+        if self.lane.kind() == CoordinatorKind::Round {
+            // The index has no round mode before task K4: it reads an epoch coordinator's registry.
+            if crate::explorer::Settings::from_env().is_ok_and(|settings| settings.is_some()) {
+                tracing::warn!(
+                    "Optional public explorer disabled: its index has no round mode yet"
+                );
+            }
+            return None;
+        }
         match crate::explorer::Settings::from_env() {
             Ok(settings) => crate::explorer::spawn(
                 settings,
@@ -1260,6 +2003,11 @@ impl Worker {
                 None
             }
         }
+    }
+    /// A test reads the Telegram events this worker gives `notifier`.
+    #[cfg(test)]
+    pub(crate) fn set_telegram(&mut self, notifier: crate::telegram::TelegramNotifier) {
+        self.telegram = Some(notifier);
     }
     pub fn attach_discord(&mut self, notifier: crate::discord::Notifier) {
         self.discord = Some(notifier);
@@ -1311,6 +2059,71 @@ impl Worker {
             limit: u128::from(self.cfg.max_gas),
         })
     }
+    /// The L1 gas of a transaction to `to` with this hex payload, with the margin added: what a gas limit must hold
+    /// besides the L2 gas on an Arbitrum chain. Nothing, and no call, in the standard gas model.
+    async fn l1_gas(&self, to: Address, payload: &str) -> Result<u64> {
+        if self.cfg.chain.gas_model != GasModel::Arbitrum {
+            return Ok(0);
+        }
+        let data: Bytes = payload.parse()?;
+        let l1 = self.rpc.l1_gas(to, &data).await?;
+        Ok(with_l1_margin(l1, self.cfg.chain.l1_gas_margin_bps))
+    }
+    /// The L1 gas of the batch these members make, with the margin; 0 in the standard gas model.
+    async fn batch_l1(&self, members: &[Member]) -> Result<u64> {
+        if self.cfg.chain.gas_model != GasModel::Arbitrum {
+            return Ok(0);
+        }
+        self.l1_gas(self.cfg.coordinator, &batch_payload(members))
+            .await
+    }
+    /// The gas limit of a nonce cancellation, a zero-value transfer to the wallet itself. In the standard gas model
+    /// 21,000. An Arbitrum chain charges the L1 component of the transfer before it runs (a self transfer needs 21,363
+    /// gas on Robinhood Chain mainnet and 27,559 on its testnet, so a 21,000-gas cancellation is rejected and the
+    /// nonce could not be recovered), and that component moves with the L1 price between a cancellation and its
+    /// replacement. The limit is therefore the bound the startup budget already pays for at the cancellation fee cap,
+    /// whatever the transfer needs now: the chain charges the gas used, not the limit. The node is still asked what
+    /// the transfer needs, with the margin (when it does not estimate it: 21,000 gas and twice its L1 component), to
+    /// tell an answer that the bound cannot cover; see `arbitrum_cancel_gas`.
+    async fn cancel_gas(&self) -> Result<u64> {
+        if self.cfg.chain.gas_model != GasModel::Arbitrum {
+            return Ok(CANCEL_GAS);
+        }
+        let (wallet, margin) = (self.tx_key.address(), self.cfg.chain.l1_gas_margin_bps);
+        let needed = match self
+            .rpc
+            .estimate_gas(json!({"from": wallet, "to": wallet, "value": "0x0"}))
+            .await
+        {
+            Ok(estimate) => with_l1_margin(estimate, margin),
+            Err(error) => {
+                tracing::warn!(error=%error,"Cancellation gas could not be estimated; pricing it from its L1 component");
+                let l1 = with_l1_margin(self.rpc.l1_gas(wallet, &[]).await?, margin);
+                CANCEL_GAS.saturating_add(l1.saturating_mul(2))
+            }
+        };
+        Ok(arbitrum_cancel_gas(needed))
+    }
+    /// The gas limit of the replacement of an attempt that carried `previous`. A cancellation under the arbitrum
+    /// model is priced afresh, because the L1 component it must pay may have grown since the one it replaces was
+    /// signed, and is never below that one: `max(previous, fresh)`. When the node cannot price it now the replacement
+    /// keeps the previous limit (floored at the bound) instead of failing the tick, so a lane is never held for want
+    /// of an estimate. Every other attempt, and every attempt in the standard model, is replaced with the gas it had.
+    async fn replacement_gas(&self, kind: &str, previous: i64) -> Result<u64> {
+        let previous: u64 = previous.try_into()?;
+        if self.cfg.chain.gas_model != GasModel::Arbitrum
+            || !(kind == "cancel" || kind == "epoch_cancel")
+        {
+            return Ok(previous);
+        }
+        Ok(match self.cancel_gas().await {
+            Ok(fresh) => previous.max(fresh),
+            Err(error) => {
+                tracing::warn!(error=%error,previous_gas=previous,"Cancellation gas could not be priced for its replacement; keeping the previous limit");
+                previous.max(CANCEL_GAS_BOUND)
+            }
+        })
+    }
     /// Both proxies' implementation slots and all four runtime codes, in one batched read, immediately before a
     /// signature or broadcast. Never cached: an upgrade between an earlier check and a send must not slip through.
     /// An RPC failure is reported as one, so a rate-limited endpoint is not mistaken for a changed implementation.
@@ -1353,18 +2166,25 @@ impl Worker {
     }
     /// At the start of a tick the pins are verified only when an upgrade event (or a resubscription, which may
     /// have hidden one) arrived since the last verification, or when PIN_BACKSTOP has passed without one.
-    async fn verify_runtime_if_due(&self) -> Result<()> {
+    /// A round keeper that is idle with a live subscription waits ROUND_QUIET_RECHECK instead.
+    async fn verify_runtime_if_due(&self, busy: bool) -> Result<()> {
         let (at, seen) = *self
             .runtime_verified
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime verification lock poisoned"))?;
-        if seen != self.signals.upgrades() || at.elapsed() >= PIN_BACKSTOP {
+        let limit = if self.quiet(busy) {
+            ROUND_QUIET_RECHECK
+        } else {
+            PIN_BACKSTOP
+        };
+        if seen != self.signals.upgrades() || at.elapsed() >= limit {
             self.verify_runtime().await?;
         }
         Ok(())
     }
     /// The publishing right is re-read when a role event (or a resubscription) arrived since the last check, or
-    /// when that check is older than AUTHORIZATION_BUSY with work open or AUTHORIZATION_IDLE without.
+    /// when that check is older than AUTHORIZATION_BUSY with work open or AUTHORIZATION_IDLE without (ROUND_QUIET_RECHECK
+    /// for a round keeper that is idle with a live subscription).
     async fn check_authorization_if_due(&self, busy: bool) -> Result<()> {
         let (at, seen) = *self
             .authorization_checked
@@ -1372,6 +2192,8 @@ impl Worker {
             .map_err(|_| anyhow::anyhow!("Authorization lock poisoned"))?;
         let limit = if busy {
             AUTHORIZATION_BUSY
+        } else if self.quiet(busy) {
+            ROUND_QUIET_RECHECK
         } else {
             AUTHORIZATION_IDLE
         };
@@ -1380,9 +2202,64 @@ impl Worker {
         }
         Ok(())
     }
-    /// Whether this keeper may start new work: configured to send and still authorized to publish in its role.
+    /// Whether the periodic re-checks may wait ROUND_QUIET_RECHECK: a round keeper with nothing open whose subscription
+    /// is live. An epoch keeper, and any keeper without a live subscription, keeps its intervals.
+    fn quiet(&self, busy: bool) -> bool {
+        !busy && self.lane.kind() == CoordinatorKind::Round && self.signals.live()
+    }
+    /// Whether this keeper may start new work: configured to send, still authorized to publish in its role, and with no
+    /// finality mismatch suspected or on record (the recovery from one starts nothing new until it has cleared the
+    /// record). This is the tick's own gate; the signatures and broadcasts of the paths that reconciliation takes are
+    /// refused where they are made while a mismatch is suspected (`ensure_not_halted`).
     fn may_send(&self) -> bool {
-        self.cfg.send && self.authorized.load(std::sync::atomic::Ordering::Relaxed)
+        self.cfg.send
+            && self.lane.sends()
+            && self.authorized.load(std::sync::atomic::Ordering::Relaxed)
+            && !self
+                .finality_open
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Whether the keeper holds its sends: a finality mismatch is suspected and the endpoints have not settled it. Read
+    /// at each call, so that nothing in a tick can sign or broadcast on a reading that was true before the suspicion
+    /// arose. A mismatch on record does not hold them: the recovery from it signs and broadcasts the lane it puts right.
+    /// Always false in finalized mode, which has no such suspicion.
+    async fn sending_halted(&self) -> Result<bool> {
+        if self.cfg.chain.finality_mode != FinalityMode::Soft {
+            return Ok(false);
+        }
+        self.suspected()
+    }
+    /// Refuse a signature or a broadcast while the keeper holds its sends. It stands beside `ensure_not_upgraded` in each
+    /// of the four places that sign or broadcast: `sign_and_journal_members` (every fulfillment, batch, epoch commit,
+    /// cancellation and replacement), `sign_transfer` (an operator sweep, its cancellations and a recovery's fill),
+    /// `broadcast_latest` (every send and rebroadcast of those) and `broadcast_sweep`. Reconciliation goes on reading
+    /// meanwhile.
+    async fn ensure_not_halted(&self) -> Result<()> {
+        if self.sending_halted().await? {
+            return Err(FinalityHalted.into());
+        }
+        Ok(())
+    }
+    /// Refuse a signature that the lane does not send yet: everything a round coordinator's keeper would sign before task
+    /// K3. It stands beside `ensure_not_upgraded` in the two places that sign (`sign_and_journal_members` and
+    /// `sign_transfer`), so that no path of the tick, the recovery or an operator command signs in round mode.
+    fn ensure_lane_sends(&self) -> Result<()> {
+        if !self.lane.sends() {
+            return Err(RoundSendsDisabled.into());
+        }
+        Ok(())
+    }
+    /// Whether a finality mismatch is on record or suspected. For the run loop: while one is, a failed tick is reported
+    /// but does not stop the process, since a restart would come back to the same journal and the same incident.
+    pub async fn finality_incident_open(&self) -> bool {
+        self.cfg.chain.finality_mode == FinalityMode::Soft
+            && (self.suspected().unwrap_or(false)
+                || self
+                    .journal
+                    .finality_mismatch()
+                    .await
+                    .map(|recorded| recorded.is_some())
+                    .unwrap_or(false))
     }
     /// Once per tick, check the wallet's right to publish. Losing it disables sending and raises a health fault;
     /// it never stops the process, because transactions this keeper already signed must still reconcile. A wallet
@@ -1391,7 +2268,7 @@ impl Worker {
         let generation = self.signals.roles();
         let status = wallet_status(
             &self.rpc.for_runtime_checks(),
-            self.epoch.registry,
+            self.roles(),
             self.tx_key.address(),
             self.cfg.role,
         )
@@ -1432,19 +2309,19 @@ impl Worker {
         }
         Ok(())
     }
-    /// Whether a request is already fulfilled or refunded at the latest block, ahead of finalized state.
+    /// Whether a request is already fulfilled or refunded at the latest block, ahead of the state the keeper decides on.
     async fn settled_at_latest(&self, id: &str) -> Result<bool> {
         let head = self.rpc.head().await?;
-        let request = self.request_at(id.parse()?, head.number).await?;
+        let request = self.status_at(id.parse()?, head.number).await?;
         Ok(request.fulfilled || request.refunded)
     }
-    /// Whether an epoch is already published at the latest block, ahead of finalized state.
+    /// Whether an epoch is already published at the latest block, ahead of the state the keeper decides on.
     async fn epoch_published_at_latest(&self, epoch: u64) -> Result<bool> {
         let head = self.rpc.head().await?;
         let record = self
             .rpc
             .call_at(
-                self.epoch.registry,
+                self.epoch()?.registry,
                 ER::getEpochCall { epochId: epoch },
                 head.number,
             )
@@ -1456,19 +2333,32 @@ impl Worker {
             notifier.notify(event);
         }
     }
+    /// An epoch coordinator's request (`getRequest`), which a round coordinator does not have: a round-mode keeper that
+    /// reached this would be asking the wrong contract, and is stopped before it asks.
     pub async fn request(&self, id: U256) -> Result<Request> {
+        self.epoch_reads()?;
         self.rpc
             .call(self.cfg.coordinator, C::getRequestCall { id })
             .await
     }
     async fn request_at(&self, id: U256, number: u64) -> Result<Request> {
+        self.epoch_reads()?;
         self.rpc
             .call_at(self.cfg.coordinator, C::getRequestCall { id }, number)
             .await
     }
+    /// Refuse an epoch coordinator's read on a round coordinator.
+    fn epoch_reads(&self) -> Result<()> {
+        ensure!(
+            self.lane.kind() == CoordinatorKind::Epoch,
+            "getRequest is an epoch coordinator's read, and this keeper serves a round coordinator"
+        );
+        Ok(())
+    }
     /// Many requests' state at one block tag, in JSON-RPC batches of REQUEST_BATCH: each batch comes from one
     /// endpoint and costs one HTTP request. Results are in `ids` order.
     async fn requests_in(&self, ids: &[U256], tag: &str) -> Result<Vec<Request>> {
+        self.epoch_reads()?;
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(REQUEST_BATCH) {
             let calls: Vec<(&str, serde_json::Value)> = chunk
@@ -1497,43 +2387,334 @@ impl Worker {
         }
         Ok(out)
     }
-    /// The finalized head, and in the same batched read from the same endpoint the block this journal saved as
-    /// its finalized checkpoint, which must still be on the chain the endpoint serves. An endpoint that answers
-    /// either block unusably (one that does not serve the finalized tag answers null) is passed over inside the
-    /// read; a usable checkpoint with another hash fails the tick.
-    async fn finalized_head_checked(&self) -> Result<Head> {
+    /// The meta key of the checkpoint a tick holds the chain to: the finalized checkpoint, or in soft mode the soft
+    /// one. The finalized checkpoint keeps its meaning in soft mode and is written there only by the finality auditor.
+    fn checkpoint_key(&self) -> &'static str {
+        match self.cfg.chain.finality_mode {
+            FinalityMode::Finalized => "finalized_checkpoint",
+            FinalityMode::Soft => "soft_checkpoint",
+        }
+    }
+    /// The decision head, and in the same batched read from the same endpoint the block this journal saved as its
+    /// checkpoint, which must still be on the chain the endpoint serves. An endpoint that answers either block
+    /// unusably (one that does not serve the finalized tag answers null) is passed over inside the read.
+    ///
+    /// A usable checkpoint with another hash is a finding about the chain. In finalized mode it fails the tick with
+    /// `CheckpointChanged`, as it always has. In soft mode it is the sequencer having replaced the block the previous
+    /// tick decided on, or an endpoint that serves another fork: it is suspected as a finality mismatch of kind
+    /// `soft_checkpoint`, and the endpoints are asked about it (`settle_suspicion`), as about one the audit found. The
+    /// tick does not fail; while the suspicion stands it goes on with the head it read, and with nothing signed or sent.
+    /// When the endpoints put one of them on cooldown, the head that endpoint may have given is read again from the
+    /// others.
+    async fn decision_head_checked(&self) -> Result<Head> {
+        let head = self.decision_head_compared().await?;
+        if self.cfg.chain.finality_mode == FinalityMode::Soft && self.settle_suspicion().await? {
+            return self.decision_head_compared().await;
+        }
+        Ok(head)
+    }
+    /// The decision head and the check of the checkpoint against it; see `decision_head_checked`.
+    async fn decision_head_compared(&self) -> Result<Head> {
         let saved: Option<(u64, String)> = self
             .journal
-            .meta("finalized_checkpoint")
+            .meta(self.checkpoint_key())
             .await?
             .map(|saved| serde_json::from_str(&saved))
             .transpose()?;
-        let (head, checkpoint) = self
+        let (head, checkpoint) = match self
             .rpc
-            .finalized_head_with(saved.as_ref().map(|(number, _)| *number))
+            .decision_head_with(saved.as_ref().map(|(number, _)| *number))
+            .await
+        {
+            Ok(read) => read,
+            Err(error) => return self.decision_head_shorter(saved, error).await,
+        };
+        if let (Some((number, hash)), Some(block)) = (saved, checkpoint)
+            && block.hash.to_string() != hash
+        {
+            let changed = CheckpointChanged {
+                mode: self.cfg.chain.finality_mode,
+                number,
+                saved: hash,
+                actual: block.hash.to_string(),
+            };
+            if changed.mode == FinalityMode::Finalized {
+                return Err(changed.into());
+            }
+            self.suspect(
+                Mismatch {
+                    kind: "soft_checkpoint".into(),
+                    number,
+                    reference: String::new(),
+                    expected: changed.saved.clone(),
+                    actual: changed.actual.clone(),
+                    detected_at: crate::health::now()?,
+                },
+                &changed.to_string(),
+            )
             .await?;
-        if let (Some((_, hash)), Some(block)) = (saved, checkpoint) {
-            ensure!(
-                block.hash.to_string() == hash,
-                "Finalized chain checkpoint changed; preserve journal and investigate RPC/finality before resuming"
-            );
         }
         Ok(head)
+    }
+    /// Soft mode: the read of the decision head with the checkpoint failed on every endpoint (`error`). When the head
+    /// alone is read and lies below the checkpoint, the endpoints do not have the block the last tick decided on: the
+    /// sequencer replaced the tip with a shorter chain (or every endpoint that answers is behind the one that gave the
+    /// block). That is suspected as a `soft_checkpoint` mismatch whose chain hash is `finality::ABSENT`, the endpoints
+    /// are asked about it as about any other, and the tick goes on with the head it read, sending nothing. It does not
+    /// fail, so it never counts toward `MAX_TICK_FAILURES`. Any other failure, and every failure in finalized mode, is
+    /// the tick's.
+    async fn decision_head_shorter(
+        &self,
+        saved: Option<(u64, String)>,
+        error: anyhow::Error,
+    ) -> Result<Head> {
+        let (Some((number, hash)), FinalityMode::Soft) = (saved, self.cfg.chain.finality_mode)
+        else {
+            return Err(error);
+        };
+        let head = match self.rpc.decision_head_with(None).await {
+            Ok((head, _)) if head.number < number => head,
+            _ => return Err(error),
+        };
+        self.suspect(
+            Mismatch {
+                kind: "soft_checkpoint".into(),
+                number,
+                reference: String::new(),
+                expected: hash,
+                actual: crate::finality::ABSENT.to_string(),
+                detected_at: crate::health::now()?,
+            },
+            &format!(
+                "Soft chain checkpoint at block {number} is above the chain's head {}: the sequencer replaced the tip with a shorter chain, or the endpoint is behind",
+                head.number
+            ),
+        )
+        .await?;
+        Ok(head)
+    }
+    /// Save the block this tick decided on, for the next tick to check against the chain. In soft mode it is also the
+    /// tick's `head` soft mark, in the same transaction, for the finality audit. Not while a mismatch is suspected or on
+    /// record: the checkpoint is then the evidence of it, and the recovery moves it to the chain the endpoints agree on.
+    async fn checkpoint_decision(&self, head: &Head) -> Result<()> {
+        if self.cfg.chain.finality_mode == FinalityMode::Soft
+            && self
+                .finality_open
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let hash = head.hash.to_string();
+        match self.cfg.chain.finality_mode {
+            FinalityMode::Finalized => self.journal.finalized_checkpoint(head.number, &hash).await,
+            FinalityMode::Soft => {
+                self.journal
+                    .soft_decision(head.number, &hash, crate::health::now()?)
+                    .await
+            }
+        }
+    }
+    /// Write down the receipt that the keeper resolves a nonce from.
+    ///
+    /// Finalized mode: the finalized receipt, which also advances the finalized checkpoint to the receipt's block; there
+    /// is no mark. Soft mode: the receipt is only decided, not final, so it must not enter `finalized_receipts` or move
+    /// `finalized_checkpoint`, which are the auditor's. It comes back as a `receipt` mark instead, which the caller's
+    /// resolution of the nonce writes in its own transaction, for the auditor to check against L1 finality.
+    async fn record_receipt(
+        &self,
+        hash: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<Option<Mark>> {
+        if self.cfg.chain.finality_mode == FinalityMode::Finalized {
+            self.journal
+                .finalized_receipt(
+                    hash,
+                    quantity(&receipt["blockNumber"])?,
+                    receipt["blockHash"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
+                    quantity(&receipt["status"])?,
+                )
+                .await?;
+        }
+        self.receipt_mark(hash, receipt)
+    }
+    /// The `receipt` mark of a settled receipt: its block, and its status for the finalized receipt the audit makes of
+    /// it. Soft mode only.
+    fn receipt_mark(&self, hash: &str, receipt: &serde_json::Value) -> Result<Option<Mark>> {
+        if self.cfg.chain.finality_mode != FinalityMode::Soft {
+            return Ok(None);
+        }
+        let block: B256 = serde_json::from_value(receipt["blockHash"].clone())
+            .map_err(|_| anyhow::anyhow!("Missing receipt block hash"))?;
+        Ok(Some(Mark {
+            kind: MarkKind::Receipt,
+            number: quantity(&receipt["blockNumber"])?,
+            hash: block.to_string(),
+            reference: hash.to_owned(),
+            created: crate::health::now()?,
+            status: Some(quantity(&receipt["status"])?),
+        }))
+    }
+    /// A mark of the decision head `decided`, for an action justified by the state the keeper read at it. Soft mode
+    /// only: finalized mode writes no marks, so an Arc keeper's journal is what it was.
+    fn mark_at(&self, kind: MarkKind, decided: &Head, reference: String) -> Result<Option<Mark>> {
+        if self.cfg.chain.finality_mode != FinalityMode::Soft {
+            return Ok(None);
+        }
+        Ok(Some(Mark {
+            kind,
+            number: decided.number,
+            hash: decided.hash.to_string(),
+            reference,
+            created: crate::health::now()?,
+            status: None,
+        }))
+    }
+    /// The `sign` mark of the transaction `hash`: the decision head the keeper signed it on.
+    fn sign_mark(&self, decided: &Head, hash: &str) -> Result<Option<Mark>> {
+        self.mark_at(MarkKind::Sign, decided, hash.to_owned())
+    }
+    /// The `nonce` mark of a nonce found consumed at the decision head `decided` that no endpoint served a receipt for.
+    fn nonce_mark(&self, decided: &Head, nonce: i64) -> Result<Option<Mark>> {
+        self.mark_at(MarkKind::Nonce, decided, nonce.to_string())
+    }
+    /// Soft mode: check the blocks the keeper acted on against L1 finality, when the interval has passed since the last
+    /// audit (and at the first tick). Finalized mode returns at once and asks the chain nothing.
+    ///
+    /// The audit reads the `finalized` header and the hashes of the marked blocks below it within `AUDIT_BUDGET`; what
+    /// it cannot read in that time, or at all, is the next interval's, and the tick goes on. Marks audited are in the
+    /// journal; a mismatch it finds is suspected, and the endpoints are asked about it before anything is recorded. Only
+    /// the journal failing fails the tick. While a mismatch is suspected the audit waits for it. The lag of the audit
+    /// is observed on every audit, whatever it read.
+    async fn audit_finality(&self) -> Result<()> {
+        if self.cfg.chain.finality_mode != FinalityMode::Soft || self.suspected()? {
+            return Ok(());
+        }
+        {
+            let mut due = self
+                .finality_audit_due
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Finality audit lock poisoned"))?;
+            let now = tokio::time::Instant::now();
+            if due.is_some_and(|due| now < due) {
+                return Ok(());
+            }
+            *due = Some(
+                now + std::time::Duration::from_secs(
+                    self.cfg.chain.finality_audit_interval_seconds,
+                ),
+            );
+        }
+        let now = crate::health::now()?;
+        match crate::finality::audit(&self.rpc, &self.journal, now, crate::finality::AUDIT_BUDGET)
+            .await
+        {
+            Ok(Some(crate::journal::Audit::Mismatch(found))) => {
+                crate::finality::report(&crate::journal::Audit::Mismatch(found.clone()));
+                self.suspect(
+                    found,
+                    "The finality audit found a marked block with another hash",
+                )
+                .await?;
+            }
+            Ok(Some(audit)) => crate::finality::report(&audit),
+            Ok(None) => tracing::debug!("Finality audit yielded at its budget"),
+            Err(error) if error.downcast_ref::<sqlx::Error>().is_some() => return Err(error),
+            Err(error) => {
+                tracing::warn!(error=%error,"Finality audit deferred; retrying at the next interval");
+            }
+        }
+        crate::finality::observe_lag(
+            &self.journal,
+            self.cfg.chain.finality_audit_max_lag_seconds,
+            now,
+        )
+        .await?;
+        Ok(())
+    }
+    /// Soft mode: bring the tick in line with the finality incident, if there is one. Finalized mode has none and returns
+    /// at once.
+    ///
+    /// - Nothing suspected and nothing on record: the tick goes on as ever.
+    /// - A mismatch suspected and not settled by the endpoints (`settle_suspicion`): the tick goes on with reads only.
+    ///   `may_send` is false from here to the end of the tick, and the places that sign or broadcast refuse as well.
+    /// - A mismatch on record: the recovery takes its next step by itself (see `recovery`); nobody's word is waited for.
+    ///   It clears the record when the nonce lane, the marks, the jobs and the epochs agree with the chain as it is now,
+    ///   tells the owner once that it did and that nothing is required of them, and the tick then goes on as if there
+    ///   never was a record.
+    ///
+    /// Only a failure of the journal fails the tick. A recovery that fails this time tries again at the next one; when it
+    /// keeps failing, the owner is asked once to act (`suspicion::PAGE_AFTER`).
+    async fn finality_gate(&self, head: &Head) -> Result<()> {
+        if self.cfg.chain.finality_mode != FinalityMode::Soft {
+            return Ok(());
+        }
+        self.page_single_endpoint().await?;
+        let state = self.journal.finality_state().await?;
+        let suspected = self.suspected()?;
+        self.finality_open.store(
+            suspected || !matches!(state, FinalityState::Clear),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let FinalityState::Recovering(incident, ack) = &state else {
+            self.recovery_lane
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            // The note of a suspicion that is settled, or that a process before a restart left.
+            if !suspected {
+                self.journal.clear_suspicion_note().await?;
+            }
+            return Ok(());
+        };
+        match self.recover_finality(head, incident, ack.as_ref()).await {
+            Ok(Recovery::Working) => self.recovery_succeeded().await?,
+            Ok(Recovery::Cleared { resent }) => {
+                self.finality_open
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                self.recovery_lane
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Some(notifier) = &self.telegram {
+                    notifier.notify(crate::telegram::Event::Finality(recovery::recovered_text(
+                        self.cfg.chain_id,
+                        incident,
+                        resent,
+                    )));
+                }
+            }
+            Err(error) if error.downcast_ref::<sqlx::Error>().is_some() => return Err(error),
+            Err(error) => {
+                tracing::warn!(error=%error,mismatch=%incident.id(),"Finality recovery deferred; trying again at the next tick");
+                self.recovery_failed(incident, &error).await?;
+            }
+        }
+        Ok(())
     }
     pub async fn tick(&self) -> Result<()> {
         // Preparation never extends past this point; the rest of the tick stays for settlement.
         let tick_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(self.cfg.tick_timeout_seconds * 800);
-        self.verify_runtime_if_due().await?;
-        self.check_authorization_if_due(self.open_work().await?)
-            .await?;
-        let head = self.finalized_head_checked().await?;
-        self.last_finalized
+        let busy = self.open_work().await?;
+        self.verify_runtime_if_due(busy).await?;
+        self.check_authorization_if_due(busy).await?;
+        if self.lane.kind() == CoordinatorKind::Round {
+            self.readmit_endpoints();
+        }
+        // Before anything is decided or sent: what the last ticks acted on is checked against L1 finality first.
+        self.audit_finality().await?;
+        let head = self.decision_head_checked().await?;
+        // A round keeper measures a request's sealing lag from when its block's header first arrived: a decision head is
+        // one this keeper has just read.
+        if self.lane.kind() == CoordinatorKind::Round {
+            self.signals
+                .header(head.number, head.timestamp, crate::events::now_ms());
+        }
+        self.last_decided
             .fetch_max(head.number, std::sync::atomic::Ordering::SeqCst);
         self.observe_primary(&head).await?;
-        self.journal
-            .finalized_checkpoint(head.number, &head.hash.to_string())
-            .await?;
+        // A mismatch suspected or on record, from the audit above or the checkpoint check, holds everything that sends new
+        // work from here on.
+        self.finality_gate(&head).await?;
+        self.checkpoint_decision(&head).await?;
         // Settlement must run before any potentially large discovery backlog.
         let lane_busy = self.reconcile(&head).await.inspect_err(|_| {
             self.notify_error(crate::telegram::ErrorClass::ReceiptRecovery);
@@ -1543,27 +2724,69 @@ impl Worker {
             || self.sweep(&head).await.inspect_err(|_| {
                 self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
             })?;
-        self.journal.compact_history(crate::health::now()?).await?;
+        self.journal
+            .compact_history_for(crate::health::now()?, self.cfg.chain.finality_mode)
+            .await?;
         self.journal
             .expire_unstarted(head.timestamp.try_into()?)
             .await?;
+        // A round coordinator's keeper reads a request again only once its round is verified, so the oldest open ones
+        // are read again first: one that another keeper served, or that was refunded, is settled before its round is due.
+        if self.lane.kind() == CoordinatorKind::Round {
+            self.track_round_requests(&head).await?;
+        }
         // Discover funded demand before deciding whether any epoch should be published.
         let budget = std::time::Duration::from_millis(self.cfg.tick_timeout_seconds * 250);
         match tokio::time::timeout(budget, self.discover(&head)).await {
             Ok(result) => result?,
             Err(_) => tracing::debug!("Discovery yielded at its tick budget"),
         }
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => {
+                self.epoch_lane(publisher, &head, lane_busy, tick_deadline)
+                    .await?
+            }
+            Lane::Round(lane) => {
+                self.round_lane(lane, &head, lane_busy, tick_deadline)
+                    .await?;
+            }
+        }
+        self.check_lane_health().await?;
+        Ok(())
+    }
+    /// The rest of an epoch coordinator's tick after discovery: the epoch lane (refresh, poll, publish), then the
+    /// preparation and the fulfillments of requests whose epoch is published. Exactly the tick of 0.4.1.
+    async fn epoch_lane(
+        &self,
+        epoch: &crate::epoch::Publisher,
+        head: &Head,
+        lane_busy: bool,
+        tick_deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        if self.may_send() {
+            // Bounded like the epoch preparation below: a slow registry read must not consume the tick.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.refresh_blocked_beacons(head),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error=%error,"Blocked beacon epoch not refreshed; retrying next tick");
+                }
+                Err(_) => tracing::debug!("Blocked beacon refresh yielded"),
+            }
+        }
         let demand: Option<i64> = sqlx::query_scalar("SELECT epoch_demand.epoch FROM epoch_demand JOIN jobs ON jobs.id=epoch_demand.job LEFT JOIN epoch_work ON epoch_work.epoch=epoch_demand.epoch AND epoch_work.registry=? AND epoch_work.catalog=? WHERE jobs.state IN ('pending','prepared','signed','submitted') AND jobs.deadline>? AND (epoch_work.state IS NULL OR epoch_work.state IN ('pending','prepared','signed','submitted') OR (epoch_work.state='blocked' AND epoch_work.api IS NULL AND epoch_work.fallback<epoch_work.sources-1)) ORDER BY jobs.deadline LIMIT 1")
-            .bind(self.epoch.registry.to_string()).bind(self.epoch.catalog.to_string()).bind(i64::try_from(head.timestamp.saturating_add(self.cfg.margin))?).fetch_optional(&self.journal.pool).await?;
+            .bind(epoch.registry.to_string()).bind(epoch.catalog.to_string()).bind(i64::try_from(head.timestamp.saturating_add(self.cfg.margin))?).fetch_optional(&self.journal.pool).await?;
         let ready = {
-            let epoch = &self.epoch;
             match tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 epoch.poll(
                     &self.rpc,
                     &self.journal.pool,
-                    &head,
-                    self.cfg.api_override.clone(),
+                    head,
                     demand.map(u64::try_from).transpose()?,
                 ),
             )
@@ -1630,7 +2853,7 @@ impl Worker {
             sent = !self.journal.unresolved().await?.is_empty();
         }
         if self.cfg.send {
-            self.observe_epoch_demand(&head).await?;
+            self.observe_epoch_demand(head).await?;
         }
         let mut send_budget = std::time::Duration::from_millis(self.cfg.tick_timeout_seconds * 250);
         if self.may_send() && !lane_busy && !sent {
@@ -1651,7 +2874,6 @@ impl Worker {
                 self.service_prepared(&mut send_budget).await?;
             }
         }
-        self.check_lane_health().await?;
         Ok(())
     }
     async fn service_prepared(&self, budget: &mut std::time::Duration) -> Result<bool> {
@@ -1880,6 +3102,11 @@ impl Worker {
         attempted: &mut Vec<String>,
         journaled: &std::sync::atomic::AtomicUsize,
     ) -> Result<()> {
+        if let Lane::Round(lane) = &self.lane {
+            return self
+                .prepare_round_batch(lane, excluded, attempted, journaled)
+                .await;
+        }
         let waiting: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE state='pending' AND call IS NULL)",
         )
@@ -1888,7 +3115,7 @@ impl Worker {
         if waiting == 0 {
             return Ok(());
         }
-        let head = self.rpc.finalized_head().await?;
+        let head = self.rpc.decision_head().await?;
         let now = head.timestamp;
         let wall_millis: u64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -1965,31 +3192,24 @@ impl Worker {
         Ok(())
     }
     async fn discover(&self, head: &Head) -> Result<()> {
-        self.journal
-            .finalized_checkpoint(head.number, &head.hash.to_string())
-            .await?;
-        let end: u64 = self
-            .rpc
-            .call_at(self.cfg.coordinator, C::nextRequestIdCall {}, head.number)
-            .await?
-            .try_into()?;
+        self.checkpoint_decision(head).await?;
+        let end = self.next_request_id_at(head.number).await?;
         let mut cursor: u64 = self
             .journal
             .meta("cursor")
             .await?
             .unwrap_or_else(|| "1".into())
             .parse()?;
+        if self.lane.kind() == CoordinatorKind::Round {
+            cursor = self.vanished_cursor(cursor, end, head).await?;
+        }
         if end.saturating_sub(cursor) > 256
-            && self
-                .request_at(U256::from(cursor), head.number)
-                .await?
-                .deadline
-                < head.timestamp
+            && self.deadline_at(U256::from(cursor), head.number).await? < head.timestamp
         {
             cursor += 1;
             self.journal.cursor(&cursor.to_string()).await?;
             let lower = live_lower_bound_from(cursor, end, head.timestamp, |id| async move {
-                let deadline = self.request_at(U256::from(id), head.number).await?.deadline;
+                let deadline = self.deadline_at(U256::from(id), head.number).await?;
                 // Every expired midpoint proves the whole earlier prefix expired.
                 // Save that safe progress even if the search budget ends next RPC.
                 if deadline < head.timestamp {
@@ -2003,37 +3223,35 @@ impl Worker {
         if cursor >= end {
             return Ok(());
         }
-        let call = C::getPendingRequestIdsCall {
-            fromId: U256::from(cursor),
-            limit: U256::from(256),
-        };
+        let call = self.pending_ids_call(cursor);
         let mut page = self
             .rpc
-            .call_at(self.cfg.coordinator, call.clone(), head.number)
+            .request_as(
+                "eth_call",
+                json!([{"to":self.cfg.coordinator,"data":call.clone()},format!("0x{:x}",head.number)]),
+                |value| self.pending_ids_page(value),
+            )
             .await?;
-        let mut next: u64 = page.nextCursor.try_into()?;
-        if !discovery_page_advances(cursor, next, &page.ids)? {
+        let mut next: u64 = page.1.try_into()?;
+        if !discovery_page_advances(cursor, next, &page.0)? {
             // All URLs here passed startup chain/code verification. A stale success
             // does not trigger transport failover, so explicitly seek a fresh page.
-            for url in &self.rpc.urls {
+            for url in &self.rpc.admitted_urls() {
                 // An endpoint that does not answer, or answers with a page that does not decode, is passed over.
                 let Ok(candidate) = self
                     .rpc
                     .at(
                         url,
                         "eth_call",
-                        json!([{"to":self.cfg.coordinator,"data":Bytes::from(call.abi_encode())},format!("0x{:x}",head.number)]),
+                        json!([{"to":self.cfg.coordinator,"data":call.clone()},format!("0x{:x}",head.number)]),
                     )
                     .await
-                    .and_then(|value| {
-                        let bytes: Bytes = serde_json::from_value(value)?;
-                        Ok(C::getPendingRequestIdsCall::abi_decode_returns(&bytes)?)
-                    })
+                    .and_then(|value| self.pending_ids_page(value))
                 else {
                     continue;
                 };
-                let candidate_next: u64 = candidate.nextCursor.try_into()?;
-                if discovery_page_advances(cursor, candidate_next, &candidate.ids)? {
+                let candidate_next: u64 = candidate.1.try_into()?;
+                if discovery_page_advances(cursor, candidate_next, &candidate.0)? {
                     page = candidate;
                     next = candidate_next;
                     break;
@@ -2047,7 +3265,11 @@ impl Worker {
         // Slices are read in order, one batched request each, and committed id by id: the cursor only ever
         // covers a contiguous prefix of read requests, so a slow or failed slice cannot be skipped.
         let tag = format!("0x{:x}", head.number);
-        for slice in page.ids.chunks(REQUEST_BATCH) {
+        for slice in page.0.chunks(REQUEST_BATCH) {
+            if self.lane.kind() == CoordinatorKind::Round {
+                self.discover_rounds(slice, &tag, head).await?;
+                continue;
+            }
             for (id, r) in slice.iter().zip(self.requests_in(slice, &tag).await?) {
                 let id: u64 = (*id).try_into()?;
                 let next_id = (id + 1).to_string();
@@ -2079,7 +3301,14 @@ impl Worker {
         // The coordinator serves the proof input only from the target block plus confirmationBlocks
         // on, and reverts before: asking earlier costs a revert on every endpoint. With the epoch
         // published, the request read at `head` already names its target block.
-        if head.number < request.targetBlock.saturating_add(self.confirmation_blocks) {
+        let confirmation_blocks = match &self.lane {
+            Lane::Epoch {
+                confirmation_blocks,
+                ..
+            } => *confirmation_blocks,
+            Lane::Round(_) => bail!("A round coordinator's requests are prepared by its own lane"),
+        };
+        if head.number < request.targetBlock.saturating_add(confirmation_blocks) {
             tracing::debug!(request_id=%job.id,target_block=request.targetBlock,finalized=head.number,"Proof input not readable before the target block is confirmed");
             return Ok(false);
         }
@@ -2093,7 +3322,7 @@ impl Worker {
             "Proof context deadline does not match the request"
         );
         if context.fulfilled || context.refunded {
-            // Settled by another submitter since `head`: the next finalized read classifies it.
+            // Settled by another submitter since `head`: the next tick's read of the decision head classifies it.
             tracing::debug!(request_id=%job.id,"Request settled before its proof was prepared");
             return Ok(false);
         }
@@ -2130,6 +3359,9 @@ impl Worker {
         Ok(true)
     }
     async fn send_prepared(&self, id: &str) -> Result<()> {
+        if let Lane::Round(_) = &self.lane {
+            return self.send_round_prepared(id).await;
+        }
         let Some(job) = self.journal.job(id).await? else {
             return Ok(());
         };
@@ -2139,7 +3371,7 @@ impl Worker {
         // Estimation is not a send: the pins are verified after it, immediately before signing.
         let (request, head, latest, pending) = tokio::try_join!(
             self.request(id.parse()?),
-            self.rpc.finalized_head(),
+            self.rpc.decision_head(),
             self.rpc.nonce(self.tx_key.address(), "latest"),
             self.rpc.nonce(self.tx_key.address(), "pending"),
         )?;
@@ -2178,8 +3410,8 @@ impl Worker {
             Ok(gas) => gas,
             Err(error) if crate::rpc::is_delivery_failure(&error) => {
                 if crate::rpc::is_node_error_response(&error) {
-                    // Another keeper or submitter may have settled the request since the finalized read:
-                    // that is not a rejection of this proof. Finalized state classifies it next tick.
+                    // Another keeper or submitter may have settled the request since the decision head was read:
+                    // that is not a rejection of this proof. The decision head classifies it next tick.
                     if self.settled_at_latest(id).await? {
                         tracing::info!(request_id=%id,role=self.cfg.role.name(),"Request already settled by another submitter; nothing to send");
                         return Ok(());
@@ -2193,8 +3425,13 @@ impl Worker {
             Err(error) => return Err(error),
         };
         let used = gas;
-        // Never below the request's floor: never under-provisioned to fit a cap.
-        let gas = fulfillment_gas(used, &[request.callbackGasLimit])?;
+        // Never below the request's floor, which holds this payload's L1 component on an Arbitrum chain: never
+        // under-provisioned to fit a cap.
+        let l1 = self
+            .l1_gas(self.cfg.coordinator, &call)
+            .await
+            .map_err(deferred)?;
+        let gas = fulfillment_gas_l1(used, &[request.callbackGasLimit], l1)?;
         if let Some(exceeded) = self.gas_over_budget(gas) {
             return Err(SendDeferred::budget(exceeded).into());
         }
@@ -2236,7 +3473,7 @@ impl Worker {
         if let Some(exceeded) = self.over_budget(&plan) {
             return Err(SendDeferred::budget(exceeded).into());
         }
-        self.sign_and_journal(id, plan, now).await?;
+        self.sign_and_journal(id, plan, now, &head).await?;
         self.broadcast_latest(now).await
     }
     /// One fulfillRandomnessBatch for the earliest-deadline prepared requests. Each member
@@ -2245,9 +3482,12 @@ impl Worker {
     /// is estimated, and one that still exceeds a cap after its estimate shrinks to the members
     /// that fit.
     async fn send_prepared_batch(&self, candidates: &[Job]) -> Result<BatchOutcome> {
+        if let Lane::Round(_) = &self.lane {
+            return self.send_round_batch(candidates).await;
+        }
         // Estimation is not a send: the pins are verified after it, immediately before signing.
         let (head, latest, pending) = tokio::try_join!(
-            self.rpc.finalized_head(),
+            self.rpc.decision_head(),
             self.rpc.nonce(self.tx_key.address(), "latest"),
             self.rpc.nonce(self.tx_key.address(), "pending"),
         )?;
@@ -2257,10 +3497,10 @@ impl Worker {
             .map(|job| job.id.parse())
             .collect::<std::result::Result<Vec<U256>, _>>()?;
         let mut members = Vec::new();
-        for (job, request) in candidates
-            .iter()
-            .zip(self.requests_in(&ids, "finalized").await?)
-        {
+        for (job, request) in candidates.iter().zip(
+            self.requests_in(&ids, &self.rpc.decision_tag(&head))
+                .await?,
+        ) {
             if let Some(state) = terminal(&request, head.timestamp) {
                 if request.fulfilled && !request.delivered {
                     crate::audit::callback_failed(&self.journal.pool, &job.id).await?;
@@ -2346,7 +3586,10 @@ impl Worker {
         // that much gas and sent one request at a time.
         let cap = gas_cap(self.cfg.max_gas, self.cfg.max_cost, fee);
         let limits: Vec<u32> = members.iter().map(|member| member.callback_gas).collect();
-        let fit = members_within(0, &limits, cap);
+        // On an Arbitrum chain every member also brings its share of the candidate payload's L1 component, read once
+        // here; the payload that is finally estimated is checked with its own.
+        let candidate_l1 = self.batch_l1(&members).await.map_err(deferred)?;
+        let fit = members_within_l1(0, &limits, cap, candidate_l1.div_ceil(members.len() as u64));
         if fit < members.len() {
             if fit < 2 {
                 tracing::warn!(
@@ -2399,9 +3642,13 @@ impl Worker {
             };
             let used = gas;
             // Never below the members' floor, so no callback can leave a later member short of
-            // the coordinator's gas check (see fulfillment_gas).
+            // the coordinator's gas check (see fulfillment_gas_l1).
             let limits: Vec<u32> = members.iter().map(|member| member.callback_gas).collect();
-            let gas = fulfillment_gas(used, &limits)?;
+            let l1 = self
+                .l1_gas(self.cfg.coordinator, &payload)
+                .await
+                .map_err(deferred)?;
+            let gas = fulfillment_gas_l1(used, &limits, l1)?;
             let plan = TxPlan {
                 nonce: latest,
                 gas,
@@ -2416,7 +3663,8 @@ impl Worker {
             {
                 // A batch that does not fit is shrunk, never under-provisioned: it keeps the
                 // earliest members that fit the caps above their floor.
-                let fit = members_within(used, &limits, cap).min(members.len() - 1);
+                let fit = members_within_l1(used, &limits, cap, l1.div_ceil(members.len() as u64))
+                    .min(members.len() - 1);
                 if fit >= 2 && shrinks < MAX_BATCH_SHRINKS {
                     shrinks += 1;
                     tracing::info!(members=members.len(),next=fit,exceeded=%exceeded,"Batch exceeds a configured cap; shrinking it to the members that fit");
@@ -2464,7 +3712,8 @@ impl Worker {
         };
         let ids: Vec<String> = members.iter().map(|member| member.id.clone()).collect();
         let key = crate::journal::batch_key(&ids)?;
-        self.sign_and_journal_members(&key, plan, now, &ids).await?;
+        self.sign_and_journal_members(&key, plan, now, &ids, &head)
+            .await?;
         self.broadcast_latest(now).await?;
         Ok(BatchOutcome::Sent)
     }
@@ -2476,27 +3725,60 @@ impl Worker {
             .collect::<std::result::Result<Vec<U256>, _>>()?;
         self.requests_in(&ids, &format!("0x{number:x}")).await
     }
-    /// Current chain state of every member, in journal order.
-    async fn member_requests(&self, members: &[String]) -> Result<Vec<Request>> {
+    /// The settlement of every member at the block the keeper decides on, in journal order, from whichever coordinator the
+    /// keeper serves.
+    async fn member_statuses(&self, members: &[String]) -> Result<Vec<Status>> {
         let ids = members
             .iter()
             .map(|id| id.parse())
             .collect::<std::result::Result<Vec<U256>, _>>()?;
-        self.requests_in(&ids, "finalized").await
+        let tag = match self.lane.kind() {
+            CoordinatorKind::Epoch => self.rpc.current_decision_tag().await?,
+            // A round coordinator's requests are read at a block number, never at `latest` (review M1).
+            CoordinatorKind::Round => self.rpc.decision_tag(&self.rpc.decision_head().await?),
+        };
+        self.statuses_in(&ids, &tag).await
     }
+    /// `member_statuses` at the decision head of a tick, for a round coordinator; as `member_statuses` for an epoch
+    /// coordinator.
+    async fn member_statuses_at(&self, members: &[String], head: &Head) -> Result<Vec<Status>> {
+        if self.lane.kind() == CoordinatorKind::Epoch {
+            return self.member_statuses(members).await;
+        }
+        let ids = members
+            .iter()
+            .map(|id| id.parse())
+            .collect::<std::result::Result<Vec<U256>, _>>()?;
+        self.statuses_in(&ids, &self.rpc.decision_tag(head)).await
+    }
+    /// Let an epoch source fetch in flight save its packet, or a round coordinator's round fetches in flight write
+    /// their outcome.
     pub async fn stop_epoch_fetch(&self) -> Result<()> {
-        self.epoch.finish_fetch().await?;
+        match &self.lane {
+            Lane::Epoch { publisher, .. } => publisher.finish_fetch().await?,
+            Lane::Round(lane) => lane.finish_fetches().await?,
+        }
         Ok(())
+    }
+    /// The round lane of a round coordinator's keeper.
+    #[cfg(test)]
+    pub(crate) fn round_lane_of(&self) -> Option<&crate::round::Lane> {
+        match &self.lane {
+            Lane::Round(lane) => Some(lane),
+            Lane::Epoch { .. } => None,
+        }
     }
     /// Health stage `epoch`: live paid demand stuck on blocked or stale epoch work. It clears
     /// as soon as no such demand remains, after publication or once the demand expires.
     async fn observe_epoch_demand(&self, head: &Head) -> Result<()> {
+        let epoch = self.epoch()?;
         let stalled = stalled_epoch_demand(
             &self.journal.pool,
-            self.epoch.registry,
-            self.epoch.catalog,
+            epoch.registry,
+            epoch.catalog,
             head,
             self.cfg.margin,
+            crate::health::now()?,
         )
         .await?;
         let Some((key, reason)) = stalled else {
@@ -2506,7 +3788,7 @@ impl Worker {
         crate::health::blocked(&self.journal, "epoch", crate::health::now()?).await?;
         self.notify_error(crate::telegram::ErrorClass::EpochPreparation);
         if first {
-            tracing::error!(epoch_key=%key,reason,"Live paid demand cannot be published: epoch work is blocked or its saved packet is too old; inspect the selected source gateway");
+            tracing::error!(epoch_key=%key,reason,"Live paid demand cannot be published: epoch work is blocked (unsupported_recipe: its recipe is a signed API recipe, which keepers do not support since 0.4.1), its saved packet is too old or its beacon round cannot be fetched; inspect the catalog's recipes, the drand relays (beacon_unavailable) or the RPC endpoints (beacon_rpc_error)");
         }
         Ok(())
     }
@@ -2540,7 +3822,7 @@ impl Worker {
         Ok(None)
     }
     async fn send_epoch(&self, work: &crate::epoch::Work) -> Result<()> {
-        let epoch = &self.epoch;
+        let epoch = self.epoch()?;
         ensure!(
             epoch.key(work.epoch) == work.key,
             "Epoch registry identity mismatch"
@@ -2560,7 +3842,7 @@ impl Worker {
         // Independent preflight observations share one RPC round. They authorize only
         // estimation; exact implementations and actual demand are checked again before signing.
         let (head, record, latest, pending) = tokio::try_join!(
-            self.rpc.finalized_head(),
+            self.rpc.decision_head(),
             self.rpc.call(
                 epoch.registry,
                 ER::getEpochCall {
@@ -2606,6 +3888,11 @@ impl Worker {
                 return Ok(());
             }
         }
+        // The one packet that is not final: a beacon round that aged out before any commit for it was signed is
+        // discarded, and the next tick prepares a current one.
+        if work.stale_beacon(head.timestamp) {
+            return self.refresh_stale_beacon(work, head.timestamp).await;
+        }
         let api: ApiProof = serde_json::from_str(
             work.api
                 .as_ref()
@@ -2648,7 +3935,7 @@ impl Worker {
                 if crate::rpc::is_node_error_response(&error)
                     && self.epoch_published_at_latest(work.epoch).await?
                 {
-                    // Another committer published first; finalized state marks the work committed next tick.
+                    // Another committer published first; the decision head marks the work committed next tick.
                     tracing::info!(epoch_key=%work.key,role=self.cfg.role.name(),"Epoch already published by another committer; nothing to send");
                     return Ok(());
                 }
@@ -2683,15 +3970,52 @@ impl Worker {
         if epoch_terminal(work, &fresh)?.is_some() {
             return Ok(());
         }
-        self.sign_and_journal(&work.key, plan, fresh.timestamp)
+        // The packet can age past the beacon bound during preflight; nothing is signed for it then.
+        if work.stale_beacon(fresh.timestamp) {
+            return self.refresh_stale_beacon(work, fresh.timestamp).await;
+        }
+        self.sign_and_journal(&work.key, plan, fresh.timestamp, &head)
             .await?;
         self.broadcast_latest(fresh.timestamp).await
+    }
+    /// Discard a stale beacon packet (see epoch::refresh_stale_beacon); the epoch is prepared again on the next tick.
+    async fn refresh_stale_beacon(&self, work: &crate::epoch::Work, now: u64) -> Result<()> {
+        if crate::epoch::refresh_stale_beacon(
+            &self.journal.pool,
+            &self.rpc,
+            self.epoch()?.registry,
+            work,
+            now,
+        )
+        .await?
+        {
+            tracing::info!(epoch_key=%work.key,max_age_seconds=crate::beacon::BEACON_MAX_AGE,"Saved beacon packet is too old, its epoch is unpublished and no commit for it is in flight; discarded, preparing a current round");
+        }
+        Ok(())
+    }
+    /// A commit cancelled at the freshness bound resolves its epoch to `blocked`, which send_epoch never sees: refresh
+    /// the stale beacon packet of blocked work that live paid demand waits on, so the demand below prepares it again.
+    async fn refresh_blocked_beacons(&self, head: &Head) -> Result<()> {
+        let epoch = self.epoch()?;
+        for work in crate::epoch::blocked_with_demand(
+            &self.journal.pool,
+            epoch.registry,
+            epoch.catalog,
+            head.timestamp.saturating_add(self.cfg.margin),
+        )
+        .await?
+        {
+            if work.stale_beacon(head.timestamp) {
+                self.refresh_stale_beacon(&work, head.timestamp).await?;
+            }
+        }
+        Ok(())
     }
     async fn reconcile_epoch(&self, attempts: &[Attempt], head: &Head) -> Result<bool> {
         let latest = attempts
             .last()
             .ok_or_else(|| anyhow::anyhow!("Missing epoch attempt"))?;
-        let epoch = &self.epoch;
+        let epoch = self.epoch()?;
         let work = crate::epoch::work(&self.journal.pool, &latest.job).await?;
         ensure!(
             epoch.key(work.epoch) == work.key,
@@ -2722,25 +4046,17 @@ impl Worker {
         };
         for a in attempts {
             if let Some(receipt) = self.rpc.receipt(&a.hash).await? {
-                if !self.rpc.receipt_is_finalized(&a.hash, &receipt).await? {
+                if !self.rpc.receipt_is_settled(&a.hash, &receipt).await? {
                     return Ok(true);
                 }
-                self.journal
-                    .finalized_receipt(
-                        &a.hash,
-                        quantity(&receipt["blockNumber"])?,
-                        receipt["blockHash"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
-                        quantity(&receipt["status"])?,
-                    )
-                    .await?;
+                let mark = self.record_receipt(&a.hash, &receipt).await?;
                 let status = quantity(&receipt["status"])?;
                 self.journal
-                    .resolve_nonce_epoch(
+                    .resolve_nonce_epoch_marked(
                         a.nonce,
                         &a.job,
                         epoch_resolved_state(terminal, &a.kind, status),
+                        mark.as_ref(),
                     )
                     .await?;
                 tracing::info!(epoch_key=%a.job,tx_hash=%a.hash,status,"Epoch receipt reconciled");
@@ -2758,10 +4074,16 @@ impl Worker {
                 return Ok(false);
             }
         }
-        if self.rpc.nonce(self.tx_key.address(), "finalized").await? > latest.nonce as u64 {
+        if self.rpc.decision_nonce(self.tx_key.address(), head).await? > latest.nonce as u64 {
             if record.epochHash != B256::ZERO {
+                let mark = self.nonce_mark(head, latest.nonce)?;
                 self.journal
-                    .resolve_nonce_epoch(latest.nonce, &latest.job, "committed")
+                    .resolve_nonce_epoch_marked(
+                        latest.nonce,
+                        &latest.job,
+                        "committed",
+                        mark.as_ref(),
+                    )
                     .await?;
                 return Ok(false);
             }
@@ -2770,7 +4092,8 @@ impl Worker {
             }
             bail!("Epoch nonce consumed without receipt or terminal registry state");
         }
-        if !self.cfg.send {
+        // Replacing, cancelling and rebroadcasting all sign or send: not while the keeper holds its sends.
+        if !self.cfg.send || self.sending_halted().await? {
             return Ok(true);
         }
         if terminal.is_some() && latest.kind != "epoch_cancel" {
@@ -2781,18 +4104,19 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.cancel_gas().await?;
             if self
                 .replace_within_budget(
                     &latest.job,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: 21000,
+                        gas,
                         fee,
                         priority,
                         payload: "0x".into(),
                         kind: "epoch_cancel".into(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?
             {
@@ -2811,18 +4135,19 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.replacement_gas(&latest.kind, latest.gas).await?;
             if self
                 .replace_within_budget(
                     &latest.job,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: latest.gas.try_into()?,
+                        gas,
                         fee,
                         priority,
                         payload: latest.payload.clone(),
                         kind: latest.kind.clone(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?
             {
@@ -2833,7 +4158,16 @@ impl Worker {
         }
         Ok(true)
     }
-    async fn sign_and_journal(&self, job: &str, plan: TxPlan, now: u64) -> Result<()> {
+    /// Sign `plan` and journal the signed bytes before anything is broadcast. `now` is the time it is stamped with;
+    /// `decided` is the decision head the keeper signed it on, which a soft keeper journals as the transaction's `sign`
+    /// mark in the same commit.
+    async fn sign_and_journal(
+        &self,
+        job: &str,
+        plan: TxPlan,
+        now: u64,
+        decided: &Head,
+    ) -> Result<()> {
         // A batch replacement re-signs the journaled member list; only the first attempt of
         // a batch passes its members explicitly (send_prepared_batch).
         let members = if plan.kind == "fulfill_batch" {
@@ -2841,7 +4175,7 @@ impl Worker {
         } else {
             Vec::new()
         };
-        self.sign_and_journal_members(job, plan, now, &members)
+        self.sign_and_journal_members(job, plan, now, &members, decided)
             .await
     }
     async fn sign_and_journal_members(
@@ -2850,8 +4184,11 @@ impl Worker {
         plan: TxPlan,
         now: u64,
         members: &[String],
+        decided: &Head,
     ) -> Result<()> {
         self.ensure_not_upgraded()?;
+        self.ensure_lane_sends()?;
+        self.ensure_not_halted().await?;
         ensure!(
             self.over_budget(&plan).is_none(),
             "Transaction exceeds fee/cost budget"
@@ -2867,7 +4204,7 @@ impl Worker {
         let to = if kind == "cancel" || kind == "epoch_cancel" {
             self.tx_key.address()
         } else if kind == "epoch" {
-            self.epoch.registry
+            self.epoch()?.registry
         } else {
             self.cfg.coordinator
         };
@@ -2902,17 +4239,22 @@ impl Worker {
             broadcast: 0,
         };
         // No await to a network broadcaster may occur before this commits.
+        let mark = self.sign_mark(decided, &a.hash)?;
         if a.kind == "fulfill_batch" {
-            self.journal.signed_batch(&a, members).await?;
+            self.journal
+                .signed_batch_marked(&a, members, mark.as_ref())
+                .await?;
         } else {
-            self.journal.signed(&a).await?;
+            self.journal.signed_marked(&a, mark.as_ref()).await?;
         }
         self.lane_started(a.nonce).await?;
         // An affordable signed send is the only evidence that clears a budget observation.
         crate::health::recovered(&self.journal, "fee_budget").await?;
         Ok(())
     }
-    async fn replace_within_budget(&self, job: &str, plan: TxPlan, now: u64) -> Result<bool> {
+    /// A replacement of the latest attempt of `job`, signed on the decision head `head` of this tick.
+    async fn replace_within_budget(&self, job: &str, plan: TxPlan, head: &Head) -> Result<bool> {
+        let now = head.timestamp;
         self.verify_runtime().await?;
         if let Some(exceeded) = self.over_budget(&plan) {
             // The nonce is retained for reconciliation; caps are never bypassed for recovery.
@@ -2929,7 +4271,7 @@ impl Worker {
             }
             fresh.timestamp
         } else if plan.kind == "fulfill" {
-            let request = self.request(job.parse()?).await?;
+            let request = self.current_status(job).await?;
             self.verify_runtime().await?;
             let fresh = self.rpc.head().await?;
             if !timely(&request, fresh.timestamp, self.cfg.margin) {
@@ -2939,7 +4281,7 @@ impl Worker {
         } else if plan.kind == "fulfill_batch" {
             // The identical payload is worth a higher fee while any member can still be served.
             let members = self.journal.batch_members(job).await?;
-            let requests = self.member_requests(&members).await?;
+            let requests = self.member_statuses(&members).await?;
             self.verify_runtime().await?;
             let fresh = self.rpc.head().await?;
             if !requests
@@ -2952,18 +4294,39 @@ impl Worker {
         } else {
             now
         };
-        self.sign_and_journal(job, plan, now).await?;
+        self.sign_and_journal(job, plan, now, head).await?;
         Ok(true)
     }
     /// Operator sweep (see crate::sweep). Returns whether the nonce lane is busy.
     async fn sweep(&self, head: &Head) -> Result<bool> {
+        // The nonce lane is the recovery's for now: a sweep beside it would be a second lane.
+        if self
+            .recovery_lane
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(true);
+        }
         if let Some(attempt) = crate::sweep::attempt(&self.journal.pool).await? {
             return self.reconcile_sweep(attempt, head).await;
         }
-        if !self.cfg.send {
+        // A queued sweep is new work, and starts neither while a mismatch is on record nor before it is recovered from.
+        if !self.cfg.send
+            || self
+                .finality_open
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Ok(false);
         }
         match crate::sweep::request(&self.journal.pool).await? {
+            // A round coordinator's keeper sends nothing before task K3, a sweep's transfer included.
+            Some(request) if !self.lane.sends() => {
+                self.refuse_sweep(
+                    &request,
+                    "A round coordinator's keeper sends nothing yet: queue the sweep again once it serves requests"
+                        .into(),
+                )
+                .await
+            }
             Some(request) => self.start_sweep(request, head).await,
             None => Ok(false),
         }
@@ -3001,10 +4364,18 @@ impl Worker {
             );
             return Ok(false);
         }
-        let recipient = self
-            .rpc
-            .call(self.cfg.coordinator, C::feeRecipientCall {})
-            .await?;
+        let recipient = match self.lane.kind() {
+            CoordinatorKind::Epoch => {
+                self.rpc
+                    .call(self.cfg.coordinator, C::feeRecipientCall {})
+                    .await?
+            }
+            CoordinatorKind::Round => {
+                self.rpc
+                    .call(self.cfg.coordinator, RC::feeRecipientCall {})
+                    .await?
+            }
+        };
         if recipient == Address::ZERO || recipient == wallet {
             return self
                 .refuse_sweep(
@@ -3053,15 +4424,30 @@ impl Worker {
                 .refuse_sweep(&request, format!("Transfer exceeds a fee cap: {exceeded}"))
                 .await;
         }
-        let reserve = U256::from(crate::sweep::MIN_RESERVE_WEI.max(self.cfg.max_cost));
+        // An epoch keeper keeps 1 USDC as 0.4.1 does; a round keeper the SWEEP_MIN_RESERVE_WEI its operator wrote down,
+        // in the chain's ETH.
+        let floor = match self.lane.kind() {
+            CoordinatorKind::Epoch => crate::sweep::MIN_RESERVE_WEI,
+            CoordinatorKind::Round => self.cfg.chain.sweep_min_reserve_wei,
+        };
+        let reserve = U256::from(floor.max(self.cfg.max_cost));
         let gas_cost = U256::from(plan.fee) * U256::from(plan.gas);
-        let value = match crate::sweep::plan(&request, balance, gas_cost, reserve) {
+        let value = match crate::sweep::plan(
+            &request,
+            balance,
+            gas_cost,
+            reserve,
+            crate::sweep::Unit::of(self.lane.kind()),
+        ) {
             Ok(value) => value,
             Err(detail) => return self.refuse_sweep(&request, detail).await,
         };
         // Fresh pins and committer authorization gate every signature, as for game work.
         self.verify_runtime().await?;
-        let signed = self.sign_transfer(&plan, recipient, value, crate::health::now()?)?;
+        let signed = self
+            .sign_transfer(&plan, recipient, value, crate::health::now()?)
+            .await?;
+        let mark = self.sign_mark(head, &signed.hash)?;
         let mut attempt = crate::sweep::Attempt {
             request,
             nonce: latest,
@@ -3070,12 +4456,12 @@ impl Worker {
             txs: vec![signed],
         };
         // No broadcast may happen before the signed transfer is committed.
-        crate::sweep::start(&self.journal.pool, &attempt).await?;
+        crate::sweep::start_marked(&self.journal.pool, &attempt, mark.as_ref()).await?;
         tracing::info!(nonce = latest, to = %recipient, value = %value, tx_hash = %attempt.txs[0].hash, "Operator sweep signed and journaled");
         self.broadcast_sweep(&mut attempt).await?;
         Ok(true)
     }
-    fn sign_transfer(
+    async fn sign_transfer(
         &self,
         plan: &TxPlan,
         to: Address,
@@ -3083,6 +4469,8 @@ impl Worker {
         now: u64,
     ) -> Result<crate::sweep::SignedTx> {
         self.ensure_not_upgraded()?;
+        self.ensure_lane_sends()?;
+        self.ensure_not_halted().await?;
         let tx = TxEip1559 {
             chain_id: self.cfg.chain_id,
             nonce: plan.nonce,
@@ -3108,6 +4496,8 @@ impl Worker {
         })
     }
     async fn broadcast_sweep(&self, attempt: &mut crate::sweep::Attempt) -> Result<()> {
+        // Nothing is broadcast while the keeper holds its sends, before even the bookkeeping of the broadcast.
+        self.ensure_not_halted().await?;
         // Every broadcast, a retry included, passes the runtime pins immediately before it.
         self.verify_runtime().await?;
         let last = attempt
@@ -3138,7 +4528,7 @@ impl Worker {
             let Some(receipt) = self.rpc.receipt(&tx.hash).await? else {
                 continue;
             };
-            if !self.rpc.receipt_is_finalized(&tx.hash, &receipt).await? {
+            if !self.rpc.receipt_is_settled(&tx.hash, &receipt).await? {
                 return Ok(true);
             }
             let state = match (tx.kind.as_str(), quantity(&receipt["status"])?) {
@@ -3156,13 +4546,17 @@ impl Worker {
                 requested_at: attempt.request.requested_at,
                 finished_at: crate::health::now()?,
             };
-            crate::sweep::finish(&self.journal.pool, attempt.nonce, &outcome).await?;
+            let mark = self.receipt_mark(&tx.hash, &receipt)?;
+            crate::sweep::finish_marked(&self.journal.pool, attempt.nonce, &outcome, mark.as_ref())
+                .await?;
             tracing::info!(state, nonce = attempt.nonce, to = %attempt.to, value = %value, tx_hash = %tx.hash, "Operator sweep resolved");
             if let Some(notifier) = &self.telegram {
+                let unit = crate::sweep::Unit::of(self.lane.kind());
                 notifier.notify(crate::telegram::Event::Sweep(match state {
                     "sent" => format!(
-                        "Keeper sweep sent: {} USDC to {}\nTransaction: {}",
-                        crate::sweep::format_usdc(value),
+                        "Keeper sweep sent: {} {} to {}\nTransaction: {}",
+                        unit.format(value),
+                        unit.symbol(),
                         attempt.to,
                         tx.hash
                     ),
@@ -3181,7 +4575,7 @@ impl Worker {
             .ok_or_else(|| anyhow::anyhow!("Sweep attempt has no transaction"))?;
         let now = crate::health::now()?;
         let wallet = self.tx_key.address();
-        if self.rpc.nonce(wallet, "finalized").await? > attempt.nonce {
+        if self.rpc.decision_nonce(wallet, head).await? > attempt.nonce {
             if now.saturating_sub(last.broadcast.max(last.created))
                 < RECEIPT_VISIBILITY_GRACE_SECONDS
             {
@@ -3191,7 +4585,8 @@ impl Worker {
                 "Sweep nonce consumed but no sweep receipt found; dedicated-wallet conflict needs inspection"
             );
         }
-        if !self.cfg.send {
+        // Replacing, cancelling and rebroadcasting all sign or send: not while the keeper holds its sends.
+        if !self.cfg.send || self.sending_halted().await? {
             return Ok(true);
         }
         if now.saturating_sub(last.created) >= crate::sweep::REPLACE_AFTER_SECONDS {
@@ -3206,7 +4601,7 @@ impl Worker {
                 )?;
                 let plan = TxPlan {
                     nonce: attempt.nonce,
-                    gas: 21000,
+                    gas: self.cancel_gas().await?,
                     fee,
                     priority,
                     payload: "0x".into(),
@@ -3217,11 +4612,11 @@ impl Worker {
                     return Ok(true);
                 }
                 self.verify_runtime().await?;
-                attempt
-                    .txs
-                    .push(self.sign_transfer(&plan, wallet, U256::ZERO, now)?);
+                let signed = self.sign_transfer(&plan, wallet, U256::ZERO, now).await?;
+                let mark = self.sign_mark(head, &signed.hash)?;
+                attempt.txs.push(signed);
                 // The replacement is committed before it is broadcast.
-                crate::sweep::save(&self.journal.pool, &attempt).await?;
+                crate::sweep::save_marked(&self.journal.pool, &attempt, mark.as_ref()).await?;
                 tracing::warn!(
                     nonce = attempt.nonce,
                     "Sweep not included; cancelling its nonce"
@@ -3237,6 +4632,8 @@ impl Worker {
         Ok(true)
     }
     async fn broadcast_latest(&self, observed_at: u64) -> Result<()> {
+        // Nothing is broadcast while the keeper holds its sends, before even the bookkeeping of the broadcast.
+        self.ensure_not_halted().await?;
         let Some(a) = self.journal.unresolved().await?.pop() else {
             return Ok(());
         };
@@ -3246,7 +4643,7 @@ impl Worker {
             .broadcast_attempt(a.id, now.try_into()?)
             .await?;
         if a.kind == "epoch" {
-            let epoch = &self.epoch;
+            let epoch = self.epoch()?;
             let work = crate::epoch::work(&self.journal.pool, &a.job).await?;
             ensure!(
                 epoch.key(work.epoch) == work.key,
@@ -3260,7 +4657,7 @@ impl Worker {
             }
         }
         if a.kind == "fulfill" {
-            let r = self.request(a.job.parse()?).await?;
+            let r = self.current_status(&a.job).await?;
             self.verify_runtime().await?;
             let now = self.rpc.head().await?.timestamp;
             if !timely(&r, now, self.cfg.margin) {
@@ -3272,7 +4669,7 @@ impl Worker {
             // still live and timely; once none is, only the nonce cancellation may go out.
             let members = self.journal.batch_members(&a.job).await?;
             ensure!(!members.is_empty(), "Batch members missing from journal");
-            let requests = self.member_requests(&members).await?;
+            let requests = self.member_statuses(&members).await?;
             self.verify_runtime().await?;
             let now = self.rpc.head().await?.timestamp;
             if !requests.iter().any(|r| timely(r, now, self.cfg.margin)) {
@@ -3283,9 +4680,17 @@ impl Worker {
             self.verify_runtime().await?;
         }
         self.ensure_not_upgraded()?;
+        self.ensure_not_halted().await?;
         let outcome = self.rpc.broadcast(&a.raw, a.hash.parse()?).await?;
         if let crate::rpc::BroadcastOutcome::Rejected(reason) = outcome {
             self.notify_error(crate::telegram::ErrorClass::TransactionSubmission);
+            if self.lane.kind() == CoordinatorKind::Round && reason == "insufficient_funds" {
+                let need = a
+                    .fee
+                    .parse::<u128>()?
+                    .saturating_mul(u128::try_from(a.gas)?);
+                self.funds_short(need).await?;
+            }
             crate::health::rejection(&self.journal, reason).await?;
             tracing::error!(work_id=%a.job,tx_hash=%a.hash,reason,"Node rejected transaction; signed nonce retained for reconciliation");
             return Ok(());
@@ -3356,37 +4761,41 @@ impl Worker {
         .await?;
         Ok(())
     }
-    /// Resolve a single request's nonce from the finalized receipt of attempt `a` and announce what it served.
+    /// Resolve a single request's nonce from the settled receipt of attempt `a` and announce what it served.
     async fn settle_receipt(
         &self,
         a: &Attempt,
         receipt: &serde_json::Value,
         head: &Head,
     ) -> Result<()> {
-        self.journal
-            .finalized_receipt(
-                &a.hash,
-                quantity(&receipt["blockNumber"])?,
-                receipt["blockHash"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
-                quantity(&receipt["status"])?,
-            )
-            .await?;
+        let mark = self.record_receipt(&a.hash, receipt).await?;
         let status = quantity(&receipt["status"])?;
         // Read at a fixed block no older than the receipt's: an endpoint that has not caught up with
         // it fails the read instead of answering with the state from before the transaction.
         let at = head.number.max(quantity(&receipt["blockNumber"])?);
-        let r = self.request_at(a.job.parse()?, at).await?;
+        // An epoch coordinator's request, which the proof feed announces; a round coordinator's settlement.
+        let (r, request) = match self.lane.kind() {
+            CoordinatorKind::Epoch => {
+                let request = self.request_at(a.job.parse()?, at).await?;
+                (Status::of(&request), Some(request))
+            }
+            CoordinatorKind::Round => (self.status_at(a.job.parse()?, at).await?, None),
+        };
         if r.fulfilled && !r.delivered {
             crate::audit::callback_failed(&self.journal.pool, &a.job).await?;
         }
+        // A round coordinator's live request whose fulfillment was cancelled (it had moved, review M2) is proved again,
+        // or sent again; it is not blocked.
+        let state = if self.lane.kind() == CoordinatorKind::Round
+            && a.kind == "cancel"
+            && terminal(&r, head.timestamp).is_none()
+        {
+            self.round_cancel_state(&a.job).await?
+        } else {
+            resolved_state(&r, head.timestamp, &a.kind, status)
+        };
         self.journal
-            .resolve_nonce_job(
-                a.nonce,
-                &a.job,
-                resolved_state(&r, head.timestamp, &a.kind, status),
-            )
+            .resolve_nonce_job_marked(a.nonce, &a.job, state, mark.as_ref())
             .await?;
         if status == 1
             && a.kind == "fulfill"
@@ -3404,9 +4813,10 @@ impl Worker {
             tracing::warn!(request_id=%a.job,tx_hash=%a.hash,"Follower served request {}",a.job);
         }
         if let Some(notifier) = &self.discord
+            && let Some(request) = &request
             && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
             && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                status, &a.kind, request_id, tx_hash, &r,
+                status, &a.kind, request_id, tx_hash, request,
             )
         {
             notifier.notify(proof);
@@ -3445,24 +4855,29 @@ impl Worker {
         }
         for a in &attempts {
             if let Some(receipt) = self.rpc.receipt(&a.hash).await? {
-                if !self.rpc.receipt_is_finalized(&a.hash, &receipt).await? {
+                if !self.rpc.receipt_is_settled(&a.hash, &receipt).await? {
                     return Ok(true);
                 }
                 self.settle_receipt(a, &receipt, head).await?;
                 return Ok(false);
             }
         }
-        let r = self.request(latest.job.parse()?).await?;
-        let terminal_state = terminal(&r, head.timestamp);
-        let chain_nonce = self.rpc.nonce(self.tx_key.address(), "finalized").await?;
+        let r = self.current_status_at(&latest.job, head).await?;
+        let job_deadline = self
+            .journal
+            .job(&latest.job)
+            .await?
+            .map_or(i64::MAX, |job| job.deadline);
+        let terminal_state = settled(&r, job_deadline, head.timestamp);
+        let chain_nonce = self.rpc.decision_nonce(self.tx_key.address(), head).await?;
         if chain_nonce > latest.nonce as u64 {
             // The nonce is used, so one of its attempts is in a block: an endpoint that has not caught up with that
-            // block answers null, and another one may already serve the final receipt with its notices.
+            // block answers null, and another one may already serve the settled receipt with its notices.
             let hashes: Vec<String> = attempts.iter().map(|a| a.hash.clone()).collect();
             if let Some((found, receipt)) = self.rpc.receipt_from_any(&hashes).await?
                 && self
                     .rpc
-                    .receipt_is_finalized(&attempts[found].hash, &receipt)
+                    .receipt_is_settled(&attempts[found].hash, &receipt)
                     .await?
             {
                 self.settle_receipt(&attempts[found], &receipt, head)
@@ -3474,8 +4889,9 @@ impl Worker {
                 if r.fulfilled && !r.delivered {
                     crate::audit::callback_failed(&self.journal.pool, &latest.job).await?;
                 }
+                let mark = self.nonce_mark(head, latest.nonce)?;
                 self.journal
-                    .resolve_nonce_job(latest.nonce, &latest.job, state)
+                    .resolve_nonce_job_marked(latest.nonce, &latest.job, state, mark.as_ref())
                     .await?;
                 tracing::info!(request_id=%latest.job,nonce=latest.nonce,state,"Used nonce resolved from chain state; no endpoint served its receipt");
                 return Ok(false);
@@ -3491,7 +4907,8 @@ impl Worker {
                 "Nonce consumed but no receipt or terminal request found; dedicated-wallet conflict needs inspection"
             );
         }
-        if !self.cfg.send {
+        // Replacing, cancelling and rebroadcasting all sign or send: not while the keeper holds its sends.
+        if !self.cfg.send || self.sending_halted().await? {
             return Ok(true);
         }
         if terminal_state.is_some() && latest.kind != "cancel" {
@@ -3503,23 +4920,27 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.cancel_gas().await?;
             if self
                 .replace_within_budget(
                     &latest.job,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: 21000,
+                        gas,
                         fee,
                         priority,
                         payload: "0x".into(),
                         kind: "cancel".into(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?
             {
                 self.broadcast_latest(head.timestamp).await?;
             }
+            return Ok(true);
+        }
+        if resend_due(latest, head.timestamp) && self.cancel_stale_round(latest, head).await? {
             return Ok(true);
         }
         if head.timestamp.saturating_sub(latest.created as u64) >= 10
@@ -3533,18 +4954,19 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.replacement_gas(&latest.kind, latest.gas).await?;
             let replaced = self
                 .replace_within_budget(
                     &latest.job,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: latest.gas.try_into()?,
+                        gas,
                         fee,
                         priority,
                         payload: latest.payload.clone(),
                         kind: latest.kind.clone(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?;
             if replaced || head.timestamp.saturating_sub(latest.broadcast as u64) >= 2 {
@@ -3556,7 +4978,7 @@ impl Worker {
         }
         Ok(true)
     }
-    /// Resolve every member of a batch nonce from the finalized receipt of attempt `a` and announce
+    /// Resolve every member of a batch nonce from the settled receipt of attempt `a` and announce
     /// the members it served.
     async fn settle_batch_receipt(
         &self,
@@ -3566,34 +4988,44 @@ impl Worker {
         head: &Head,
     ) -> Result<()> {
         let key = a.job.as_str();
-        self.journal
-            .finalized_receipt(
-                &a.hash,
-                quantity(&receipt["blockNumber"])?,
-                receipt["blockHash"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing receipt block hash"))?,
-                quantity(&receipt["status"])?,
-            )
-            .await?;
+        let mark = self.record_receipt(&a.hash, receipt).await?;
         let status = quantity(&receipt["status"])?;
-        // Read at a fixed block no older than the receipt's, as for a single fulfillment.
+        // Read at a fixed block no older than the receipt's, as for a single fulfillment. An epoch coordinator's requests,
+        // which the proof feed announces; a round coordinator's settlements.
         let at = head.number.max(quantity(&receipt["blockNumber"])?);
-        let requests = self.member_requests_at(members, at).await?;
+        let (requests, announced) = match self.lane.kind() {
+            CoordinatorKind::Epoch => {
+                let read = self.member_requests_at(members, at).await?;
+                (read.iter().map(Status::of).collect::<Vec<_>>(), Some(read))
+            }
+            CoordinatorKind::Round => {
+                let ids = members
+                    .iter()
+                    .map(|id| id.parse())
+                    .collect::<std::result::Result<Vec<U256>, _>>()?;
+                (self.statuses_in(&ids, &format!("0x{at:x}")).await?, None)
+            }
+        };
         let mut states = Vec::with_capacity(members.len());
         for (id, r) in members.iter().zip(&requests) {
             if r.fulfilled && !r.delivered {
                 crate::audit::callback_failed(&self.journal.pool, id).await?;
             }
-            states.push((
-                id.clone(),
-                batch_member_state(r, head.timestamp, &a.kind, status),
-            ));
+            // As for a single: a live member of a cancelled round batch is proved again or sent again (review M2).
+            let state = if self.lane.kind() == CoordinatorKind::Round
+                && a.kind == "cancel"
+                && terminal(r, head.timestamp).is_none()
+            {
+                self.round_cancel_state(id).await?
+            } else {
+                batch_member_state(r, head.timestamp, &a.kind, status)
+            };
+            states.push((id.clone(), state));
         }
         // The journal returns a reverted batch's live members to `prepared`, out of later
         // batches and due at once, in the same commit that resolves the nonce.
         self.journal
-            .resolve_nonce_batch(a.nonce, key, &states)
+            .resolve_nonce_batch_marked(a.nonce, key, &states, mark.as_ref())
             .await?;
         let resend = states
             .iter()
@@ -3605,10 +5037,10 @@ impl Worker {
         }
         // Notifications name only the members this receipt served. A member already
         // fulfilled elsewhere is skipped on chain and has no RandomnessFulfilled log here.
-        let served = fulfilled_in_receipt(receipt, self.cfg.coordinator)?;
+        let served = fulfilled_in_receipt(receipt, self.cfg.coordinator, self.fulfilled_topic())?;
         let mut notified = 0usize;
         if status == 1 && a.kind == "fulfill_batch" {
-            for (id, r) in members.iter().zip(&requests) {
+            for (index, (id, r)) in members.iter().zip(&requests).enumerate() {
                 let (Ok(request_id), Ok(tx_hash)) = (id.parse::<U256>(), a.hash.parse::<B256>())
                 else {
                     continue;
@@ -3624,8 +5056,9 @@ impl Worker {
                     });
                 }
                 if let Some(notifier) = &self.discord
+                    && let Some(request) = announced.as_ref().and_then(|read| read.get(index))
                     && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                        status, &a.kind, request_id, tx_hash, r,
+                        status, &a.kind, request_id, tx_hash, request,
                     )
                 {
                     notifier.notify(proof);
@@ -3649,7 +5082,7 @@ impl Worker {
         ensure!(!members.is_empty(), "Batch members missing from journal");
         for a in attempts {
             if let Some(receipt) = self.rpc.receipt(&a.hash).await? {
-                if !self.rpc.receipt_is_finalized(&a.hash, &receipt).await? {
+                if !self.rpc.receipt_is_settled(&a.hash, &receipt).await? {
                     return Ok(true);
                 }
                 self.settle_batch_receipt(a, &receipt, &members, head)
@@ -3657,22 +5090,32 @@ impl Worker {
                 return Ok(false);
             }
         }
-        let requests = self.member_requests(&members).await?;
+        let requests = self.member_statuses_at(&members, head).await?;
+        let mut deadlines = Vec::with_capacity(members.len());
+        for id in &members {
+            deadlines.push(
+                self.journal
+                    .job(id)
+                    .await?
+                    .map_or(i64::MAX, |job| job.deadline),
+            );
+        }
         let all_terminal = requests
             .iter()
-            .all(|r| terminal(r, head.timestamp).is_some());
+            .zip(&deadlines)
+            .all(|(r, deadline)| settled(r, *deadline, head.timestamp).is_some());
         let any_timely = requests
             .iter()
             .any(|r| timely(r, head.timestamp, self.cfg.margin));
-        let chain_nonce = self.rpc.nonce(self.tx_key.address(), "finalized").await?;
+        let chain_nonce = self.rpc.decision_nonce(self.tx_key.address(), head).await?;
         if chain_nonce > latest.nonce as u64 {
             // The nonce is used, so one of its attempts is in a block: an endpoint that has not caught up with that
-            // block answers null, and another one may already serve the final receipt with its notices.
+            // block answers null, and another one may already serve the settled receipt with its notices.
             let hashes: Vec<String> = attempts.iter().map(|a| a.hash.clone()).collect();
             if let Some((found, receipt)) = self.rpc.receipt_from_any(&hashes).await?
                 && self
                     .rpc
-                    .receipt_is_finalized(&attempts[found].hash, &receipt)
+                    .receipt_is_settled(&attempts[found].hash, &receipt)
                     .await?
             {
                 self.settle_batch_receipt(&attempts[found], &receipt, &members, head)
@@ -3683,17 +5126,18 @@ impl Worker {
             // member can resolve the nonce safely; one live member leaves it for inspection.
             if all_terminal {
                 let mut states = Vec::with_capacity(members.len());
-                for (id, r) in members.iter().zip(&requests) {
+                for ((id, r), deadline) in members.iter().zip(&requests).zip(&deadlines) {
                     if r.fulfilled && !r.delivered {
                         crate::audit::callback_failed(&self.journal.pool, id).await?;
                     }
-                    let state = terminal(r, head.timestamp).ok_or_else(|| {
+                    let state = settled(r, *deadline, head.timestamp).ok_or_else(|| {
                         anyhow::anyhow!("Batch member state changed under reconciliation")
                     })?;
                     states.push((id.clone(), state));
                 }
+                let mark = self.nonce_mark(head, latest.nonce)?;
                 self.journal
-                    .resolve_nonce_batch(latest.nonce, key, &states)
+                    .resolve_nonce_batch_marked(latest.nonce, key, &states, mark.as_ref())
                     .await?;
                 tracing::info!(batch_key=%key,nonce=latest.nonce,members=members.len(),"Used batch nonce resolved from chain state; no endpoint served its receipt");
                 return Ok(false);
@@ -3709,7 +5153,8 @@ impl Worker {
                 "Batch nonce consumed but no receipt or terminal state for every member; dedicated-wallet conflict needs inspection"
             );
         }
-        if !self.cfg.send {
+        // Replacing, cancelling and rebroadcasting all sign or send: not while the keeper holds its sends.
+        if !self.cfg.send || self.sending_halted().await? {
             return Ok(true);
         }
         if all_terminal && latest.kind != "cancel" {
@@ -3721,23 +5166,27 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.cancel_gas().await?;
             if self
                 .replace_within_budget(
                     key,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: 21000,
+                        gas,
                         fee,
                         priority,
                         payload: "0x".into(),
                         kind: "cancel".into(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?
             {
                 self.broadcast_latest(head.timestamp).await?;
             }
+            return Ok(true);
+        }
+        if resend_due(latest, head.timestamp) && self.cancel_stale_round(latest, head).await? {
             return Ok(true);
         }
         if head.timestamp.saturating_sub(latest.created as u64) >= 10
@@ -3751,18 +5200,19 @@ impl Worker {
                 head.base_fee,
                 tip,
             )?;
+            let gas = self.replacement_gas(&latest.kind, latest.gas).await?;
             let replaced = self
                 .replace_within_budget(
                     key,
                     TxPlan {
                         nonce: latest.nonce.try_into()?,
-                        gas: latest.gas.try_into()?,
+                        gas,
                         fee,
                         priority,
                         payload: latest.payload.clone(),
                         kind: latest.kind.clone(),
                     },
-                    head.timestamp,
+                    head,
                 )
                 .await?;
             if replaced || head.timestamp.saturating_sub(latest.broadcast as u64) >= 2 {
@@ -4047,11 +5497,16 @@ mod tests {
             start: 200,
             state: "prepared".into(),
             api: Some(serde_json::to_string(&api).unwrap()),
+            selection: None,
             fallback: 0,
             sources: 4,
             attempts: 1,
             retry_at: 0,
             last_error: None,
+            failing_since: None,
+            failed_at: None,
+            failed_rpc: false,
+            in_flight: false,
         };
         assert_eq!(
             epoch_terminal(
@@ -4079,6 +5534,536 @@ mod tests {
             .unwrap(),
             Some("blocked")
         );
+    }
+
+    #[test]
+    fn a_stale_beacon_packet_with_no_commit_in_flight_is_refreshed_and_never_terminal() {
+        let beacon = format!(r#"["drand","0x{}"]"#, "11".repeat(32));
+        let signed = r#"["lastTrade",[["assetClass","crypto"],["symbol","BTCUSD"]]]"#;
+        let work = |state: &str, request: &str, in_flight: bool| {
+            let selection = crate::abi::EpochSelection {
+                source: 0,
+                recipe: 6,
+                airnode: alloy_primitives::Address::ZERO,
+                selector: B256::ZERO,
+                queryHash: keccak256(request.as_bytes()),
+                canonicalRequest: request.into(),
+            };
+            let api = ApiProof {
+                timestamp: U256::from(100),
+                data: Bytes::from_static(b"1"),
+                signature: Bytes::new(),
+            };
+            crate::epoch::Work {
+                key: "epoch".into(),
+                epoch: 1,
+                start: 200,
+                state: state.into(),
+                api: Some(serde_json::to_string(&api).unwrap()),
+                selection: Some(serde_json::to_string(&selection).unwrap()),
+                fallback: 0,
+                sources: 1,
+                attempts: 1,
+                retry_at: 0,
+                last_error: None,
+                failing_since: None,
+                failed_at: None,
+                failed_rpc: false,
+                in_flight,
+            }
+        };
+        let terminal = |work: &crate::epoch::Work, timestamp| {
+            epoch_terminal(
+                work,
+                &Head {
+                    hash: B256::ZERO,
+                    number: 450,
+                    timestamp,
+                    base_fee: 1,
+                },
+            )
+            .unwrap()
+        };
+        // No commit is in flight for it, whether none was ever signed or every one was cancelled or replaced and its
+        // nonce resolved: it is refreshed however old it is, so it is neither blocked nor a stall, and blocked work
+        // that is waiting on a refresh is not terminal either.
+        for state in ["prepared", "pending", "blocked"] {
+            for timestamp in [0, 300, 301, 341, 100_000] {
+                assert_eq!(
+                    terminal(&work(state, &beacon, false), timestamp),
+                    None,
+                    "{state} {timestamp}"
+                );
+            }
+        }
+        // A commit in flight is bound to this packet, which keeps the freshness bound of every packet; so does work
+        // that is not waiting for a publication.
+        for (state, in_flight) in [
+            ("prepared", true),
+            ("signed", true),
+            ("submitted", true),
+            ("blocked", true),
+            ("signed", false),
+            ("committed", false),
+            ("expired", false),
+            ("inconsistent", false),
+        ] {
+            let bound = work(state, &beacon, in_flight);
+            assert_eq!(terminal(&bound, 340), None);
+            assert_eq!(
+                terminal(&bound, 341),
+                Some("blocked"),
+                "{state} {in_flight}"
+            );
+        }
+        // A signed API record keeps its packet and its bound exactly as before, in every state and whatever is in flight.
+        for (state, in_flight) in [
+            ("prepared", false),
+            ("pending", false),
+            ("blocked", false),
+            ("prepared", true),
+        ] {
+            let record = work(state, signed, in_flight);
+            assert_eq!(terminal(&record, 340), None);
+            assert_eq!(
+                terminal(&record, 341),
+                Some("blocked"),
+                "{state} {in_flight}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn live_demand_on_a_beacon_that_keeps_failing_is_a_stall_after_ten_seconds_on_its_last_source()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("beacon-stall.sqlite"), "scope")
+            .await
+            .unwrap();
+        let (registry, catalog) = (
+            alloy_primitives::Address::repeat_byte(1),
+            B256::repeat_byte(2),
+        );
+        // Epoch 1: the beacon is the only source, and its run began at 100 with the last failure at 108. Epoch 2: a
+        // fallback is still ahead. Epoch 3: it never failed. Epoch 4: its only demand has expired. Epoch 5: a journal
+        // of the first release, which dated the start of a run and not its last failure.
+        for (epoch, sources, fallback, failing_since, failed_at) in [
+            (1, 1, 0, Some(100), Some(108)),
+            (2, 2, 0, Some(100), Some(108)),
+            (3, 1, 0, None, None),
+            (4, 1, 0, Some(100), Some(108)),
+            (5, 1, 0, Some(100), None),
+        ] {
+            sqlx::query("INSERT INTO epoch_work(key,registry,catalog,epoch,start,sources,fallback,failing_since,failed_at,last_error) VALUES(?,?,?,?,200,?,?,?,?,'No drand relay served the round')")
+                .bind(format!("epoch:{epoch}")).bind(registry.to_string()).bind(catalog.to_string()).bind(epoch).bind(sources).bind(fallback).bind(failing_since).bind(failed_at)
+                .execute(&journal.pool).await.unwrap();
+        }
+        for (job, deadline, epoch) in [
+            ("10", 300, 1),
+            ("20", 300, 2),
+            ("30", 300, 3),
+            ("40", 90, 4),
+            ("50", 300, 5),
+        ] {
+            journal
+                .discovered_epoch(job, deadline, "50", Some(epoch))
+                .await
+                .unwrap();
+        }
+        let pool = &journal.pool;
+        let head = || Head {
+            hash: B256::ZERO,
+            number: 450,
+            timestamp: 100,
+            base_fee: 1,
+        };
+        let stalled = |now| async move {
+            stalled_epoch_demand(pool, registry, catalog, &head(), 5, now).await
+        };
+        let set = |sql: &'static str, key: &'static str, value: i64| async move {
+            sqlx::query(sql)
+                .bind(value)
+                .bind(key)
+                .execute(pool)
+                .await
+                .unwrap();
+        };
+        // The run must have lasted ten seconds of wall-clock time: a plain retry is not a stall.
+        assert_eq!(crate::beacon::UNAVAILABLE_SECONDS, 10);
+        assert_eq!(crate::beacon::RUN_GAP_SECONDS, 15);
+        for now in [0, 100, 105, 109] {
+            assert_eq!(stalled(now).await.unwrap(), None, "{now}");
+        }
+        assert_eq!(
+            stalled(110).await.unwrap(),
+            Some(("epoch:1".into(), "beacon_unavailable"))
+        );
+        // It is one while the run goes on: its last failure was at most 15 seconds ago.
+        assert_eq!(
+            stalled(123).await.unwrap(),
+            Some(("epoch:1".into(), "beacon_unavailable"))
+        );
+        // A run whose last failure is longer ago has stopped, and nothing says it goes on: the epoch may be waiting for
+        // its next fetch, or not have been fetched for a long time. However long ago the run began, it is no stall
+        // until a failure shows it, or the demand would be reported before the keeper had tried at all.
+        assert_eq!(stalled(124).await.unwrap(), None);
+        assert_eq!(stalled(10_000).await.unwrap(), None);
+        // A run that only just began is not one yet, whatever the last failure.
+        set(
+            "UPDATE epoch_work SET failing_since=? WHERE key=?",
+            "epoch:1",
+            9_995,
+        )
+        .await;
+        set(
+            "UPDATE epoch_work SET failed_at=? WHERE key=?",
+            "epoch:1",
+            9_995,
+        )
+        .await;
+        assert_eq!(stalled(10_000).await.unwrap(), None);
+        // A run that goes on for ten seconds while failures keep coming is.
+        set(
+            "UPDATE epoch_work SET failing_since=? WHERE key=?",
+            "epoch:1",
+            100,
+        )
+        .await;
+        assert_eq!(
+            stalled(10_000).await.unwrap(),
+            Some(("epoch:1".into(), "beacon_unavailable"))
+        );
+        // When the last failure was the keeper's own read of the chain, the relays are not blamed for it.
+        set(
+            "UPDATE epoch_work SET failed_rpc=? WHERE key=?",
+            "epoch:1",
+            1,
+        )
+        .await;
+        assert_eq!(
+            stalled(10_000).await.unwrap(),
+            Some(("epoch:1".into(), "beacon_rpc_error"))
+        );
+        set(
+            "UPDATE epoch_work SET failed_rpc=? WHERE key=?",
+            "epoch:1",
+            0,
+        )
+        .await;
+        // A fetch that got its round ends it: the packet is saved, the run is cleared, and the demand is served.
+        let packet = serde_json::to_string(&ApiProof {
+            timestamp: U256::from(100),
+            data: Bytes::from_static(b"1"),
+            signature: Bytes::new(),
+        })
+        .unwrap();
+        sqlx::query("UPDATE epoch_work SET state='prepared',api=?,failing_since=NULL,failed_at=NULL,failed_rpc=NULL,last_error=NULL WHERE key='epoch:1'")
+            .bind(packet)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(stalled(10_000).await.unwrap(), None);
+        // With its last source reached, the epoch that had a fallback ahead is a stall too, and its demand ending clears it.
+        sqlx::query("UPDATE epoch_work SET fallback=1,failed_at=9995 WHERE key='epoch:2'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stalled(10_000).await.unwrap(),
+            Some(("epoch:2".into(), "beacon_unavailable"))
+        );
+        journal.state("20", "served").await.unwrap();
+        // The journal of the first release, with no time of the last failure, is none until a failure gives it one.
+        assert_eq!(stalled(10_000).await.unwrap(), None);
+        set(
+            "UPDATE epoch_work SET failed_at=? WHERE key=?",
+            "epoch:5",
+            9_995,
+        )
+        .await;
+        assert_eq!(
+            stalled(10_000).await.unwrap(),
+            Some(("epoch:5".into(), "beacon_unavailable"))
+        );
+        journal.pool.close().await;
+    }
+    #[tokio::test]
+    async fn work_waiting_on_a_beacon_this_node_cannot_fetch_is_no_sign_of_a_dead_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("liveness.sqlite"), "scope")
+            .await
+            .unwrap();
+        let (registry, catalog) = (
+            alloy_primitives::Address::repeat_byte(1),
+            B256::repeat_byte(2),
+        );
+        let pool = &journal.pool;
+        let head = Head {
+            hash: B256::ZERO,
+            number: 450,
+            timestamp: 100,
+            base_fee: 1,
+        };
+        let now = 1_000;
+        let packet = "packet";
+        // The errors a work was last left with, as the keeper words them: no relay served the round, the selected recipe is
+        // a signed API recipe, and the registry's beaconOf reverted on one of this node's endpoints.
+        let unserved = "No drand relay served the round";
+        let refused = format!(
+            "Registered recipe 2 is not a drand beacon: {}; refusing to prepare an epoch from it",
+            crate::epoch::UNSUPPORTED_RECIPE
+        );
+        let reverted = "The registry cannot serve this recipe as a beacon: beaconOf reverted (execution reverted)";
+        // One epoch work, and one open request with live paid demand on it, for each case: what the work is and the error
+        // it was left with, the run of failed beacon fetches it is in and whether this node's journal has a saved packet.
+        let cases = [
+            // Drand cannot be reached from this node and it has no packet: nothing the primary could send either.
+            (
+                "failing",
+                "pending",
+                unserved,
+                None,
+                Some(900),
+                Some(995),
+                Some(0),
+                false,
+            ),
+            (
+                "failing just now",
+                "pending",
+                unserved,
+                None,
+                Some(999),
+                Some(999),
+                None,
+                false,
+            ),
+            // The run's last failure is 15 seconds ago at the most; older than that it is no longer going on.
+            (
+                "failing at the limit",
+                "pending",
+                unserved,
+                None,
+                Some(900),
+                Some(985),
+                Some(0),
+                false,
+            ),
+            (
+                "stopped failing",
+                "pending",
+                unserved,
+                None,
+                Some(900),
+                Some(984),
+                Some(0),
+                true,
+            ),
+            // A node that has the packet could send it, so the primary standing still means something, and a follower
+            // takes over when only the primary cannot reach drand.
+            (
+                "failing with a packet",
+                "prepared",
+                unserved,
+                Some(packet),
+                Some(900),
+                Some(995),
+                Some(0),
+                true,
+            ),
+            // The failure is this node's own read of the chain: nothing is known about the primary's reach.
+            (
+                "failing on chain reads",
+                "pending",
+                unserved,
+                None,
+                Some(900),
+                Some(995),
+                Some(1),
+                true,
+            ),
+            // No last failure to judge by, or none at all: work like any other.
+            (
+                "legacy run",
+                "pending",
+                unserved,
+                None,
+                Some(900),
+                None,
+                None,
+                true,
+            ),
+            (
+                "never failed",
+                "pending",
+                unserved,
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+            (
+                "blocked",
+                "blocked",
+                unserved,
+                None,
+                Some(900),
+                Some(995),
+                Some(0),
+                true,
+            ),
+            // Every keeper of this release refuses a signed API recipe, a primary that is alive as much as a follower: it
+            // stands on no run of fetches, and its silence is no sign of death.
+            (
+                "blocked as an unsupported recipe",
+                "blocked",
+                refused.as_str(),
+                None,
+                None,
+                None,
+                None,
+                false,
+            ),
+            // Any other block may be this node's own and does not excuse the primary: a follower's other endpoints may
+            // still read the source.
+            (
+                "blocked on a beaconOf that reverted",
+                "blocked",
+                reverted,
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+        ];
+        for (epoch, (label, state, error, api, since, at, rpc, counts)) in (1u64..).zip(cases) {
+            sqlx::query("INSERT INTO epoch_work(key,registry,catalog,epoch,start,sources,state,api,last_error,failing_since,failed_at,failed_rpc) VALUES(?,?,?,?,200,1,?,?,?,?,?,?)")
+                .bind(format!("epoch:{epoch}")).bind(registry.to_string()).bind(catalog.to_string()).bind(i64::try_from(epoch).unwrap()).bind(state).bind(api).bind(error).bind(since).bind(at).bind(rpc)
+                .execute(pool).await.unwrap();
+            journal
+                .discovered_epoch(&format!("{epoch}0"), 300, "50", Some(epoch))
+                .await
+                .unwrap();
+            // Only this case's request is open.
+            sqlx::query("UPDATE jobs SET state=CASE WHEN id=? THEN 'pending' ELSE 'served' END")
+                .bind(format!("{epoch}0"))
+                .execute(pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                    .await
+                    .unwrap(),
+                counts,
+                "{label}"
+            );
+        }
+        // However many requests of that kind wait, they are no work; one that counts is enough; and with none open there
+        // is nothing to wait for.
+        sqlx::query("UPDATE jobs SET state=CASE WHEN id IN ('10','20','30','100') THEN 'pending' ELSE 'served' END")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            !sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE jobs SET state='pending' WHERE id='40'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE jobs SET state='served'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            !sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        // A request whose proof is journaled needs its epoch published, by whoever published it: it is work whatever this
+        // node's own fetches say, though a pending request on the same epoch is not.
+        sqlx::query(
+            "UPDATE jobs SET state=CASE WHEN id IN ('10','30') THEN 'prepared' ELSE 'served' END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(
+            sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "UPDATE jobs SET state=CASE WHEN id IN ('10','30') THEN 'pending' ELSE 'served' END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(
+            !sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        // The same holds on an epoch whose source this node refused as an unsupported recipe: the committer can publish it
+        // from a record it holds, and then a request whose proof is journaled is work for any node.
+        for (state, counts) in [("prepared", true), ("pending", false)] {
+            sqlx::query("UPDATE jobs SET state=CASE WHEN id='100' THEN ? ELSE 'served' END")
+                .bind(state)
+                .execute(pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                    .await
+                    .unwrap(),
+                counts,
+                "unsupported recipe, {state} request"
+            );
+        }
+        // A request with no epoch work of this journal behind it is work like any other, the epoch being the primary's to
+        // publish.
+        journal.discovered("90", 300, "50").await.unwrap();
+        journal
+            .discovered_epoch("91", 300, "50", Some(9))
+            .await
+            .unwrap();
+        for job in ["90", "91"] {
+            sqlx::query("UPDATE jobs SET state=CASE WHEN id=? THEN 'pending' ELSE 'served' END")
+                .bind(job)
+                .execute(pool)
+                .await
+                .unwrap();
+            assert!(
+                sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                    .await
+                    .unwrap(),
+                "{job}"
+            );
+        }
+        // A request within the send margin of its deadline is no work to take either.
+        sqlx::query("UPDATE jobs SET state=CASE WHEN id='80' THEN 'pending' ELSE 'served' END")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            sendable_work_waiting(pool, registry, catalog, &head, 5, now)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !sendable_work_waiting(pool, registry, catalog, &head, 200, now)
+                .await
+                .unwrap()
+        );
+        journal.pool.close().await;
     }
 
     #[test]
@@ -4329,8 +6314,9 @@ mod tests {
             base_fee: 1,
         };
         let pool = &journal.pool;
-        let stalled =
-            |at| async move { stalled_epoch_demand(pool, registry, catalog, &head(at), 5).await };
+        let stalled = |at| async move {
+            stalled_epoch_demand(pool, registry, catalog, &head(at), 5, 0).await
+        };
         assert_eq!(stalled(100).await.unwrap(), None);
         // Retrying (pending) work, a source awaiting its fallback and a fresh packet with live demand are not stalls.
         journal
@@ -4376,11 +6362,26 @@ mod tests {
                 alloy_primitives::Address::repeat_byte(9),
                 catalog,
                 &head(1000),
-                5
+                5,
+                0
             )
             .await
             .unwrap(),
             None
+        );
+        // A last source refused as a signed API recipe, which the keeper does not prepare, is a stall of its own reason: the
+        // demand that waits on it cannot be served by this keeper, whatever it does.
+        sqlx::query("INSERT INTO epoch_work(key,registry,catalog,epoch,start,state,sources,last_error) VALUES('epoch:5',?,?,5,200,'blocked',1,?)")
+            .bind(registry.to_string()).bind(catalog.to_string())
+            .bind(format!("Registered recipe 2 is not a drand beacon: {}; refusing to prepare an epoch from it", crate::epoch::UNSUPPORTED_RECIPE))
+            .execute(&journal.pool).await.unwrap();
+        journal
+            .discovered_epoch("50", 3000, "51", Some(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            stalled(100).await.unwrap(),
+            Some(("epoch:5".into(), "unsupported_recipe"))
         );
         journal.pool.close().await;
     }
@@ -4899,15 +6900,153 @@ mod tests {
             {"address":alloy_primitives::Address::repeat_byte(2),"topics":[served,id(7),B256::ZERO]},
             {"address":coordinator,"topics":[served,id(8),B256::ZERO]},
         ]});
-        let ids = fulfilled_in_receipt(&receipt, coordinator).unwrap();
+        let ids = fulfilled_in_receipt(&receipt, coordinator, served).unwrap();
         assert_eq!(
             ids.into_iter().collect::<Vec<_>>(),
             vec![U256::from(5), U256::from(8)]
         );
         assert!(
-            fulfilled_in_receipt(&json!({"status":"0x1"}), coordinator)
+            fulfilled_in_receipt(&json!({"status":"0x1"}), coordinator, served)
                 .unwrap()
                 .is_empty()
         );
+        // The round coordinator's event is the same event.
+        assert_eq!(RC::RandomnessFulfilled::SIGNATURE_HASH, served);
+    }
+}
+
+#[cfg(test)]
+mod arbitrum_gas_tests {
+    //! The arbitrum gas model's arithmetic, with the L1 components measured on Robinhood Chain on 3 October 2026 by
+    //! `NodeInterface.gasEstimateL1Component`: 173 (empty), 732 (a 452-byte fulfillment) and 9,177 (a 16-member batch)
+    //! on mainnet, 6,214, 26,134 and 327,332 on the testnet.
+    use super::*;
+    const MARGIN: u64 = 2_500;
+    #[test]
+    fn the_margin_grows_an_l1_component_and_rounds_up() {
+        for (l1, grown) in [
+            (173, 217),
+            (732, 915),
+            (9_177, 11_472),
+            (6_214, 7_768),
+            (26_134, 32_668),
+            (327_332, 409_165),
+        ] {
+            assert_eq!(with_l1_margin(l1, MARGIN), grown, "{l1}");
+            // At least a quarter more, and less than a gas more than that.
+            assert!(grown * 4 >= l1 * 5 && (grown - 1) * 4 < l1 * 5, "{l1}");
+        }
+        assert_eq!(with_l1_margin(732, 0), 732);
+        assert_eq!(with_l1_margin(732, 20_000), 2_196);
+        assert_eq!(with_l1_margin(0, MARGIN), 0);
+        assert_eq!(with_l1_margin(u64::MAX, 20_000), u64::MAX);
+    }
+    #[test]
+    fn a_fulfillment_floor_holds_the_l1_component_of_its_payload() {
+        let one = [100_000u32];
+        // A callback that is cheap in the simulation: the estimate stays below the floor and the floor wins.
+        assert_eq!(fulfillment_gas_l1(501_600, &one, 0).unwrap(), 753_643);
+        for (l1, gas) in [(732, 754_558), (26_134, 786_311)] {
+            let grown = with_l1_margin(l1, MARGIN);
+            assert_eq!(fulfillment_gas_l1(501_600, &one, grown).unwrap(), gas);
+            assert_eq!(gas, fulfillment_floor(&one).unwrap() + grown);
+        }
+        // An estimate above the floor and its L1 component is padded as before: it holds the L1 gas itself.
+        assert_eq!(fulfillment_gas_l1(800_000, &one, 32_668).unwrap(), 850_000);
+        // Sixteen members at the guarded coordinator's estimate on the testnet: the floor, 8,810,862, and 409,165 more.
+        let batch = [100_000u32; 16];
+        assert_eq!(fulfillment_gas_l1(8_572_721, &batch, 0).unwrap(), 8_810_862);
+        assert_eq!(
+            fulfillment_gas_l1(8_572_721, &batch, with_l1_margin(327_332, MARGIN)).unwrap(),
+            8_810_862 + 409_165
+        );
+        assert_eq!(
+            fulfillment_gas_l1(8_572_721, &batch, with_l1_margin(9_177, MARGIN)).unwrap(),
+            8_810_862 + 11_472
+        );
+        // No component is the standard model, and a component never lowers a limit.
+        for estimate in [0, 400_000, 501_600, 753_643, 760_000, 2_000_000] {
+            assert_eq!(
+                fulfillment_gas_l1(estimate, &one, 0).unwrap(),
+                fulfillment_gas(estimate, &one).unwrap()
+            );
+            assert!(
+                fulfillment_gas_l1(estimate, &one, 915).unwrap()
+                    >= fulfillment_gas(estimate, &one).unwrap()
+            );
+        }
+        assert!(fulfillment_gas_l1(1_000_000, &[], 1).is_err());
+        assert!(fulfillment_gas_l1(1_000_000, &one, u64::MAX).is_err());
+    }
+    #[test]
+    fn a_batch_predicts_its_size_with_the_l1_component_of_every_member() {
+        let batch = [100_000u32; 16];
+        // The share of a 16-member payload's L1 component, with the margin: 717 gas a member on mainnet, 25,573 on
+        // the testnet.
+        let each = |l1: u64| with_l1_margin(l1, MARGIN).div_ceil(16);
+        assert_eq!((each(9_177), each(327_332)), (717, 25_573));
+        // Mainnet's L1 gas takes no member from a cap at which the testnet's takes one.
+        for (cap, standard, mainnet, testnet) in [
+            (6_000_000, 10, 10, 10),
+            (8_000_000, 14, 14, 13),
+            (9_000_000, 16, 16, 15),
+            (9_500_000, 16, 16, 16),
+            (13_000_000, 16, 16, 16),
+        ] {
+            assert_eq!(members_within(0, &batch, cap), standard, "{cap}");
+            assert_eq!(members_within_l1(0, &batch, cap, 0), standard, "{cap}");
+            assert_eq!(
+                members_within_l1(0, &batch, cap, each(9_177)),
+                mainnet,
+                "{cap}"
+            );
+            assert_eq!(
+                members_within_l1(0, &batch, cap, each(327_332)),
+                testnet,
+                "{cap}"
+            );
+        }
+        // An estimate predicts from its own share, as before, and still holds the L1 component.
+        assert_eq!(
+            members_within_l1(8_572_721, &batch, 9_000_000, each(327_332)),
+            15
+        );
+        assert_eq!(members_within_l1(0, &[], 9_000_000, 1), 0);
+        // Whatever fits by the prediction is really within the cap at the predicted estimate, and an L1 component
+        // never fits more members.
+        for cap in (1_000_000..14_000_000).step_by(250_000) {
+            let mut before = usize::MAX;
+            for l1_each in [0, 717, 25_573, 100_000] {
+                let fit = members_within_l1(8_572_721, &batch, cap, l1_each);
+                assert!(fit <= before, "{cap} {l1_each}");
+                before = fit;
+                if fit > 0 {
+                    let (members, l1) = (&batch[..fit], l1_each * fit as u64);
+                    let estimate = (8_572_721u64.div_ceil(16) * fit as u64)
+                        .max(fulfillment_floor(members).unwrap() + l1);
+                    assert!(fulfillment_gas_l1(estimate, members, l1).unwrap() <= cap);
+                }
+            }
+        }
+    }
+    #[test]
+    fn every_cancellation_under_the_arbitrum_model_carries_the_bound() {
+        // Clamped from above and floored from below: whatever the node says the transfer needs, the limit is the bound,
+        // 100,000 gas, which the startup budget pays for at the cancellation fee cap.
+        assert_eq!(CANCEL_GAS_BOUND, 100_000);
+        for needed in [
+            0,
+            1,
+            21_000,
+            26_704,
+            34_449,
+            99_999,
+            100_000,
+            100_001,
+            6_250_000,
+            u64::MAX,
+        ] {
+            assert_eq!(arbitrum_cancel_gas(needed), CANCEL_GAS_BOUND, "{needed}");
+        }
     }
 }

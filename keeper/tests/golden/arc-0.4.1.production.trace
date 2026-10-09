@@ -1,0 +1,235 @@
+# The configuration and calls of keeper 0.4.1 with the settings of Arc Mainnet's primary keeper.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+# `config` lines are the fields of the configuration that Config::load builds from the environment file's settings.
+
+## 1. the configuration
+config role=Primary chain_id=5042 send=false once=true
+config timing poll_ms=250 idle_poll_ms=1000 max_tick_failures=5 tick_timeout_seconds=20 margin=5
+config lanes max_gas=13000000 fulfill_batch_max=16 nonce_stuck_seconds=120 progress_stuck_seconds=20
+config fees max_fee=2000000000000 cancel_max_fee=2500000000000 max_cost=4000000000000000000 min_priority_fee=1000000000 max_priority_fee=50000000000 fee_coverage_bps=10000
+config reports ws_urls=["wss://rpc.mainnet.arc.io"] health_reports=true
+
+## 2. startup, and an idle tick
+### startup
+startup
+eth_chainId
+eth_getCode latest coordinator
+{
+  eth_getCode latest coordinator
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+}
+eth_getCode latest coordinator_implementation
+eth_call finalized coordinator 0x2b12cb69 epochRegistry
+{
+  eth_getCode latest registry
+  eth_getStorageAt latest registry slot=eip1967.implementation
+}
+eth_getCode latest registry_implementation
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_call finalized coordinator 0xfa6df55d publicKeyX
+eth_call finalized coordinator 0xd7a6f6e8 publicKeyY
+eth_call finalized coordinator 0x155cf49b protocolConfigurationHash
+eth_call finalized coordinator 0x460a58aa confirmationBlocks
+eth_call finalized coordinator 0x2b12cb69 epochRegistry
+eth_call finalized registry 0x5bc8e8f9 committer
+eth_call finalized registry 0x830c083a catalogHash
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber finalized full=false
+### the epoch's snapshot is fetched
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[1,0]
+eth_getBlockByNumber latest full=false
+eth_call finalized registry 0xba01b103 getRecipe args=[6]
+eth_call finalized registry 0x87533a48 beaconOf args=[6]
+eth_getBlockByNumber #latest-8/finalized-5 full=false
+relay GET /<chain hash>/public/1000334
+eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=d99c7c70
+journal
+jobs []
+txs []
+epochs [1=prepared]
+sweep queued=false in_flight=false last=none
+cursor=1 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+
+## 3. six large requests in one batch
+### the requests are proved and sent
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-13/finalized-10 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[1,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_getBlockByNumber finalized full=false
+{
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+}
+{
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[1]
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[2]
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[3]
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[4]
+}
+{
+  eth_getBlockByNumber latest full=false
+  eth_getBlockByNumber latest full=false
+  eth_getBlockByNumber latest full=false
+  eth_getBlockByNumber latest full=false
+}
+{
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+}
+{
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[5]
+  eth_call finalized coordinator 0xcf14de9d getProofContext args=[6]
+}
+{
+  eth_getBlockByNumber latest full=false
+  eth_getBlockByNumber latest full=false
+}
+{
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[6]
+]
+{
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[1]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[2]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[3]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[4]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[5]
+  eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[6]
+}
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_estimateGas - coordinator 0x9497b180 fulfillRandomnessBatch ids=[1,2,3,4,5,6] seeds=[e7c1a842,75a28a54,4aa4bdfe,9ab75282,0038c2fa,dddfbe36] bytes=2820 from=keeper
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+batch [
+  eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[4]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_call finalized coordinator 0xc58343ef getRequest args=[6]
+]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0x9497b180 fulfillRandomnessBatch ids=[1,2,3,4,5,6] seeds=[e7c1a842,75a28a54,4aa4bdfe,9ab75282,0038c2fa,dddfbe36] bytes=2820 type=2 chain=5042 nonce=0 gas=9012174 maxFee=4140000000 maxPriority=2000000000 value=0
+journal
+jobs [1=submitted 2=submitted 3=submitted 4=submitted 5=submitted 6=submitted]
+txs [batch:1:6:22840c238d697475:fulfill_batch@0=submitted]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=7 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+### the receipt settles them
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0x9497b180 fulfillRandomnessBatch
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[4]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[5]
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[6]
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+journal
+jobs [1=served 2=served 3=served 4=served 5=served 6=served]
+txs [batch:1:6:22840c238d697475:fulfill_batch@0=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=7 nonce_floor=1
+health healthy=true faults=[] send_enabled=true

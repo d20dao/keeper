@@ -107,6 +107,26 @@ fn hash_to_curve(pk: [U256; 2], seed: U256) -> Result<ProjectivePoint> {
     }
     bail!("Hash-to-curve work bound exceeded")
 }
+/// How many candidates the VRF hash-to-curve of `seed` under `pk` tries before one lies on secp256k1, as the verifier's
+/// `_hashToCurve` and `hash_to_curve` above try them: each further one costs the verifier a modexp (the round coordinator's
+/// gas model prices it, `round_gas::VRF_CANDIDATE`). Half of the seeds need one.
+pub fn hash_to_curve_candidates(pk: [U256; 2], seed: U256) -> Result<u32> {
+    let p = prime();
+    let exp = (&p + BigUint::one()) >> 2;
+    let mut input = U256::from(1).to_be_bytes::<32>().to_vec();
+    append(&mut input, pk);
+    input.extend_from_slice(&seed.to_be_bytes::<32>());
+    let mut x = field_hash(&input, &p);
+    for candidates in 1..=256 {
+        let y2 = ((&x * &x % &p) * &x + BigUint::from(7u8)) % &p;
+        let y = y2.modpow(&exp, &p);
+        if &y * &y % &p == y2 {
+            return Ok(candidates);
+        }
+        x = field_hash(&word(&x), &p);
+    }
+    bail!("Hash-to-curve work bound exceeded")
+}
 pub fn prove(seed: U256, key: &SecretKey) -> Result<VrfProof> {
     let sk = key.to_nonzero_scalar();
     let pk = public_key(key);

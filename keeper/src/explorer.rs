@@ -773,7 +773,7 @@ async fn register(
     verify_pins(rpc, pins, next).await?;
     let head = rpc.finalized_head().await?;
     let c = pins.coordinator.proxy;
-    let r = pins.registry.proxy;
+    let r = pins.epoch_registry()?.proxy;
     let n = head.number;
     let (x, y, recipient, min_fee, confirmations, key_hash, start, catalog_hash) = tokio::try_join!(
         at(rpc, c, C::publicKeyXCall {}, n),
@@ -881,7 +881,7 @@ async fn reviewed_pin(
     let implementation = Address::from_slice(&word[12..]);
     let Some(pin) = approved
         .iter()
-        .flat_map(|p| [p.coordinator, p.registry])
+        .flat_map(|p| std::iter::once(p.coordinator).chain(p.registry))
         .find(|p| p.proxy == proxy && p.implementation == implementation)
     else {
         if let Some(next) = next {
@@ -972,6 +972,8 @@ async fn scan(
     span: u64,
 ) -> Result<Progress> {
     let c = address(pins.coordinator.proxy);
+    // The index has no round mode before task K4: it indexes an epoch coordinator and its registry.
+    let registry = pins.epoch_registry()?.proxy;
     let chain = chain.to_string();
     // The finalized head, not latest: a load-balanced endpoint can announce a block that the backend serving
     // the next call has not imported yet, and nothing past finality can be reorganized away.
@@ -1010,7 +1012,7 @@ async fn scan(
                 tx.execute("UPDATE d20dao_explorer.deployments SET canonical=false WHERE chain_id=$1 AND coordinator=$2",&[&chain,&c]).await?;
                 tx.execute("UPDATE d20dao_explorer.requests SET canonical=false WHERE chain_id=$1 AND coordinator=$2",&[&chain,&c]).await?;
                 tx.execute("UPDATE d20dao_explorer.events SET canonical=false WHERE chain_id=$1 AND coordinator=$2",&[&chain,&c]).await?;
-                tx.execute("UPDATE d20dao_explorer.epochs SET canonical=false WHERE chain_id=$1 AND registry=$2",&[&chain,&(address(pins.registry.proxy))]).await?;
+                tx.execute("UPDATE d20dao_explorer.epochs SET canonical=false WHERE chain_id=$1 AND registry=$2",&[&chain,&(address(registry))]).await?;
                 tx.execute("UPDATE d20dao_explorer.cursors SET next_block=$3 WHERE chain_id=$1 AND coordinator=$2",&[&chain,&c,&(i64::try_from(deployment.first)?)]).await?;
                 tx.commit().await?;
                 start = deployment.first;
@@ -1037,7 +1039,7 @@ async fn scan(
     let end = refresh::resume_end(pool, rpc, (&chain, &c), next, start, reorg, head.number)
         .await?
         .unwrap_or(end);
-    let values:Vec<Value>=serde_json::from_value(rpc.request("eth_getLogs",json!([{"address":[pins.coordinator.proxy,pins.registry.proxy],"fromBlock":format!("0x{start:x}"),"toBlock":format!("0x{end:x}")}])).await?)?;
+    let values:Vec<Value>=serde_json::from_value(rpc.request("eth_getLogs",json!([{"address":[pins.coordinator.proxy,registry],"fromBlock":format!("0x{start:x}"),"toBlock":format!("0x{end:x}")}])).await?)?;
     ensure!(values.len() <= MAX_LOGS, "Explorer log batch limit");
     let mut logs = values.into_iter().map(log).collect::<Result<Vec<_>>>()?;
     logs.sort_by_key(|l| (l.block, l.index));
@@ -1061,7 +1063,7 @@ async fn scan(
     let mut reviewed = BTreeMap::new();
     for l in &logs {
         ensure!(
-            l.address == pins.coordinator.proxy || l.address == pins.registry.proxy,
+            l.address == pins.coordinator.proxy || l.address == registry,
             "Unexpected log address"
         );
         let h = by_number
@@ -1086,12 +1088,12 @@ async fn scan(
             );
         }
         let evidence = receipt(l, h, reviewed[&(l.address, l.block)]);
-        if l.address == pins.registry.proxy && topic == EpochCommitted::SIGNATURE_HASH {
+        if l.address == registry && topic == EpochCommitted::SIGNATURE_HASH {
             let e = EpochCommitted::decode_raw_log_validate(l.topics.clone(), &l.data)?;
             ensure!(e.packet.len() <= 2048, "Epoch packet size");
             let r = at(
                 rpc,
-                pins.registry.proxy,
+                registry,
                 E::getEpochCall { epochId: e.epochId },
                 l.block,
             )
@@ -1100,7 +1102,7 @@ async fn scan(
             // A committed epoch's catalog can no longer change, so the current registry view is read; epochs
             // published before the catalog API existed resolve to the initial catalog.
             let catalog = rpc
-                .call(pins.registry.proxy, E::catalogAtCall { epochId: e.epochId })
+                .call(registry, E::catalogAtCall { epochId: e.epochId })
                 .await?;
             ensure!(catalog.hash == r.catalogHash, "Epoch catalog mismatch");
             let recipe = *catalog
@@ -1303,7 +1305,7 @@ async fn persist(
     caught_up: bool,
 ) -> Result<()> {
     let c = address(pins.coordinator.proxy);
-    let r = address(pins.registry.proxy);
+    let r = address(pins.epoch_registry()?.proxy);
     let start = i64::try_from(batch.start)?;
     let end = i64::try_from(batch.end.number)?;
     let tx = pool.transaction().await?;
@@ -1773,7 +1775,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let pins = RuntimePins::default();
+        // An epoch coordinator's identity, whose registry pin is its own.
+        let pins = RuntimePins {
+            registry: Some(crate::proxy::ProxyPin::default()),
+            ..RuntimePins::default()
+        };
         let c = address(pins.coordinator.proxy);
         pool.execute("INSERT INTO d20dao_explorer.deployments(chain_id,coordinator,registry,configuration,catalog,protocol_configuration_hash,implementation_pins,first_block) VALUES($1,$2,$2,'{}','{}','0x','[]',10)",&[&chain,&c]).await.unwrap();
         pool.execute(
@@ -2028,7 +2034,7 @@ mod tests {
         };
         RuntimePins {
             coordinator: pin(0xc1, 0xc2),
-            registry: pin(0xe1, 0xe2),
+            registry: Some(pin(0xe1, 0xe2)),
         }
     }
     impl MockChain {
@@ -2092,7 +2098,7 @@ mod tests {
                     let implementation = match *self.moved.lock().unwrap() {
                         Some((moved, to, from)) if moved == proxy && block >= from => to,
                         _ if proxy == pins.coordinator.proxy => pins.coordinator.implementation,
-                        _ => pins.registry.implementation,
+                        _ => pins.registry.unwrap().implementation,
                     };
                     json!(format!("0x{:0>64}", hex::encode(implementation)))
                 }
@@ -2100,7 +2106,8 @@ mod tests {
                     let address: Address = serde_json::from_value(params[0].clone()).unwrap();
                     let pins = mock_pins();
                     let moved = self.moved.lock().unwrap().map(|(_, to, _)| to);
-                    if address == pins.coordinator.proxy || address == pins.registry.proxy {
+                    if address == pins.coordinator.proxy || address == pins.registry.unwrap().proxy
+                    {
                         json!(format!("0x{}", hex::encode(PROXY_CODE)))
                     } else if moved == Some(address) {
                         json!(format!("0x{}", hex::encode(NEXT_CODE)))

@@ -1,5 +1,6 @@
 import {deployProxy,implementationCodeHash} from "../test/helpers/proxy.ts";
-// Local-only: real Rust process, real secp256k1 proofs, epoch registry and EVM.
+// Local-only: real Rust process, real secp256k1 proofs, epoch registry, EVM and drand beacon epochs served by a fake relay, whose
+// rounds a real D20BeaconVerifier checks. Run it with `npx hardhat run scripts/keeper-integration.ts`.
 import {createServer} from "node:http";
 import {spawn} from "node:child_process";
 import {mkdir, mkdtemp, writeFile} from "node:fs/promises";
@@ -10,14 +11,8 @@ import assert from "node:assert/strict";
 import {buildKeeper} from "./lib/keeper-binary.ts";
 import {network} from "hardhat";
 import {TEST_SECRET, publicKey} from "../test/helpers/proof.ts";
-import {epochFixtureData} from "../test/helpers/epoch.ts";
-import {canonicalApiRequest} from "../src/sources.ts";
-import {BUILTIN_EPOCH_RECIPES,type EpochProvider} from "../src/epoch.ts";
-// The exact recipe 1 body AirnodeHub's dRPC gateway accepts: a nested eth_call params object, no responseProjection.
-const ETHEREUM_BLOCK_HASH_BODY='{"operation":"jsonRpc","parameters":{"network":"ethereum","method":"eth_call","params":[{"to":"0xcA11bde05977b3631167028862bE2a173976CA11","data":"0x27e86d6e"},"latest"]}}';
-// The rollout catalog: five recipes, neighbouring slots never share a provider.
-const CATALOG=[0,1,2,4,5];
-const providerOf=(recipe:number)=>BUILTIN_EPOCH_RECIPES[recipe].provider;
+import {beaconAttestation,registerTestBeacon,signTestRound,testBeacon} from "../test/helpers/beacon.ts";
+import {beaconCanonicalRequest,beaconRoundTime,type BeaconRegistration} from "../src/index.ts";
 
 const {ethers, networkHelpers, provider} = await network.create({network:"loadSim"});
 assert.equal((await ethers.provider.getNetwork()).chainId,31337n);
@@ -29,20 +24,33 @@ const signers=["11","22","33","44"].map(value=>new ethers.Wallet("0x"+value.repe
 await writeFile(vrfPath,ethers.toBeHex(TEST_SECRET,32),{mode:0o600});await writeFile(txPath,wallet.privateKey,{mode:0o600});
 const [owner,player]=await ethers.getSigners();
 const registry=await deployProxy(ethers,"EpochEntropy",[signers.map(s=>s.address),owner.address,wallet.address]);
-// Epoch 1 keeps the initial four-recipe catalog; from epoch 2 one test Airnode per provider signs the five-source catalog.
-const providerSigners:Record<EpochProvider,InstanceType<typeof ethers.Wallet>>={hyperliquid:signers[0],drpc:signers[1],tickerlayer:signers[2],nodary:new ethers.Wallet("0x"+"55".repeat(32))};
-await registry.scheduleCatalog(CATALOG,CATALOG.map(recipe=>providerSigners[providerOf(recipe)].address),2);
-const signerFor=(address:string)=>[...signers,...Object.values(providerSigners)].find(w=>w.address===address)!;
+// Epoch 1 keeps the initial four-recipe catalog, signed API recipes that the keeper does not prepare (keeper-beacon-integration.ts
+// covers what it does with them), so the epochs below start at epoch 2, where a five-source catalog of drand test networks takes over.
+// The networks share the test beacon's key and schedule and differ in their chain hash: the one relay tells them apart, and can fail one
+// of them alone. The registry's own recipes are 0 to 5, so the networks are recipes 6 and on.
+const verifier=await ethers.deployContract("D20BeaconVerifier");
+const latestBlock=async()=>await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string,timestamp:string};
+const latestTime=async()=>BigInt((await latestBlock()).timestamp);
+const networks:BeaconRegistration[]=[],recipeOfChain=new Map<string,number>();
+async function registerNetwork(){
+  const beacon={...testBeacon(await verifier.getAddress(),await latestTime()),chainHash:ethers.id(`D20 test beacon network ${networks.length+1}`)};
+  await registerTestBeacon(registry,beacon);networks.push(beacon);
+  const recipe=Number(await registry.recipeCount())-1;recipeOfChain.set(beacon.chainHash.slice(2),recipe);return recipe;
+}
+const networkOf=(recipe:number)=>networks[recipe-6];
+const CATALOG:number[]=[];for(let n=0;n<5;n++)CATALOG.push(await registerNetwork());
+await registry.scheduleCatalog(CATALOG,await Promise.all(CATALOG.map(recipe=>registry.slotSigner(recipe))),2);
 const rng=await deployProxy(ethers,"D20VRFCoordinator",[publicKey(),owner.address,owner.address,123,1,await registry.getAddress(),0]);
 await rng.setPricing(123,0,300000); // Flat fee: the fixture consumers send exact values.
 const game=await ethers.deployContract("TestConsumer",[await rng.getAddress()]);
 const singleSelector=rng.interface.getFunction("fulfillRandomness")!.selector,batchSelector=rng.interface.getFunction("fulfillRandomnessBatch")!.selector;
-const counts:Record<string,number>={},apiCounts:Record<string,number>={},apiBodiesByRecipe=Array(BUILTIN_EPOCH_RECIPES.length).fill(0),apiRecipesByEpoch:Record<string,number[]>={},unexpectedApiBodies:Array<{recipe:number;text:string}>=[];
+// Relay requests by the epoch current when they arrive, by recipe, and the recipes asked for in each epoch in order; requests the fake relay did not expect.
+const counts:Record<string,number>={},relayCounts:Record<string,number>={},relayHitsByRecipe:Record<number,number>={},relayRecipesByEpoch:Record<string,number[]>={},unexpectedRelayRequests:string[]=[];
 const raw:string[]=[];let estimateRejects=0,rpcDelayMs=0;
 const warmRpcLatency:Array<{rpcDelayMs:number;requestId:string;wallMs:number}>=[];
-let holdApi=false,releaseApi:(()=>void)|undefined,apiEntered:(()=>void)|undefined;
-const apiRejectRecipes=new Set<number>(),apiUnavailableProviders=new Set<EpochProvider>();
-let apiOutage=false,apiRetryAfter="2",apiReject=false,holdEpochSend=false,epochSendEntered:(()=>void)|undefined;
+let holdRelay=false,releaseRelay:(()=>void)|undefined,relayEntered:(()=>void)|undefined;
+const relayRejectRecipes=new Set<number>();
+let relayOutage=false,relayReject=false,holdEpochSend=false,epochSendEntered:(()=>void)|undefined;
 let loseEpochAck=false,unknownEpochSend=false,stallEpochEstimate=false,epochEstimateCalls=0;
 let holdProofEstimate=false,proofEstimateEntered:(()=>void)|undefined,releaseProofEstimate:(()=>void)|undefined;
 let hangPrimary=false,primaryCalls=0,fallbackCalls=0,proofContextDelayMs=0,rpcRateLimit=false;
@@ -65,40 +73,42 @@ function unusableAnswer(body:{method:string,params?:unknown[]}):unknown{
 // as a node refuses more gas than it estimates (0: no limit).
 let batchEstimateLimit=0,refusedBatchEstimates=0;
 const slowProofIds=new Set<string>();
+// The epoch a relay request serves and the recipe's selection in it: the selected source or a fallback whose window is
+// already open.
+async function requestedSource(recipe:number){
+  const block=await latestBlock();
+  const epoch=await registry.nextEpochToPrepare(BigInt(block.number));
+  let selection;
+  const sources=Number(await registry.sourceCountAt(epoch));
+  for(let attempt=0;attempt<sources&&!selection;attempt++){
+    const s=await registry.getEpochFallbackSelection(epoch,attempt);
+    if(Number(s.recipe)===recipe){assert.ok(BigInt(block.number)>=await registry.fallbackOpensAt(epoch,attempt),"Fallback source fetched before its window");selection=s;}
+  }
+  assert.ok(selection,"Source is not a fallback of the epoch");
+  return {epoch,selection};
+}
 const server=createServer(async(req,res)=>{
   const reply=(value:unknown,status=200)=>{res.writeHead(status,{"Content-Type":"application/json"});res.end(JSON.stringify(value));};
   try {
-    const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));const text=Buffer.concat(chunks).toString(),body=JSON.parse(text);
-    if(req.url?.startsWith("/api/")) {
-      const recipe=Number(req.url.split("/").at(-1));assert.ok(recipe>=0&&recipe<Number(await registry.recipeCount()));
-      const block=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string,timestamp:string};
-      const epoch=await registry.nextEpochToPrepare(BigInt(block.number));
-      // The requested source must be the selected one or a fallback whose window is already open.
-      let selection;
-      const sources=Number(await registry.sourceCountAt(epoch));
-      for(let attempt=0;attempt<sources&&!selection;attempt++){
-        const s=await registry.getEpochFallbackSelection(epoch,attempt);
-        if(Number(s.recipe)===recipe){assert.ok(BigInt(block.number)>=await registry.fallbackOpensAt(epoch,attempt),"Fallback source fetched before its window");selection=s;}
-      }
-      assert.ok(selection,"Source is not a fallback of the epoch");
-      // The keeper posts the registered recipe body byte for byte; its canonical form is the registry's canonical request.
-      const registered=await registry.getRecipe(recipe);
-      if(text!==registered.body||(recipe===1&&text!==ETHEREUM_BLOCK_HASH_BODY)){unexpectedApiBodies.push({recipe,text});throw new Error("Unexpected epoch API body");}
-      const canonical=canonicalApiRequest(body);
-      assert.equal(canonical,selection.canonicalRequest);apiCounts[String(epoch)]=(apiCounts[String(epoch)]??0)+1;apiBodiesByRecipe[recipe]++;(apiRecipesByEpoch[String(epoch)]??=[]).push(recipe);
-      apiEntered?.();
-      if(holdApi)await new Promise<void>(resolve=>{releaseApi=resolve;});
-      if(apiOutage){res.setHeader("Retry-After",apiRetryAfter);reply({error:"fixture unavailable"},429);return;}
-      if(apiUnavailableProviders.has(providerOf(recipe))){reply({error:"fixture gateway down"},503);return;} // Transient: counts toward the provider's circuit.
-      if(apiReject||apiRejectRecipes.has(recipe)){reply({error:"fixture rejects query"},400);return;} // Permanent: no Retry-After, not a server error.
-      const fresh=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {timestamp:string};
-      const timestamp=BigInt(fresh.timestamp);
-      const data={...epochFixtureData(recipe),...(recipe===2||recipe===3?{size:0.000001}:{})};
-      const requestHash=ethers.id(canonical);
-      const digest=ethers.keccak256(ethers.solidityPacked(["bytes32","uint256","bytes"],[requestHash,timestamp,ethers.toUtf8Bytes(JSON.stringify(data))]));
-      const airnode=signerFor(selection.airnode),signature=await airnode.signMessage(ethers.getBytes(digest));
-      reply({airnode:airnode.address,requestHash,timestamp:String(timestamp),data,signature});return;
+    const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));const text=Buffer.concat(chunks).toString();
+    // The one relay of the local override: TEST_API_BASE/<chain hash>/public/<round>, as a drand relay answers it. A round scheduled after
+    // the chain's latest block time is not published yet (425), as on a real relay.
+    const relay=/^\/api\/([0-9a-f]{64})\/public\/([1-9][0-9]*)$/.exec(req.url??"");
+    if(relay){
+      const recipe=recipeOfChain.get(relay[1]);
+      if(req.method!=="GET"||recipe===undefined){unexpectedRelayRequests.push(`${req.method} ${req.url}`);throw new Error("Unexpected relay request");}
+      const {epoch}=await requestedSource(recipe);
+      relayCounts[String(epoch)]=(relayCounts[String(epoch)]??0)+1;relayHitsByRecipe[recipe]=(relayHitsByRecipe[recipe]??0)+1;(relayRecipesByEpoch[String(epoch)]??=[]).push(recipe);
+      relayEntered?.();
+      if(holdRelay)await new Promise<void>(resolve=>{releaseRelay=resolve;});
+      if(relayOutage){reply({error:"fixture unavailable"},503);return;}
+      if(relayReject||relayRejectRecipes.has(recipe)){reply({error:"fixture has no such round"},404);return;}
+      const round=BigInt(relay[2]);
+      if(beaconRoundTime(networkOf(recipe),round)>await latestTime()){reply({error:"too early"},425);return;}
+      const signature=signTestRound(round);
+      reply({round:Number(round),randomness:ethers.keccak256(signature).slice(2),signature:signature.slice(2)});return;
     }
+    const body=JSON.parse(text);
     assert.ok(req.url==="/rpc"||req.url==="/primary"||req.url==="/unusable");
     if(rpcRateLimit){reply({jsonrpc:"2.0",id:null,error:{code:429,message:"rate limit exceeded"}},429);return;}
     // A JSON-RPC batch is answered element by element through this same endpoint, in order, so every hold,
@@ -152,7 +162,7 @@ const server=createServer(async(req,res)=>{
 server.listen(0,"127.0.0.1");await once(server,"listening");const addr=server.address();assert.ok(addr&&typeof addr!=="string");const base=`http://127.0.0.1:${addr.port}`;
 const env:NodeJS.ProcessEnv={...process.env,NEON_DB:undefined,TELEGRAM_BOT_TOKEN:undefined,TELEGRAM_CHAT_ID:undefined,TELEGRAM_LOW_BALANCE_WEI:undefined,DISCORD_BOT_TOKEN:undefined,DISCORD_PROTOCOL_CHANNEL_ID:undefined,HEALTH_API_URL:undefined,HEALTH_API_KEY:undefined,HEALTH_INTERVAL_SECONDS:undefined,
   RPC_URLS:`${base}/rpc`,CHAIN_ID:"31337",COORDINATOR_ADDRESS:await rng.getAddress(),ALLOWED_CONSUMERS:await game.getAddress(),
-  TX_KEY_FILE:txPath,VRF_KEY_FILE:vrfPath,TEST_API_BASE:`${base}/api`,EXPECTED_SOURCE_HASH:undefined,
+  TX_KEY_FILE:txPath,VRF_KEY_FILE:vrfPath,TEST_API_BASE:`${base}/api`,DRAND_RELAYS:undefined,EPOCH_API_ENDPOINTS:undefined,EXPECTED_SOURCE_HASH:undefined,
   EXPECTED_CODE_HASH:undefined,EXPECTED_PROTOCOL_HASH:await rng.protocolConfigurationHash(),
     EXPECTED_IMPLEMENTATION_CODE_HASH:await implementationCodeHash(ethers,rng),
     EXPECTED_REGISTRY_IMPLEMENTATION_CODE_HASH:await implementationCodeHash(ethers,registry),CANCEL_MAX_FEE_PER_GAS_WEI:"150000000000",FEE_COVERAGE_BPS:"0",
@@ -162,7 +172,7 @@ function start(overrides:NodeJS.ProcessEnv={},args=["run","--once"],db="keeper.s
   const child=spawn(binary,args,{env:{...env,KEEPER_DB:join(dir,db),TEST_LOCK_DIR:join(dir,"locks"),...overrides},windowsHide:true,stdio:["ignore","pipe","pipe"]});children.add(child);
   let out="",err="";child.stdout.on("data",d=>{out+=d;});child.stderr.on("data",d=>{err+=d;});
   if(process.env.DEBUG_KEEPER)child.stderr.pipe(process.stderr); // Local diagnosis of a failing scenario.
-  const exit=new Promise<{code:number|null,out:string,err:string}>((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>{children.delete(child);resolve({code,out,err});});});return {child,exit};
+  const exit=new Promise<{code:number|null,out:string,err:string}>((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>{children.delete(child);resolve({code,out,err});});});return {child,exit,log:()=>err};
 }
 async function run(overrides:NodeJS.ProcessEnv={},args?:string[],db?:string) {
   const p=start(overrides,args,db);const timer=setTimeout(()=>p.child.kill(),30000);
@@ -171,7 +181,9 @@ async function run(overrides:NodeJS.ProcessEnv={},args?:string[],db?:string) {
 async function until(condition:()=>Promise<boolean>,message:string,ms=12000){const end=Date.now()+ms;while(Date.now()<end){if(await condition())return;await new Promise(r=>setTimeout(r,60));}throw Error(message);}
 async function mineTo(n:bigint){const latest=BigInt(await provider.request({method:"eth_blockNumber",params:[]}) as string);if(n>latest)await provider.request({method:"hardhat_mine",params:[ethers.toQuantity(n-latest),"0x0"]});}
 async function request(label:string){
-  try{await game.connect(player).getFunction("request")(ethers.id(label),200000,player.address,{value:123});}
+  // An explicit gas limit: an estimate made before the epoch's publication is a few gas short of the request after it (ethers adds no
+  // headroom), so a request that the running keeper's commit overtakes would run out of gas.
+  try{await game.connect(player).getFunction("request")(ethers.id(label),200000,player.address,{value:123,gasLimit:1_500_000});}
   catch(error){
     // A request that will not even be created makes every later assertion unreadable: say where the chain stood.
     const head=await ethers.provider.getBlockNumber(),epochId=await registry.epochForBlock(head);
@@ -179,7 +191,9 @@ async function request(label:string){
   }
   await networkHelpers.mine(2);return await game.lastRequestId() as bigint;
 }
-function rows(sql:string,db="keeper.sqlite"){const sqlite=new DatabaseSync(join(dir,db),{readOnly:true});try{return sqlite.prepare(sql).all();}finally{sqlite.close();}}
+// Open a keeper's journal and wait out its locks: a keeper started after a SIGKILL recovers the WAL, and a reader without a busy timeout fails meanwhile with SQLITE_BUSY_RECOVERY.
+function openJournal(path:string,readOnly=false){const db=new DatabaseSync(path,{readOnly});db.exec("PRAGMA busy_timeout=5000");return db;}
+function rows(sql:string,db="keeper.sqlite"){const sqlite=openJournal(join(dir,db),true);try{return sqlite.prepare(sql).all();}finally{sqlite.close();}}
 async function preparedEpoch(n:number){await until(async()=>rows(`SELECT api FROM epoch_work WHERE epoch=${n}`).some(r=>r.api!==null),`epoch ${n} packet missing`);}
 async function requests(label:string,count:number){const ids:bigint[]=[];for(let n=0;n<count;n++)ids.push(await request(`${label}-${n}`));return ids;}
 async function advanceTarget(id:bigint){const r=await rng.getRequest(id);if(r.targetBlock>0n)await mineTo(r.targetBlock+await rng.confirmationBlocks());}
@@ -191,13 +205,13 @@ try {
   const pin=await start({EXPECTED_PROTOCOL_HASH:ethers.ZeroHash}).exit;assert.equal(pin.code,1);assert.match(pin.err,/configuration hash mismatch/);
   const sourcePin=await start({EXPECTED_SOURCE_HASH:ethers.ZeroHash}).exit;assert.equal(sourcePin.code,1);assert.match(sourcePin.err,/EXPECTED_PROTOCOL_HASH/);
   await assert.rejects(game.connect(player).getFunction("request")(ethers.id("before-bootstrap"),200000,player.address,{value:123}));
-  await run();assert.equal(Object.values(apiCounts).reduce((a,b)=>a+b,0),0);assert.equal(raw.length,0);
-  await mineTo(await registry.firstEpochStart());
-  await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(1);await run();
-  assert.equal(apiCounts["1"],1);assert.equal(rows("SELECT COUNT(*) n FROM jobs")[0].n,0);
+  await run();assert.equal(Object.values(relayCounts).reduce((a,b)=>a+b,0),0);assert.equal(raw.length,0);
+  await mineTo(await registry.epochStart(2));
+  await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(2);await run();
+  assert.equal(relayCounts["2"],1);assert.equal(rows("SELECT COUNT(*) n FROM jobs")[0].n,0);
   assert.equal(raw.length,0,"Idle locally prepared epoch consumed a nonce");
-  assert.equal((await registry.getEpoch(1)).epochHash,ethers.ZeroHash);
-  const packet1=rows("SELECT api FROM epoch_work WHERE epoch=1")[0].api;
+  assert.equal((await registry.getEpoch(2)).epochHash,ethers.ZeroHash);
+  const packet1=rows("SELECT api FROM epoch_work WHERE epoch=2")[0].api;
   // A separate consumer absent from the old ALLOWED_CONSUMERS value must trigger publication and delivery.
   const outsider=await ethers.deployContract("TestConsumer",[await rng.getAddress()]);
   assert.notEqual(await outsider.getAddress(),await game.getAddress());
@@ -208,10 +222,10 @@ try {
   assert.equal((await rng.getRequest(first)).targetBlock,0n);assert.equal((await rng.getRequest(first)).epochHash,ethers.ZeroHash);
   assert.equal(await ethers.provider.getBalance(await rng.getAddress()),246n);
   loseEpochAck=true;await run();loseEpochAck=false;await run();
-  const committed1=await registry.getEpoch(1);assert.notEqual(committed1.epochHash,ethers.ZeroHash);
+  const committed1=await registry.getEpoch(2);assert.notEqual(committed1.epochHash,ethers.ZeroHash);
   assert.equal((await rng.getRequest(first)).targetBlock,committed1.committedBlock+1n);
   assert.equal((await rng.getRequest(batch)).targetBlock,(await rng.getRequest(first)).targetBlock);
-  assert.equal(apiCounts["1"],1);assert.equal(rows("SELECT api FROM epoch_work WHERE epoch=1")[0].api,packet1);
+  assert.equal(relayCounts["2"],1);assert.equal(rows("SELECT api FROM epoch_work WHERE epoch=2")[0].api,packet1);
   assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE kind='epoch'")[0].n,1);
   await settle(first);await settle(batch);
   assert.equal((await rng.getRequest(first)).consumer,await outsider.getAddress());
@@ -323,7 +337,7 @@ try {
       const elapsed=Date.now()-startedAt;
       assert.equal((await rng.getRequest(id)).delivered,true);
       assert.equal((await rng.queryFilter(rng.filters.RandomnessFulfilled(id))).length,1);
-      assert.equal(apiCounts["1"],1,"RPC latency caused snapshot refresh");
+      assert.equal(relayCounts["2"],1,"RPC latency caused snapshot refresh");
       warmRpcLatency.push({rpcDelayMs:delay,requestId:id.toString(),wallMs:elapsed});
       rpcDelayMs=0;
       await until(async()=>rows("SELECT COUNT(*) n FROM txs WHERE state IN ('signed','submitted')")[0].n===0,"Warm latency request receipt did not reconcile");
@@ -332,8 +346,12 @@ try {
 
   const second=await request("proof-restart");await run({SEND_TRANSACTIONS:"false"});
   const proofBefore=rows(`SELECT proof,call FROM jobs WHERE id='${second}'`)[0];assert.ok(proofBefore.proof);
+  // History compaction runs every 60 seconds of wall-clock time and clears a served request's proof: hold it back while the row is compared.
+  const compactAfter=(at:number)=>{const db=openJournal(join(dir,"keeper.sqlite"));db.exec(`INSERT INTO meta(key,value) VALUES('history:compact_after','${at}') ON CONFLICT(key) DO UPDATE SET value=excluded.value`);db.close();};
+  compactAfter(Number.MAX_SAFE_INTEGER);
   const contextBefore=counts["eth_call:getProofContext"];await settle(second);await run();
   assert.deepEqual(rows(`SELECT proof,call FROM jobs WHERE id='${second}'`)[0],proofBefore);
+  compactAfter(Math.floor(Date.now()/1000)+60);
   assert.equal(counts["eth_call:getProofContext"],contextBefore);
 
   // A real daemon outage recovers undiscovered live gaps, without reviving expired work.
@@ -345,7 +363,7 @@ try {
   runningBeforeOutage.child.kill("SIGKILL");await runningBeforeOutage.exit;
   assert.equal(children.size,0,"Keeper must actually be stopped during outage");
   const callbacksBeforeOutage=await game.callbackCount(),servedBeforeOutage=await rng.lastServedIndex();
-  const apiBeforeOutage={...apiCounts},rawBeforeOutage=raw.length;
+  const relayBeforeOutage={...relayCounts},rawBeforeOutage=raw.length;
   const recoveredA=await request("outage-undiscovered-gap-a"),recoveredB=await request("outage-undiscovered-gap-b");
   assert.equal(rows(`SELECT COUNT(*) n FROM jobs WHERE id IN ('${recoveredA}','${recoveredB}')`)[0].n,0,"Stopped daemon discovered requests");
   const outageStart=(await ethers.provider.getBlock("latest"))!;
@@ -366,43 +384,44 @@ try {
   assert.equal((await rng.queryFilter(rng.filters.ProofVerified(expiredBeforeOutage))).length,0);
   assert.equal(rows(`SELECT COUNT(*) n FROM txs WHERE job='${expiredBeforeOutage}'`)[0].n,0);
   assert.equal(rows(`SELECT COUNT(*) n FROM jobs WHERE id='${expiredBeforeOutage}' AND proof IS NOT NULL`)[0].n,0);
-  assert.deepEqual(apiCounts,apiBeforeOutage,"Recovery refreshed an already committed snapshot");
+  assert.deepEqual(relayCounts,relayBeforeOutage,"Recovery refreshed an already committed snapshot");
   const refundBalance=await ethers.provider.getBalance(player.address);await rng.refundRequest(expiredBeforeOutage);
   assert.equal(await ethers.provider.getBalance(player.address),refundBalance+123n);
   const outageRecovery={chainSeconds:30,blocks:30,liveRequestsRecovered:2,expiredRequestsUnserved:1,duplicateFulfillments:0};
 
-  // A current-epoch HTTP fetch cannot block a ready request from the preceding epoch.
-  await mineTo(await registry.epochStart(2)-4n);const old=await request("previous-epoch-during-http");
-  await mineTo(await registry.epochStart(2));holdApi=true;
-  const entered=new Promise<void>(resolve=>{apiEntered=resolve;});const daemon=start({},["run"]);
-  await entered;await until(async()=>(await rng.getRequest(old)).fulfilled,"Background epoch HTTP blocked ready proof");
-  assert.equal((await registry.getEpoch(2)).epochHash,ethers.ZeroHash);
-  holdApi=false;releaseApi?.();apiEntered=undefined;await preparedEpoch(2);
+  // A current-epoch relay fetch cannot block a ready request from the preceding epoch.
+  await mineTo(await registry.epochStart(3)-4n);const old=await request("previous-epoch-during-relay-fetch");
+  await mineTo(await registry.epochStart(3));holdRelay=true;
+  const entered=new Promise<void>(resolve=>{relayEntered=resolve;});const daemon=start({},["run"]);
+  await entered;await until(async()=>(await rng.getRequest(old)).fulfilled,"Background epoch relay fetch blocked ready proof");
+  assert.equal((await registry.getEpoch(3)).epochHash,ethers.ZeroHash);
+  holdRelay=false;releaseRelay?.();relayEntered=undefined;await preparedEpoch(3);
   daemon.child.kill("SIGKILL");await daemon.exit;await run();
-  assert.equal((await registry.getEpoch(2)).epochHash,ethers.ZeroHash,"Idle prepared snapshot was published");
-  assert.equal(apiCounts["2"],1);assert.equal(rows("SELECT COUNT(*) n FROM pragma_table_info('jobs') WHERE name='api'")[0].n,0);
+  assert.equal((await registry.getEpoch(3)).epochHash,ethers.ZeroHash,"Idle prepared snapshot was published");
+  // The held request answers the fetch if the keeper waited for it, and is asked again if the relay's time limit passed first.
+  assert.ok(relayCounts["3"]>=1&&relayCounts["3"]<=3,`Epoch 3 was fetched ${relayCounts["3"]} times`);assert.equal(rows("SELECT COUNT(*) n FROM pragma_table_info('jobs') WHERE name='api'")[0].n,0);
 
   // A crash after signing keeps the exact epoch bytes and exclusive wallet nonce.
   const laneRequest=await request("maintenance-lane-exclusivity");await run({SEND_TRANSACTIONS:"false"});
-  const apiBeforeCrash={...apiCounts};holdEpochSend=true;const enteredSend=new Promise<void>(resolve=>{epochSendEntered=resolve;});
+  const relayBeforeCrash={...relayCounts};holdEpochSend=true;const enteredSend=new Promise<void>(resolve=>{epochSendEntered=resolve;});
   const crashing=start();await Promise.race([enteredSend,crashing.exit.then(r=>{throw Error(`Epoch broadcast missing ${r.err}`);})]);
   const savedRaw=raw.at(-1)!;const signed=rows("SELECT raw,kind,nonce FROM txs WHERE state IN ('signed','submitted')");
   assert.equal(signed.length,1);assert.equal(signed[0].raw,savedRaw);assert.equal(signed[0].kind,"epoch");
   assert.equal((await rng.getRequest(laneRequest)).fulfilled,false,"Request used unresolved maintenance nonce");
   crashing.child.kill("SIGKILL");await crashing.exit;holdEpochSend=false;epochSendEntered=undefined;
   await networkHelpers.time.increase(3);await run();assert.equal(raw.at(-1),savedRaw,"Epoch crash recovery changed signed bytes");
-  await settle(laneRequest);assert.deepEqual(apiCounts,apiBeforeCrash);
+  await settle(laneRequest);assert.deepEqual(relayCounts,relayBeforeCrash);
   assert.equal(rows("SELECT COUNT(DISTINCT nonce) n FROM txs WHERE state IN ('signed','submitted')")[0].n,0);
 
   const bad=await request("bad-proof-preflight");await run({SEND_TRANSACTIONS:"false"});
-  const sqlite=new DatabaseSync(join(dir,"keeper.sqlite"));const badProof=JSON.parse(String(sqlite.prepare("SELECT proof FROM jobs WHERE id=?").get(String(bad))!.proof));badProof.s=ethers.toBeHex(BigInt(badProof.s)^1n);
+  const sqlite=openJournal(join(dir,"keeper.sqlite"));const badProof=JSON.parse(String(sqlite.prepare("SELECT proof FROM jobs WHERE id=?").get(String(bad))!.proof));badProof.s=ethers.toBeHex(BigInt(badProof.s)^1n);
   sqlite.prepare("UPDATE jobs SET proof=?,call=? WHERE id=?").run(JSON.stringify(badProof),rng.interface.encodeFunctionData("fulfillRandomness",[bad,badProof]),String(bad));sqlite.close();
   const beforeBad=raw.length;await run();assert.ok(estimateRejects>0);assert.equal(raw.length,beforeBad);assert.equal(rows(`SELECT COUNT(*) n FROM txs WHERE job='${bad}'`)[0].n,0);
   await networkHelpers.time.increase(61);const estimates=counts.eth_estimateGas;await run();assert.equal(counts.eth_estimateGas,estimates);await rng.refundRequest(bad);
 
   // Slow publication preflight must leave ready previous-epoch work schedulable.
-  await mineTo(await registry.epochStart(3)-4n);const previous=await request("old-ready-during-estimate");
-  await mineTo(await registry.epochStart(3));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(3);
+  await mineTo(await registry.epochStart(4)-4n);const previous=await request("old-ready-during-estimate");
+  await mineTo(await registry.epochStart(4));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(4);
   const current=await request("current-demand-stalled-estimate");
   stallEpochEstimate=true;const stalledBefore=epochEstimateCalls,stallStarted=Date.now();
   await run();assert.equal((await rng.getRequest(previous)).fulfilled,true,"Stalled publication estimate starved ready request");
@@ -411,17 +430,17 @@ try {
   stallEpochEstimate=false;await new Promise(resolve=>setTimeout(resolve,3100));await settle(current);
 
   // Unpublished demand remains escrowed and cannot acquire substitute epoch data.
-  await mineTo(await registry.epochStart(4));apiOutage=true;apiRetryAfter="30";
-  const missing=await request("unpublished-request-expiry");await run();const outageCalls=apiCounts["4"];
-  await run();assert.equal(apiCounts["4"],outageCalls,"Retry-After was ignored");
+  await mineTo(await registry.epochStart(5));relayOutage=true;
+  const missing=await request("unpublished-request-expiry");await run();
   assert.equal((await rng.getRequest(missing)).epochHash,ethers.ZeroHash);
+  assert.equal(rows("SELECT COUNT(*) n FROM epoch_work WHERE epoch=5 AND api IS NULL AND state='pending' AND last_error IS NOT NULL")[0].n,1,"The failed fetch left no retryable work");
   await networkHelpers.time.increaseTo((await rng.getRequest(missing)).deadline+1n);const rawAtExpiry=raw.length;
   await run();assert.equal(raw.length,rawAtExpiry,"Expired unpublished request caused a transaction");
-  assert.equal(apiCounts["4"],outageCalls,"Expired demand retried API work");await rng.refundRequest(missing);
-  assert.equal((await registry.getEpoch(4)).epochHash,ethers.ZeroHash);
+  await rng.refundRequest(missing);
+  assert.equal((await registry.getEpoch(5)).epochHash,ethers.ZeroHash);
 
   // Unknown publication acknowledgment expires with demand, not with epoch start.
-  apiOutage=false;await mineTo(await registry.epochStart(5));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(5);
+  relayOutage=false;await mineTo(await registry.epochStart(6));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(6);
   const abandoned=await request("ambiguous-publication-demand");unknownEpochSend=true;await run();
   const unresolved=rows("SELECT * FROM txs WHERE state IN ('signed','submitted')");assert.equal(unresolved.length,1);assert.equal(unresolved[0].kind,"epoch");
   const epochRaw=String(unresolved[0].raw),epochNonce=unresolved[0].nonce;
@@ -429,30 +448,30 @@ try {
   await run();await run();assert.equal(raw.slice(cutoffRaw).includes(epochRaw),false,"Expired demand's epoch bytes were rebroadcast");
   const cancellation=rows(`SELECT kind,nonce FROM txs WHERE nonce=${epochNonce} ORDER BY id DESC`)[0];assert.equal(cancellation.kind,"epoch_cancel");assert.equal(cancellation.nonce,epochNonce);
   assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE state IN ('signed','submitted')")[0].n,0);
-  assert.equal((await registry.getEpoch(5)).epochHash,ethers.ZeroHash);await rng.refundRequest(abandoned);
-  assert.equal(apiCounts["5"],1,"Cancellation refreshed the fixed local snapshot");
+  assert.equal((await registry.getEpoch(6)).epochHash,ethers.ZeroHash);await rng.refundRequest(abandoned);
+  assert.equal(relayCounts["6"],1,"Cancellation refreshed the fixed local snapshot");
 
   // First publication can occur after an epoch boundary for its still-live request.
-  await mineTo(await registry.epochStart(6));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(6);
+  await mineTo(await registry.epochStart(7));await run({SEND_TRANSACTIONS:"false"});await preparedEpoch(7);
   const rawIdle=raw.length;await run();assert.equal(raw.length,rawIdle);
-  await mineTo(await registry.epochStart(7)-4n);const lateEpoch=await request("previous-epoch-first-publication");
-  await mineTo(await registry.epochStart(7));await settle(lateEpoch);
-  assert.equal((await rng.getRequest(lateEpoch)).epochId,6n);
-  assert((await registry.getEpoch(6)).committedBlock>=await registry.epochStart(7));assert.equal(apiCounts["6"],1);
+  await mineTo(await registry.epochStart(8)-4n);const lateEpoch=await request("previous-epoch-first-publication");
+  await mineTo(await registry.epochStart(8));await settle(lateEpoch);
+  assert.equal((await rng.getRequest(lateEpoch)).epochId,7n);
+  assert((await registry.getEpoch(7)).committedBlock>=await registry.epochStart(8));assert.equal(relayCounts["7"],1);
   assert.equal(rows("SELECT COUNT(*) n FROM jobs WHERE id LIKE 'epoch:%'")[0].n,0);
   assert.equal(rows("SELECT COUNT(*) n FROM audit_events WHERE request_id LIKE 'epoch:%'")[0].n,0);
   assert.ok(rows("SELECT nonce,COUNT(DISTINCT job) n FROM txs GROUP BY nonce").every(r=>r.n===1));
   assert.equal(counts["eth_call:verifyRequestProof"]??0,0);assert.equal(counts["eth_call:requestSeed"]??0,0);
-  await networkHelpers.time.increase(61);apiOutage=true;
-  const compactDb=new DatabaseSync(join(dir,"keeper.sqlite"));compactDb.exec("UPDATE meta SET value='0' WHERE key='history:compact_after'");compactDb.close();await run();
-  assert.equal(rows("SELECT api,selection FROM epoch_work WHERE epoch=1")[0].api,null);
+  await networkHelpers.time.increase(61);relayOutage=true;
+  const compactDb=openJournal(join(dir,"keeper.sqlite"));compactDb.exec("UPDATE meta SET value='0' WHERE key='history:compact_after'");compactDb.close();await run();
+  assert.equal(rows("SELECT api,selection FROM epoch_work WHERE epoch=2")[0].api,null);
   assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE state='resolved' AND (raw!='' OR payload!='')")[0].n,0);
-  assert.notEqual((await registry.getEpoch(1)).epochHash,ethers.ZeroHash);
+  assert.notEqual((await registry.getEpoch(2)).epochHash,ethers.ZeroHash);
   await run({},["migrate","--from",join(dir,"keeper.sqlite"),"--prepare"],"migrated.sqlite");
   await run({},["migrate","--from",join(dir,"keeper.sqlite"),"--apply"],"migrated.sqlite");await run({},undefined,"migrated.sqlite");
-  assert.equal(rows("SELECT api FROM epoch_work WHERE epoch=1","migrated.sqlite")[0].api,null);
+  assert.equal(rows("SELECT api FROM epoch_work WHERE epoch=2","migrated.sqlite")[0].api,null);
   // Upgrade while fulfillment preflight is outstanding: unchanged proxy address must not bypass implementation pins.
-  apiOutage=false;await mineTo(await registry.epochStart(8));
+  relayOutage=false;await mineTo(await registry.epochStart(9));
   const warmUpgradeEpoch=await request("upgrade-epoch-bootstrap");await settle(warmUpgradeEpoch,{},"migrated.sqlite");
   const upgradeRequest=await request("pending-through-reviewed-proxy-upgrade");
   holdProofEstimate=true;const preflightEntered=new Promise<void>(resolve=>{proofEstimateEntered=resolve;});
@@ -475,29 +494,34 @@ try {
   await new Promise(resolve=>setTimeout(resolve,3100)); // Respect the preflight retry marker retained through the rejected upgrade tick.
   await settle(upgradeRequest,reviewedPins,"migrated.sqlite");
   assert.deepEqual(rows(`SELECT proof,call FROM jobs WHERE id='${upgradeRequest}'`,"migrated.sqlite")[0],preparedBeforeReview);
-  // Four transient fetch errors must survive process restart without poisoning this epoch. The third opens the provider's
-  // circuit, so the fourth attempt sends no request; once the cooldown has passed the same source recovers.
-  await mineTo(await registry.epochStart(9));apiOutage=true;apiRetryAfter="2";
+  // Four failed relay fetches must survive process restart without poisoning this epoch: each restart asks the relay again, its circuit
+  // opens at the third failure and is still probed, and once the relay answers the same source is served.
+  await mineTo(await registry.epochStart(10));relayOutage=true;
   for(let n=1;n<=4;n++){
     await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");
-    const saved=rows("SELECT state,attempts,api,last_error FROM epoch_work WHERE epoch=9","migrated.sqlite")[0];
+    const saved=rows("SELECT state,attempts,api,last_error FROM epoch_work WHERE epoch=10","migrated.sqlite")[0];
     assert.equal(saved.state,"pending");assert.equal(saved.attempts,n);assert.equal(saved.api,null);
-    assert.equal(apiCounts["9"],Math.min(n,3));if(n===4)assert.match(String(saved.last_error),/circuit open after 3 consecutive failures/);
-    const db=new DatabaseSync(join(dir,"migrated.sqlite"));db.exec("UPDATE epoch_work SET retry_at=0 WHERE epoch=9");db.close(); // Fixture clock acceleration; Retry-After is tested separately.
+    assert.equal(relayCounts["10"],n);assert.match(String(saved.last_error),/No drand relay served round/);
+    const db=openJournal(join(dir,"migrated.sqlite"));db.exec("UPDATE epoch_work SET retry_at=0 WHERE epoch=10");db.close(); // Fixture clock acceleration; the back-off is tested in the beacon suite.
   }
-  {const db=new DatabaseSync(join(dir,"migrated.sqlite"));db.exec("DELETE FROM epoch_breaker");db.close();} // Fixture clock: the circuit cooldown has passed.
-  apiOutage=false;const recoveredEpoch=await request("transient-epoch-recovery");await settle(recoveredEpoch,reviewedPins,"migrated.sqlite");
-  assert.equal(apiCounts["9"],4);assert.equal((await rng.getRequest(recoveredEpoch)).delivered,true);
+  assert.equal(rows("SELECT failures FROM epoch_relay_breaker","migrated.sqlite")[0].failures,4,"The relay's failures were not counted across restarts");
+  relayOutage=false;const recoveredEpoch=await request("transient-epoch-recovery");await settle(recoveredEpoch,reviewedPins,"migrated.sqlite");
+  assert.equal(relayCounts["10"],5);assert.equal((await rng.getRequest(recoveredEpoch)).delivered,true);
+  assert.equal(rows("SELECT COUNT(*) n FROM epoch_relay_breaker","migrated.sqlite")[0].n,0,"A valid round did not close the relay's circuit");
   // A base fee pricing sends above the configured cap defers publication and fulfillment by budget:
   // nothing is signed or broadcast, health names the budget, and raising the cap serves the same request.
   const mainnetBudget={MAX_GAS:"6000000",MAX_FEE_PER_GAS_WEI:"2000000000000",CANCEL_MAX_FEE_PER_GAS_WEI:"2500000000000",MAX_TX_COST_WEI:"4000000000000000000"};
-  const healthStatus=()=>JSON.parse(String(rows("SELECT value FROM meta WHERE key='health:status'","migrated.sqlite")[0].value)) as {healthy:boolean,faults:string[]};
+  const healthStatus=()=>JSON.parse(String(rows("SELECT value FROM meta WHERE key='health:status'","migrated.sqlite")[0].value)) as {healthy:boolean,faults:string[],observed_at:number};
   async function raiseBaseFee(){
     await provider.request({method:"hardhat_setNextBlockBaseFeePerGas",params:[ethers.toQuantity(400n*10n**9n)]});await networkHelpers.mine(1);
   }
   async function budgetFaultInDaemon(){
+    // Only a status the daemon itself wrote counts: the run before it can leave one that already names the budget but not yet
+    // the preparation stall, since the two age in whole seconds from different first observations. Observations are dated in
+    // whole seconds, so one from the second the daemon started in may still be that run's.
+    const startedAt=Math.floor(Date.now()/1000);
     const daemon=start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},["run"],"migrated.sqlite");
-    try {await until(async()=>healthStatus().faults.includes("fee_budget_exceeded"),"Budget deferral never degraded health");}
+    try {await until(async()=>{const status=healthStatus();return status.observed_at>startedAt&&status.faults.includes("fee_budget_exceeded");},"Budget deferral never degraded health");}
     finally {daemon.child.kill("SIGKILL");await daemon.exit;}
     const health=healthStatus();assert.equal(health.healthy,false);return health;
   }
@@ -518,16 +542,16 @@ try {
     await settle(id,{...reviewedPins,...mainnetBudget},"migrated.sqlite");
     assert.equal((await rng.getRequest(id)).delivered,true);assert.equal(healthStatus().healthy,true,healthStatus().faults.join(","));
   }
-  await mineTo(await registry.epochStart(10));await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");
-  await until(async()=>rows("SELECT api FROM epoch_work WHERE epoch=10","migrated.sqlite").some(r=>r.api!==null),"epoch 10 packet missing");
+  await mineTo(await registry.epochStart(11));await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");
+  await until(async()=>rows("SELECT api FROM epoch_work WHERE epoch=11","migrated.sqlite").some(r=>r.api!==null),"epoch 11 packet missing");
   await raiseBaseFee();const budgetedEpoch=await request("fee-budget-epoch-publication");
   await deferredByBudget(budgetedEpoch,"epoch","preparation_stalled");
-  assert.notEqual((await registry.getEpoch(10)).epochHash,ethers.ZeroHash);assert.equal(apiCounts["10"],1,"Budget deferral refreshed the fixed snapshot");
+  assert.notEqual((await registry.getEpoch(11)).epochHash,ethers.ZeroHash);assert.equal(relayCounts["11"],1,"Budget deferral refreshed the fixed snapshot");
   await raiseBaseFee();const budgetedFulfillment=await request("fee-budget-fulfillment");
   await deferredByBudget(budgetedFulfillment,"fulfill");
   assert.ok(rows(`SELECT proof FROM jobs WHERE id='${budgetedFulfillment}'`,"migrated.sqlite")[0].proof,"Proof preparation waited for the fee budget");
   assert.equal(rows(`SELECT COUNT(*) n FROM txs WHERE job IN ('${budgetedEpoch}','${budgetedFulfillment}')`,"migrated.sqlite")[0].n,2,"Deferred requests were not served with exactly one transaction each");
-  assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE kind='epoch' AND job LIKE '%:10'","migrated.sqlite")[0].n,1,"Budget deferral re-signed the epoch publication");
+  assert.equal(rows("SELECT COUNT(*) n FROM txs WHERE kind='epoch' AND job LIKE '%:11'","migrated.sqlite")[0].n,1,"Budget deferral re-signed the epoch publication");
   // Fee coverage: a request whose escrowed (fixture-sized) fee cannot cover the expected cost is deferred, never signed.
   {
     const uncoveredId=await request("fee-coverage");let err="";
@@ -549,93 +573,80 @@ try {
   assert.equal(rows("SELECT COUNT(*) n FROM meta WHERE key='health:blocked:fee_budget'","migrated.sqlite")[0].n,0);
   assert.equal(rows(`SELECT COUNT(*) n FROM txs WHERE job='${clearedAtRestart}'`,"migrated.sqlite")[0].n,0);await rng.refundRequest(clearedAtRestart);
   await provider.request({method:"hardhat_setNextBlockBaseFeePerGas",params:[ethers.toQuantity(20n*10n**9n)]});await networkHelpers.mine(1);
-  // Every source rejecting the query walks the five-source fallback ladder once, one source per 20-block window.
-  // Live paid demand on the exhausted epoch is an epoch_stalled fault, without refetching or sending,
-  // until that demand expires; later demand is served by a fallback source and health is clean again.
-  await mineTo(await registry.epochStart(11));apiReject=true;
+  // Every source failing walks the five-source fallback ladder once, one source per 20-block window. Live paid demand on the exhausted
+  // epoch is an epoch_stalled fault, without sending, that makes `run --once` exit 1 until that demand expires; later demand is served
+  // by a fallback source and health is clean again.
+  await mineTo(await registry.epochStart(12));relayReject=true;
   const blockedDemand=await request("blocked-epoch-live-demand");const rawBeforeBlocked=raw.length;
   const epochWork=(n:number)=>rows(`SELECT state,fallback FROM epoch_work WHERE epoch=${n}`,"migrated.sqlite").map(r=>`${r.state}:${r.fallback}`)[0];
-  await start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},undefined,"migrated.sqlite").exit; // Shutdown awaits the permanent fetch failure.
-  assert.equal(epochWork(11),"blocked:0");
-  let ladderLog="";
-  assert.equal(await registry.sourceCountAt(11),5n);
-  for(let attempt=1;attempt<=4;attempt++){
-    // A blocked source with a fallback still ahead is not an alarm; the last one alarms once it fails.
-    if(attempt===4)assert.doesNotMatch(ladderLog,/Live paid demand cannot be published/);
-    await mineTo(await registry.epochStart(11)+BigInt(20*attempt+5)); // Zero-interval blocks keep the demand's deadline live.
-    ladderLog+=(await start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},undefined,"migrated.sqlite").exit).err;
-    assert.equal(epochWork(11),`blocked:${attempt}`);
-  }
-  assert.equal(apiCounts["11"],5);
-  // The keeper walked the catalog in slot order from the selected source, changing provider at every step.
-  const primary11=Number((await registry.getEpochSelection(11)).source),ladder=apiRecipesByEpoch["11"];
-  assert.deepEqual(ladder,CATALOG.map((_,n)=>CATALOG[(primary11+n)%5]));
-  assert.ok(ladder.every((recipe,n)=>n===0||providerOf(recipe)!==providerOf(ladder[n-1])),"A fallback stayed with the same provider");
-  const alarmed=await start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},undefined,"migrated.sqlite").exit;
-  assert.match(ladderLog+alarmed.err,/Live paid demand cannot be published/);assert.match(ladderLog+alarmed.err,/"reason":"blocked"/);
-  await new Promise(r=>setTimeout(r,1100));
+  assert.equal(await registry.sourceCountAt(12),5n);
+  const ladder=start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},["run"],"migrated.sqlite");
+  try {
+    await until(async()=>epochWork(12)==="pending:0"&&(relayCounts["12"]??0)>=1,"The selected source was not tried");
+    for(let attempt=1;attempt<=4;attempt++){
+      // A source that failed with a fallback still ahead is not an alarm; the last one is, once it has been failing long enough.
+      if(attempt===4)assert.doesNotMatch(ladder.log(),/Live paid demand cannot be published/);
+      await mineTo(await registry.epochStart(12)+BigInt(20*attempt+5)); // Zero-interval blocks keep the demand's deadline live.
+      await until(async()=>epochWork(12)===`pending:${attempt}`&&(relayRecipesByEpoch["12"]?.length??0)>attempt,`The ladder did not move on to source ${attempt}`);
+    }
+    // The keeper walked the catalog in slot order from the selected source, one network after the other.
+    const primary12=Number((await registry.getEpochSelection(12)).source),walked=relayRecipesByEpoch["12"].filter((recipe,n,all)=>n===0||recipe!==all[n-1]);
+    assert.deepEqual(walked,CATALOG.map((_,n)=>CATALOG[(primary12+n)%5]));
+    await until(async()=>/Live paid demand cannot be published/.test(ladder.log())&&healthStatus().faults.includes("epoch_stalled"),"The exhausted ladder was not an epoch stall",40000);
+    assert.match(ladder.log(),/"reason":"beacon_unavailable"/);assert.match(ladder.log(),/Epoch source produced no packet; moving to the next source/);
+    assert.equal(raw.length,rawBeforeBlocked,"Blocked epoch demand caused a transaction");
+    assert.equal((await registry.getEpoch(12)).epochHash,ethers.ZeroHash);
+  } finally {ladder.child.kill("SIGKILL");await ladder.exit;}
+  // The stall fails a one-shot run too, as it always did: the daemon is stopped (the journal admits one keeper), and a run started within
+  // the failures' window finds the same live demand on the exhausted epoch, exits 1 and names the fault.
   const stalledEpoch=await start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},undefined,"migrated.sqlite").exit;
   assert.equal(stalledEpoch.code,1);assert.match(stalledEpoch.err,/Keeper unhealthy: .*epoch_stalled/);
   assert.ok(healthStatus().faults.includes("epoch_stalled"),healthStatus().faults.join(","));
-  assert.equal(raw.length,rawBeforeBlocked,"Blocked epoch demand caused a transaction");assert.equal(apiCounts["11"],5,"Blocked epoch was refetched");
-  assert.equal((await registry.getEpoch(11)).epochHash,ethers.ZeroHash);
+  assert.equal(raw.length,rawBeforeBlocked,"Blocked epoch demand caused a transaction");assert.equal((await registry.getEpoch(12)).epochHash,ethers.ZeroHash);
   await networkHelpers.time.increaseTo((await rng.getRequest(blockedDemand)).deadline+1n);
   await start({...reviewedPins,PROGRESS_STUCK_SECONDS:"1"},undefined,"migrated.sqlite").exit; // Expired demand clears the epoch stage; the unprepared job's stage remains.
   assert.ok(!healthStatus().faults.includes("epoch_stalled"),healthStatus().faults.join(","));
-  await rng.refundRequest(blockedDemand);apiReject=false;
-  // Every recipe of the selected source's provider rejects in epoch 12: a blocked source with a fallback ahead is not a
-  // stall (the run exits healthy), and after 20 blocks the next source, from another provider, is committed with commitEpochFallback.
-  await mineTo(await registry.epochStart(12));const selected12=await registry.getEpochSelection(12),primary12=Number(selected12.source);
-  const rejectedProvider=providerOf(Number(selected12.recipe));
-  for(const recipe of CATALOG)if(providerOf(recipe)===rejectedProvider)apiRejectRecipes.add(recipe);
+  await rng.refundRequest(blockedDemand);relayReject=false;
+  // The network of the selected source fails in epoch 13: a source that failed with a fallback ahead is not a stall (the run exits
+  // healthy), and after 20 blocks the next source, another network, is committed with commitEpochFallback.
+  await mineTo(await registry.epochStart(13));const selected13=await registry.getEpochSelection(13),primary13=Number(selected13.source);
+  relayRejectRecipes.add(Number(selected13.recipe));
   const afterBlocked=await request("publishable-epoch-after-blocked");
-  await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");assert.equal(epochWork(12),"blocked:0");
-  await mineTo(await registry.epochStart(12)+25n);await settle(afterBlocked,reviewedPins,"migrated.sqlite");
+  await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");assert.equal(epochWork(13),"pending:0");
+  await mineTo(await registry.epochStart(13)+25n);await settle(afterBlocked,reviewedPins,"migrated.sqlite");
   assert.equal((await rng.getRequest(afterBlocked)).delivered,true);assert.equal(healthStatus().healthy,true,healthStatus().faults.join(","));
-  assert.equal(epochWork(12),"committed:1");assert.equal(Number((await registry.getEpoch(12)).source),(primary12+1)%5);
-  assert.notEqual(providerOf(CATALOG[(primary12+1)%5]),rejectedProvider);
+  assert.equal(epochWork(13),"committed:1");assert.equal(Number((await registry.getEpoch(13)).source),(primary13+1)%5);
   const fallbackSelector=registry.interface.getFunction("commitEpochFallback")!.selector;
   assert.equal(raw.filter(hex=>ethers.Transaction.from(hex).data.startsWith(fallbackSelector)).length,1);
-  apiRejectRecipes.clear();assert.equal(epochWork(11),"blocked:4");assert.equal(apiCounts["11"],5);
+  relayRejectRecipes.clear();assert.equal(epochWork(12),"pending:4");
 
-  // Provider circuit breaker. A gateway failing transiently three times opens that Airnode's circuit: while it is open the
-  // keeper records its sources as failed without a request, so the next source is published as soon as its window opens.
-  const breakerRows=()=>rows("SELECT airnode,failures,open_until FROM epoch_breaker","migrated.sqlite") as Array<{airnode:string;failures:number;open_until:number}>;
-  const epochError=(n:bigint)=>String(rows(`SELECT last_error FROM epoch_work WHERE epoch=${n}`,"migrated.sqlite")[0]?.last_error??"");
+  // Beacon catalog switch. The owner registers three more drand test networks and schedules a catalog of them two epochs ahead. The
+  // same running configuration serves the last epoch of the old catalog and then every network of the new one, without a restart or a
+  // setting change, and no request is left unserved at the boundary.
   {
-    let breakerEpoch=await registry.epochForBlock(await ethers.provider.getBlockNumber())+1n;await mineTo(await registry.epochStart(breakerEpoch));
-    const downProvider=providerOf(Number((await registry.getEpochSelection(breakerEpoch)).recipe)),downSigner=providerSigners[downProvider].address;
-    apiUnavailableProviders.add(downProvider);
-    const tripped=await request("breaker-trips");
-    for(let n=1;n<=3;n++){
-      await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");
-      const db=new DatabaseSync(join(dir,"migrated.sqlite"));db.exec(`UPDATE epoch_work SET retry_at=0 WHERE epoch=${breakerEpoch}`);db.close(); // Fixture clock acceleration.
+    const added=[await registerNetwork(),await registerNetwork(),await registerNetwork()];
+    const switchEpoch=await registry.epochForBlock(await ethers.provider.getBlockNumber())+2n;
+    await registry.scheduleCatalog(added,await Promise.all(added.map(recipe=>registry.slotSigner(recipe))),switchEpoch);
+    const queryOf=(recipe:number)=>ethers.id(beaconCanonicalRequest(networkOf(recipe).chainHash));
+    const oldQueries=CATALOG.map(queryOf),newQueries=added.map(queryOf);
+    // A request just before the boundary is served from the last epoch of the old catalog.
+    await mineTo(await registry.epochStart(switchEpoch)-12n);
+    const beforeSwitch=await request("last-old-catalog-epoch");await settle(beforeSwitch,reviewedPins,"migrated.sqlite");
+    assert.ok(oldQueries.includes((await registry.getEpoch(switchEpoch-1n)).queryHash),"The last epoch before the switch did not publish a network of the old catalog");
+    // Every network of the new catalog publishes once an epoch selects it; an epoch selecting one already served stays idle.
+    const served=new Set<number>(),delivered=[beforeSwitch];
+    for(let epoch=switchEpoch;served.size<added.length&&epoch<switchEpoch+60n;epoch++){
+      await mineTo(await registry.epochStart(epoch));
+      const selected=Number((await registry.getEpochSelection(epoch)).recipe);
+      if(epoch>switchEpoch&&served.has(selected))continue;
+      const id=await request(`new-catalog-epoch-${epoch}`);await settle(id,reviewedPins,"migrated.sqlite");delivered.push(id);
+      assert.equal((await registry.getEpoch(epoch)).queryHash,newQueries[added.indexOf(selected)]);
+      served.add(selected);
     }
-    assert.equal(apiCounts[String(breakerEpoch)],3);
-    const opened=breakerRows().find(row=>row.airnode.toLowerCase()===downSigner.toLowerCase());
-    assert.ok(opened&&opened.failures===3&&opened.open_until>Date.now()/1000,"Three transient failures did not open the provider circuit");
-    // The next window publishes another provider's source; the down gateway is not asked again.
-    await mineTo(await registry.epochStart(breakerEpoch)+20n);await settle(tripped,reviewedPins,"migrated.sqlite");
-    assert.equal(epochWork(Number(breakerEpoch)),"committed:1");assert.equal(apiCounts[String(breakerEpoch)],4);
-    // A later epoch that selects the same provider skips it without any request and falls back at the first window.
-    let skipped:bigint|undefined;
-    for(let tries=0;tries<30&&skipped===undefined;tries++){
-      breakerEpoch++;await mineTo(await registry.epochStart(breakerEpoch));
-      if(providerOf(Number((await registry.getEpochSelection(breakerEpoch)).recipe))===downProvider)skipped=breakerEpoch;
-    }
-    assert.ok(skipped!==undefined,"No epoch selected the down provider");
-    const served=await request("breaker-skips-open-provider");
-    await run({...reviewedPins,SEND_TRANSACTIONS:"false"},undefined,"migrated.sqlite");
-    assert.equal(apiCounts[String(skipped)]??0,0,"An open circuit still requested the down gateway");
-    assert.match(epochError(skipped),/circuit open after 3 consecutive failures/);
-    await mineTo(await registry.epochStart(skipped)+20n);await settle(served,reviewedPins,"migrated.sqlite");
-    assert.equal(epochWork(Number(skipped)),"committed:1");assert.equal(apiCounts[String(skipped)],1);
-    assert.ok(!apiRecipesByEpoch[String(skipped)].some(recipe=>providerOf(recipe)===downProvider));
-    assert.equal((await rng.getRequest(served)).delivered,true);
-    apiUnavailableProviders.clear();
-    // Fixture clock: the cooldown has passed and a probe succeeded, so the circuit is closed for the scenarios below.
-    const db=new DatabaseSync(join(dir,"migrated.sqlite"));db.exec("DELETE FROM epoch_breaker");db.close();
-    console.log(JSON.stringify({providerCircuitBreaker:{provider:downProvider,trippedAfter:3,skippedEpoch:String(skipped),requestsToOpenGateway:0,fallbackAttempt:1}}));
+    assert.equal(served.size,added.length,"Not every network of the new catalog was published");
+    for(const id of delivered)assert.equal((await rng.getRequest(id)).delivered,true);
+    assert.ok(added.every(recipe=>(relayHitsByRecipe[recipe]??0)>0),"A network of the new catalog was never asked for a round");
+    console.log(JSON.stringify({beaconCatalogSwitch:{switchEpoch:String(switchEpoch),recipes:added,requestsServed:delivered.length,noRestart:true}}));
   }
 
   // Batched fulfillment. On the guarded coordinator the estimate already budgets every served member, and the keeper's
@@ -702,7 +713,7 @@ try {
   const mixedIds=await requests("batch-mixed",5),corrupt=mixedIds[1],good=mixedIds.filter(id=>id!==corrupt);
   await run({...batchEnv,SEND_TRANSACTIONS:"false"},undefined,batchDb);
   for(const id of mixedIds)assert.ok(rows(`SELECT proof FROM jobs WHERE id='${id}'`,batchDb)[0].proof,"Mixed fixture not prepared");
-  {const db=new DatabaseSync(join(dir,batchDb));const p=JSON.parse(String(db.prepare("SELECT proof FROM jobs WHERE id=?").get(String(corrupt))!.proof));p.s=ethers.toBeHex(BigInt(p.s)^1n);
+  {const db=openJournal(join(dir,batchDb));const p=JSON.parse(String(db.prepare("SELECT proof FROM jobs WHERE id=?").get(String(corrupt))!.proof));p.s=ethers.toBeHex(BigInt(p.s)^1n);
     db.prepare("UPDATE jobs SET proof=?,call=? WHERE id=?").run(JSON.stringify(p),rng.interface.encodeFunctionData("fulfillRandomness",[corrupt,p]),String(corrupt));db.close();}
   const rawBeforeMixed=raw.length,rejectsBeforeMixed=estimateRejects;
   await settleAll(good);
@@ -839,15 +850,12 @@ try {
     // A committer transaction lands, which is all a follower sees of a working primary.
     const primaryActs=async()=>{await (await primarySigner.sendTransaction({to:wallet.address,value:0})).wait();};
     // The join rule scenarios below measure fulfillment alone, so the current epoch already has its packet: the
-    // committer publishes it here, exactly as the primary keeper would, without any gateway or follower delay.
+    // committer publishes it here, exactly as the primary keeper would, without any relay or follower delay.
     const publishEpochAsPrimary=async()=>{
       const epochId=await registry.epochForBlock(await ethers.provider.getBlockNumber());
       if((await registry.getEpoch(epochId)).epochHash!==ethers.ZeroHash)return epochId;
       const selection=await registry.getEpochSelection(epochId);
-      const timestamp=BigInt(await chainNow()),data=ethers.toUtf8Bytes(JSON.stringify(epochFixtureData(Number(selection.recipe))));
-      const digest=ethers.keccak256(ethers.solidityPacked(["bytes32","uint256","bytes"],[selection.queryHash,timestamp,data]));
-      const signature=await signerFor(selection.airnode).signMessage(ethers.getBytes(digest));
-      await (registry.connect(primarySigner) as any).commitEpoch(epochId,{timestamp,data:ethers.hexlify(data),signature});
+      await (registry.connect(primarySigner) as any).commitEpoch(epochId,beaconAttestation(networkOf(Number(selection.recipe)),BigInt(await chainNow())),{gasLimit:1_500_000});
       return epochId;
     };
     /// Anything an earlier scenario left in the follower's queue is served or expired first: these measurements are
@@ -1048,11 +1056,11 @@ try {
       workingPrimaryNotJoinedEarly:{waitedPast:16,servedAt:youngAge},idlePrimaryNotDead:true,deadPrimary:{servedAt:orphanAge},restartedFollower:{servedAt:restartAge},
       primaryDiedMidBurst:{orphaned:orphaned.length,takeoverSeconds},bothUp:{requests:both.length,primaryTransactions:primaryShare,followerTransactions:followerShare},refusedAfterRemoval:true}}));
   }
-  console.log(JSON.stringify({hungPrimaryFailover:true,unusableFirstEndpointFailover:true,epochSourceFallback:true,boundedPreparation:true,recoveryAfterFourApiFailures:true,feeBudgetDeferral:true,blockedEpochDemandAlarm:true,
+  console.log(JSON.stringify({hungPrimaryFailover:true,unusableFirstEndpointFailover:true,epochSourceFallback:true,boundedPreparation:true,recoveryAfterFourRelayFailures:true,feeBudgetDeferral:true,blockedEpochDemandAlarm:true,
     batchedFulfillment:{members:batchIds.length,oneTransaction:true,thirdPartyMemberSkipped:true,corruptMemberFallsBackToSingles:true,crashRestartIdenticalBytes:true,batchMaxOneIsSinglePath:true}}));
-  assert.deepEqual(unexpectedApiBodies,[]);assert.ok(CATALOG.every(recipe=>apiBodiesByRecipe[recipe]>0),"The keeper did not request every catalog recipe");
-  // Epoch 1 was published under the initial catalog and later epochs under the scheduled one.
-  assert.equal((await registry.getEpoch(1)).catalogHash,await registry.catalogHash());
-  assert.equal((await registry.getEpoch(12)).catalogHash,(await registry.catalogAt(12)).hash);assert.notEqual((await registry.getEpoch(12)).catalogHash,await registry.catalogHash());
-  console.log(JSON.stringify({passed:true,apiBodiesByRecipe,proxyUpgradePins:true,warmRpcLatency,outageRecovery,idleNoTransactions:true,firstDemandFutureBlock:true,sharedSnapshotBatch:true,drainedMigration:true,apiCounts,rpcCounts:counts,estimateRejects,backgroundApiDoesNotBlockRequests:true,stalledEpochEstimateDoesNotStarveRequests:true,immutableEpochRestart:true,singleNonceLane:true,expiredDemandMaintenanceCancelled:true,firstPublicationAcrossBoundary:true,fixtureDirectory:dir},null,2));
-} finally {rpcDelayMs=0;holdApi=false;releaseApi?.();holdProofEstimate=false;releaseProofEstimate?.();for(const child of children)child.kill();server.closeAllConnections();server.close();}
+  assert.deepEqual(unexpectedRelayRequests,[]);assert.ok(CATALOG.every(recipe=>(relayHitsByRecipe[recipe]??0)>0),"The keeper did not ask for a round of every network of the catalog");
+  // The first epoch the keeper prepared was published under the scheduled catalog, which is not the initial one, and so were the later ones.
+  assert.equal((await registry.getEpoch(2)).catalogHash,(await registry.catalogAt(2)).hash);assert.notEqual((await registry.getEpoch(2)).catalogHash,await registry.catalogHash());
+  assert.equal((await registry.getEpoch(13)).catalogHash,(await registry.catalogAt(13)).hash);assert.notEqual((await registry.getEpoch(13)).catalogHash,await registry.catalogHash());
+  console.log(JSON.stringify({passed:true,relayHitsByRecipe,proxyUpgradePins:true,warmRpcLatency,outageRecovery,idleNoTransactions:true,firstDemandFutureBlock:true,sharedSnapshotBatch:true,drainedMigration:true,relayCounts,rpcCounts:counts,estimateRejects,backgroundRelayFetchDoesNotBlockRequests:true,stalledEpochEstimateDoesNotStarveRequests:true,immutableEpochRestart:true,singleNonceLane:true,expiredDemandMaintenanceCancelled:true,firstPublicationAcrossBoundary:true,fixtureDirectory:dir},null,2));
+} finally {rpcDelayMs=0;holdRelay=false;releaseRelay?.();holdProofEstimate=false;releaseProofEstimate?.();for(const child of children)child.kill();server.closeAllConnections();server.close();}

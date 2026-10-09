@@ -1,4 +1,126 @@
 {
+  "robinhood-testnet": {
+    "name": "Robinhood Chain Testnet",
+    "chainId": 46630,
+    "testnet": true,
+    "owner": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+    "ownerNote": "Deployer account",
+    "rpcUrls": [
+      "https://rpc.testnet.chain.robinhood.com"
+    ],
+    "explorerUrl": "https://explorer.testnet.chain.robinhood.com",
+    "nativeCurrency": {
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "compilerEvmTarget": "cancun",
+    "create2": {
+      "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+    },
+    "blockSource": "arbitrum-l2",
+    "finality": "soft",
+    "stateHorizonBlocks": 6000,
+    "rpcOrder": "private-first",
+    "keeper": {
+      "softDepthBlocks": 0,
+      "finalityAuditIntervalSeconds": 60,
+      "finalityAuditMaxLagSeconds": 2700,
+      "gasModel": "arbitrum",
+      "l1GasMarginBps": 2500,
+      "coordinatorKind": "round",
+      "idleHeartbeatSeconds": 25,
+      "nonceStuckSeconds": 60,
+      "sequencerDropSeconds": 6,
+      "feeCoverageBps": 12500,
+      "wsSilenceSeconds": 60,
+      "wsBackfillMaxBlocks": 6000,
+      "wsBackfillRange": 2000,
+      "indexFinality": "soft",
+      "indexMaxBlocks": 2000,
+      "indexLookbackBlocks": 1200,
+      "sweepMinReserveWei": "5000000000000000",
+      "telegramLowBalanceWei": "2000000000000000"
+    },
+    "reviewedOn": "2026-10-03",
+    "documentation": "https://docs.robinhood.com/chain/connecting",
+    "gas": {
+      "blockGasLimit": 32000000,
+      "documentedMinimumBaseFeeWei": "10000000",
+      "maxGas": 13000000,
+      "maxFeePerGasWei": "3000000000",
+      "cancelMaxFeePerGasWei": "3500000000",
+      "maxTxCostWei": "5000000000000000",
+      "minTipWei": "0",
+      "maxTipWei": "0",
+      "deployGasPolicy": "estimate",
+      "maxDeployGas": 15000000,
+      "maxTxGasLimit": 32000000
+    },
+    "expectedBlockMs": 285
+  },
+  "robinhood-mainnet": {
+    "name": "Robinhood Chain",
+    "chainId": 4663,
+    "testnet": false,
+    "owner": "0x7ad78fc8097DFEA5c12DBb503D6EB6E60f34B40B",
+    "ownerNote": "Deployer account",
+    "rpcUrls": [
+      "https://rpc.mainnet.chain.robinhood.com"
+    ],
+    "explorerUrl": "https://robinhoodchain.blockscout.com",
+    "nativeCurrency": {
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "compilerEvmTarget": "cancun",
+    "create2": {
+      "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+    },
+    "blockSource": "arbitrum-l2",
+    "finality": "soft",
+    "stateHorizonBlocks": 6000,
+    "rpcOrder": "private-first",
+    "keeper": {
+      "softDepthBlocks": 0,
+      "finalityAuditIntervalSeconds": 60,
+      "finalityAuditMaxLagSeconds": 2700,
+      "gasModel": "arbitrum",
+      "l1GasMarginBps": 2500,
+      "coordinatorKind": "round",
+      "idleHeartbeatSeconds": 25,
+      "nonceStuckSeconds": 60,
+      "sequencerDropSeconds": 6,
+      "feeCoverageBps": 12500,
+      "wsSilenceSeconds": 20,
+      "wsBackfillMaxBlocks": 6000,
+      "wsBackfillRange": 2000,
+      "indexFinality": "soft",
+      "indexMaxBlocks": 2000,
+      "indexLookbackBlocks": 1200,
+      "sweepMinReserveWei": "5000000000000000",
+      "telegramLowBalanceWei": "200000000000000"
+    },
+    "reviewedOn": "2026-10-03",
+    "documentation": "https://docs.robinhood.com/chain/connecting",
+    "gas": {
+      "blockGasLimit": 32000000,
+      "documentedMinimumBaseFeeWei": "20000000",
+      "maxGas": 13000000,
+      "maxFeePerGasWei": "3000000000",
+      "cancelMaxFeePerGasWei": "3500000000",
+      "maxTxCostWei": "5000000000000000",
+      "minTipWei": "0",
+      "maxTipWei": "0",
+      "deployGasPolicy": "estimate",
+      "maxDeployGas": 15000000,
+      "maxTxGasLimit": 32000000
+    },
+    "expectedBlockMs": 100
+  },
   "arc-testnet": {
     "name": "Arc Testnet",
     "chainId": 5042002,

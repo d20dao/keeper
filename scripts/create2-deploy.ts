@@ -4,8 +4,8 @@ import {readFile,writeFile,open,access} from "node:fs/promises";
 import {resolve,join} from "node:path";
 import {Contract,JsonRpcProvider,keccak256,getBytes,parseUnits,formatUnits,getAddress} from "ethers";
 import {loadDeployer,loadEnvValue} from "./lib/deployer-env.ts";
-import {currentFee} from "./lib/gas.ts";
-import {loadChain} from "./lib/chains.ts";
+import {currentFee,tipBounds} from "./lib/gas.ts";
+import {loadChain,requireEpochDesign,requireOperable} from "./lib/chains.ts";
 import {initialCatalogSigners,loadServiceCatalog} from "./lib/catalog.ts";
 import {loadOrCreateOperator,validateNetwork,initCode,initialization,miningPlan,candidate,privateDirectory,compileContracts,compiledRuntimeCodeHash,DEFAULT_OPERATOR_DIRECTORY,Stop} from "./lib/deployment.ts";
 const IMPLEMENTATION_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -13,11 +13,15 @@ const IMPLEMENTATION_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a
 const broadcast:{journal?:string;transactions:Array<{name:string;hash:string}>}={transactions:[]};
 
 async function main(){
-  const {values,positionals}=parseArgs({allowPositionals:true,options:{chain:{type:"string",default:"arc-testnet"},env:{type:"string"},directory:{type:"string"},"operator-directory":{type:"string"},"epoch-implementation":{type:"string"},"coordinator-implementation":{type:"string"},"client-implementation":{type:"string"},registry:{type:"string"},coordinator:{type:"string"},client:{type:"string"},apply:{type:"boolean",default:false},resume:{type:"boolean",default:false},mainnet:{type:"boolean",default:false},"new-operator":{type:"boolean",default:false}}});
+  const {values,positionals}=parseArgs({allowPositionals:true,options:{chain:{type:"string",default:"arc-testnet"},env:{type:"string"},directory:{type:"string"},"operator-directory":{type:"string"},"epoch-implementation":{type:"string"},"coordinator-implementation":{type:"string"},"beacon-verifier":{type:"string"},"client-implementation":{type:"string"},registry:{type:"string"},coordinator:{type:"string"},client:{type:"string"},apply:{type:"boolean",default:false},resume:{type:"boolean",default:false},mainnet:{type:"boolean",default:false},"new-operator":{type:"boolean",default:false}}});
   const mode=positionals[0]??"prepare";
-  if(!["prepare","registry-plan","coordinator-plan","client-plan","deploy","epoch-implementation","coordinator-implementation"].includes(mode)||!values.env)throw new Stop("Invalid mode or missing --env");
+  if(!["prepare","registry-plan","coordinator-plan","client-plan","deploy","epoch-implementation","coordinator-implementation","beacon-verifier"].includes(mode)||!values.env)throw new Stop("Invalid mode or missing --env");
   if(values["new-operator"]&&mode!=="prepare")throw new Stop("--new-operator applies only to prepare");
   const chain=await loadChain(values.chain);
+  // This script deploys Arc's contracts from config/service.json; a chain it cannot deploy for is refused before any network access or key use.
+  requireOperable(chain,"create2-deploy.ts");
+  // Its contracts are the epoch design's, whatever a later port lets through the guard above: a round coordinator's chain is never deployed from here.
+  requireEpochDesign(chain,"create2-deploy.ts");
   if(!chain.testnet&&!values.mainnet)throw new Stop("A mainnet deployment requires --mainnet");
   const profile=JSON.parse(await readFile("config/service.json","utf8"));
   const provider=new JsonRpcProvider(chain.rpcUrls[0],undefined,{batchMaxCount:1});
@@ -25,7 +29,7 @@ async function main(){
     const wallet=await loadDeployer(resolve(values.env),provider);
     const directory=resolve(values.directory??`deployments/private/${chain.key}`);
     // Upgrade path: only a new implementation, for an existing proxy to adopt through its owner.
-    if(mode==="epoch-implementation"||mode==="coordinator-implementation"){
+    if(mode==="epoch-implementation"||mode==="coordinator-implementation"||mode==="beacon-verifier"){
       await deployImplementation(provider,wallet,chain,directory,UPGRADE_CONTRACTS[mode],values[mode],values.apply);return;
     }
     // Reuse the same protected identities when adding a chain, keeping CREATE2 input stable. Fresh keeper and VRF keys
@@ -84,8 +88,9 @@ async function main(){
     const client=await candidate(resolve(values.client),clientCode,chain);
     const steps=[{name:"epochImplementation",...epochImpl},{name:"coordinatorImplementation",...coordinatorImpl},{name:"clientImplementation",...clientImpl},{name:"registry",...registry},{name:"coordinator",...coordinator},{name:"client",...client}];
     // Priced from current gas (twice the base fee plus the median tip), so the budget is what these
-    // gas limits can cost now rather than at the chain's fee cap.
-    const {baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei)),gasCaps=[5500000n,6500000n,3000000n,3000000n,2500000n,1000000n];
+    // gas limits can cost now rather than at the chain's fee cap. The first is the registry implementation: a CREATE2
+    // deployment of it through the factory measured 5,199,716 gas, so its cap keeps room for review changes.
+    const {baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei),tipBounds(chain.gas)),gasCaps=[6000000n,6500000n,3000000n,3000000n,2500000n,1000000n];
     const maxCost=gasCaps.reduce((sum,gas)=>sum+gas*maxFee,0n),balance=await provider.getBalance(wallet.address);
     const nonce=await wallet.getNonce("latest");
     if(await wallet.getNonce("pending")!==nonce)throw new Stop("Deployer has unresolved transactions");
@@ -160,14 +165,18 @@ async function main(){
     console.log(JSON.stringify({deployed:true,registry:registry.address,coordinator:coordinator.address,keeper:operator.keeper.address,sendingEnabled:false},null,2));
   } finally {provider.destroy();}
 }
-/** Mines (plan only) or deploys a new vanity CREATE2 EpochEntropy implementation. Prints the plan unless --apply. */
-/// The two upgradeable service implementations, deployed on their own for an owner upgrade. The gas caps hold the
-/// measured deployment cost (about 4.3M for the registry with its built-in recipes, about 5.0M for the coordinator).
+/** Mines (plan only) or deploys a new vanity CREATE2 implementation or beacon verifier. Prints the plan unless --apply. */
+/// The two upgradeable service implementations and the beacon verifier, deployed on their own for an owner upgrade. The gas
+/// caps sit above the measured cost of deploying through the factory: 5,199,716 for the registry with its built-in recipes
+/// and beacon support (its cap of 6M leaves room for review changes), about 5.4M for the coordinator and about 1.9M for the
+/// verifier.
 const UPGRADE_CONTRACTS={
-  "epoch-implementation":{mode:"epoch-implementation",artifact:"EpochEntropy",field:"epochImplementation",gasCap:5_500_000n,
-    next:"Owner, one Safe batch of both upgrades on mainnet: admin.ts upgrade-registry --implementation (upgradeToAndCall with initializeRecipeRegistry), then upgrade-coordinator; schedule-catalog follows in a separate transaction"},
+  "epoch-implementation":{mode:"epoch-implementation",artifact:"EpochEntropy",field:"epochImplementation",gasCap:6_000_000n,
+    next:"Owner: admin.ts upgrade-registry --implementation (upgradeToAndCall with data 0x for a registry that already has the recipe registry), then admin.ts register-beacon; on mainnet both are Safe batch A, the upgrade first, and schedule-catalog follows in its own later transaction (batch B), because it expires"},
   "coordinator-implementation":{mode:"coordinator-implementation",artifact:"D20VRFCoordinator",field:"coordinatorImplementation",gasCap:6_500_000n,
     next:"Owner, after the registry upgrade in the same Safe batch: admin.ts upgrade-coordinator --implementation (upgradeToAndCall with empty data)"},
+  "beacon-verifier":{mode:"beacon-verifier",artifact:"D20BeaconVerifier",field:"beaconVerifier",gasCap:2_400_000n,
+    next:"Owner: admin.ts upgrade-registry --implementation <the new registry implementation>, then admin.ts register-beacon --verifier <beaconVerifier above> (Safe batch A on mainnet, the upgrade first); admin.ts schedule-catalog follows in its own later transaction (Safe batch B), because it expires"},
 } as const;
 type UpgradeContract=typeof UPGRADE_CONTRACTS[keyof typeof UPGRADE_CONTRACTS];
 async function deployImplementation(provider:JsonRpcProvider,wallet:Awaited<ReturnType<typeof loadDeployer>>,chain:Awaited<ReturnType<typeof loadChain>>,directory:string,contract:UpgradeContract,result:string|undefined,apply:boolean){
@@ -188,7 +197,7 @@ async function deployImplementation(provider:JsonRpcProvider,wallet:Awaited<Retu
     if(keccak256(existing)!==runtimeCodeHash)throw new Stop("The candidate address already has different code");
     console.log(JSON.stringify({deployed:true,existing:true,[contract.field]:implementation.address,runtimeCodeHash},null,2));return;
   }
-  const gasCap=contract.gasCap,{baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei));
+  const gasCap=contract.gasCap,{baseFee,tip,maxFee}=await currentFee(provider,BigInt(chain.gas.maxFeePerGasWei),tipBounds(chain.gas));
   const maxCost=gasCap*maxFee,balance=await provider.getBalance(wallet.address);
   const plan={mode:contract.mode,network:chain.key,chainId:chain.chainId,factory:chain.create2.factory,deployer:wallet.address,[contract.field]:implementation.address,salt:implementation.salt,
     initCodeHash:keccak256(code),runtimeCodeHash,baseFeeGwei:formatUnits(baseFee,"gwei"),maxFeePerGasGwei:formatUnits(maxFee,"gwei"),priorityFeeGwei:formatUnits(tip,"gwei"),

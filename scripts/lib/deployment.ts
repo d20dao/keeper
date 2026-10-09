@@ -59,7 +59,7 @@ export async function validateNetwork(provider:JsonRpcProvider,chain:Chain){
   if(keccak256(await provider.getCode(chain.create2.factory))!==chain.create2.codeHash)throw new Stop("Unexpected deterministic factory code");
   return head;
 }
-type Deployable="EpochEntropy"|"D20VRFCoordinator"|"D20Proxy"|"D20CostClient";
+type Deployable="EpochEntropy"|"D20VRFCoordinator"|"D20Proxy"|"D20CostClient"|"D20BeaconVerifier";
 async function artifactFor(name:Deployable){
   return JSON.parse(await readFile(resolve(`artifacts/contracts/${name==="D20CostClient"?"examples/":""}${name}.sol/${name}.json`),"utf8"));
 }
@@ -86,12 +86,17 @@ export function runtimeCodeAt(deployedBytecode:string,immutableReferences:Immuta
   }
   return hexlify(code);
 }
-/** Runtime code hash a compiled implementation has at `address`, from an artifact that matches its build output. */
-export async function compiledRuntimeCodeHash(name:"EpochEntropy"|"D20VRFCoordinator",address:string):Promise<string>{
+/** Runtime code hash a compiled implementation has at `address`, from an artifact that matches its build output. The beacon
+ * verifier has no immutables, so its runtime code is the same at every address. */
+export async function compiledRuntimeCodeHash(name:"EpochEntropy"|"D20VRFCoordinator"|"D20BeaconVerifier",address:string):Promise<string>{
   const artifact=await artifactFor(name);
   const build=JSON.parse(await readFile(resolve(`artifacts/build-info/${artifact.buildInfoId}.output.json`),"utf8"));
   const output=(build.output??build).contracts[artifact.inputSourceName][name];
   if("0x"+output.evm.deployedBytecode.object!==artifact.deployedBytecode)throw new Stop("Artifact differs from its build output; recompile");
+  if(name==="D20BeaconVerifier"){
+    if(Object.keys(artifact.immutableReferences).length)throw new Stop("The beacon verifier is expected to have no immutables");
+    return keccak256(artifact.deployedBytecode);
+  }
   return keccak256(runtimeCodeAt(artifact.deployedBytecode,artifact.immutableReferences,address));
 }
 export function miningPlan(code:string,chain:Chain){return {chainId:chain.chainId,factory:chain.create2.factory,initCodeHash:keccak256(code),prefix:"d20da0"};}

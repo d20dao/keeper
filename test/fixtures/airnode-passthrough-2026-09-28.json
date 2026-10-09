@@ -1,0 +1,220 @@
+{
+  "collectedAt": "2026-09-28",
+  "note": "Two live signed AirnodeHub passthrough (/api) responses for the passthrough form of each built-in recipe, from the X-Airnode-Address, -Request-Hash, -Timestamp, -Signature and -Operation headers and the body exactly as received (data). Each request hash, signer, EIP-191 signature and built-in template was verified. url is the request path and query after the gateway endpoint.",
+  "providers": {
+    "hyperliquid": {
+      "endpoint": "https://airnode-hyperliquid.fly.dev/",
+      "signer": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B"
+    },
+    "drpc": {
+      "endpoint": "https://airnode-drpc.fly.dev/",
+      "signer": "0x511AcE8648D2f64260d50D036F8f8ce622d92137"
+    },
+    "tickerlayer": {
+      "endpoint": "https://airnode-tickerlayer.fly.dev/",
+      "signer": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c"
+    },
+    "nodary": {
+      "endpoint": "https://airnode-nodary.fly.dev/",
+      "signer": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0"
+    }
+  },
+  "recipes": [
+    {
+      "name": "hyperliquid-btc-day-volume",
+      "builtinRecipe": 0,
+      "provider": "hyperliquid",
+      "request": {
+        "method": "POST",
+        "path": "/info",
+        "body": "{\"type\":\"metaAndAssetCtxs\",\"dex\":\"\"}",
+        "projection": {
+          "symbol": "/0/universe/0/name",
+          "value": "/1/0/dayNtlVlm"
+        }
+      },
+      "canonicalRequest": "[\"passthrough\",\"POST\",\"/info\",[],\"{\\\"type\\\":\\\"metaAndAssetCtxs\\\",\\\"dex\\\":\\\"\\\"}\",[[\"symbol\",\"/0/universe/0/name\"],[\"value\",\"/1/0/dayNtlVlm\"]]]",
+      "requestHash": "0x233f9b433caa493c3c7d372cbad003ea1127c804d0abc81444d2f9323d8e8c08",
+      "url": "/api/info?x-airnode-project=symbol%3A%2F0%2Funiverse%2F0%2Fname&x-airnode-project=value%3A%2F1%2F0%2FdayNtlVlm",
+      "samples": [
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x233f9b433caa493c3c7d372cbad003ea1127c804d0abc81444d2f9323d8e8c08",
+          "timestamp": "1790609609",
+          "data": "{\"symbol\":\"BTC\",\"value\":\"2273564252.6995515823\"}",
+          "signature": "0x903d4b293073331d362c17b1b8fda1283c74b7821ae22bfb2143887dbe57944b32b8d4160cf3686802386e72e8652955b72ec82d859758e25a1128b6113e644e1c",
+          "operation": "metaAndAssetCtxs"
+        },
+        {
+          "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+          "requestHash": "0x233f9b433caa493c3c7d372cbad003ea1127c804d0abc81444d2f9323d8e8c08",
+          "timestamp": "1790609611",
+          "data": "{\"symbol\":\"BTC\",\"value\":\"2273566162.0420417786\"}",
+          "signature": "0x58aab17584a197c5f5b7f8b2295f76c89602c77ee4ef5305788ab537ff276c947a3c9c3f4552bcf7cc6fb2db55f67984f2a47993eea61db31c66e1ad7690ac8d1c",
+          "operation": "metaAndAssetCtxs"
+        }
+      ]
+    },
+    {
+      "name": "drpc-ethereum-blockhash",
+      "builtinRecipe": 1,
+      "provider": "drpc",
+      "request": {
+        "method": "POST",
+        "path": "/ogrpc",
+        "query": {
+          "network": "ethereum"
+        },
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xcA11bde05977b3631167028862bE2a173976CA11\",\"data\":\"0x27e86d6e\"},\"latest\"]}"
+      },
+      "canonicalRequest": "[\"passthrough\",\"POST\",\"/ogrpc\",[[\"network\",\"ethereum\"]],\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":null,\\\"method\\\":\\\"eth_call\\\",\\\"params\\\":[{\\\"to\\\":\\\"0xcA11bde05977b3631167028862bE2a173976CA11\\\",\\\"data\\\":\\\"0x27e86d6e\\\"},\\\"latest\\\"]}\"]",
+      "requestHash": "0x1f262dd280d61fd82eda4bfbef94b9203aee700f22d792fb6d2541acbb9d2dc1",
+      "url": "/api/ogrpc?network=ethereum",
+      "samples": [
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0x1f262dd280d61fd82eda4bfbef94b9203aee700f22d792fb6d2541acbb9d2dc1",
+          "timestamp": "1790609613",
+          "data": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0xc5dc4accff6b4fd0c3d4f0d2636f7c6e37e813566176ae007e87a5f087be9e18\"}",
+          "signature": "0x82abcd29ad04a887c005ab496985e3a6b7a489dd5fb66edd76a5c9913108f7c03793524435759bac3f6bf1f78ca587d55302ddee12402ee86fbb2ddd2063dfcb1b",
+          "operation": "jsonRpc"
+        },
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0x1f262dd280d61fd82eda4bfbef94b9203aee700f22d792fb6d2541acbb9d2dc1",
+          "timestamp": "1790609615",
+          "data": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0xc5dc4accff6b4fd0c3d4f0d2636f7c6e37e813566176ae007e87a5f087be9e18\"}",
+          "signature": "0x61e43d7a440c8130d01e31a82950a11b129ab18b02443cf7ca564edddd2ebb67355d7d02c356ad138193415a4515f20f6a944d2c796fdb7a5dd7f022d5caa35d1b",
+          "operation": "jsonRpc"
+        }
+      ]
+    },
+    {
+      "name": "tickerlayer-btcusd",
+      "builtinRecipe": 2,
+      "provider": "tickerlayer",
+      "request": {
+        "method": "GET",
+        "path": "/crypto/trade/last/BTCUSD"
+      },
+      "canonicalRequest": "[\"passthrough\",\"GET\",\"/crypto/trade/last/BTCUSD\",[],\"\"]",
+      "requestHash": "0xe1e2347d559b1bfed675541dd5b126ddce9fb850babd48d6807989b1d1f4be10",
+      "url": "/api/crypto/trade/last/BTCUSD",
+      "samples": [
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xe1e2347d559b1bfed675541dd5b126ddce9fb850babd48d6807989b1d1f4be10",
+          "timestamp": "1790609617",
+          "data": "{\"symbol\":\"BTCUSD\",\"price\":83099.99,\"size\":0.00029791,\"timestamp\":1790609617009}",
+          "signature": "0x96340970a55e0197cf24580209fe21854d8901dbb9c186a2bd051fd4c36daa321ad7f7888188017a56b431d033790d6379a5eb59a18d420645188f8e2f62fc441b",
+          "operation": "lastTrade"
+        },
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xe1e2347d559b1bfed675541dd5b126ddce9fb850babd48d6807989b1d1f4be10",
+          "timestamp": "1790609619",
+          "data": "{\"symbol\":\"BTCUSD\",\"price\":83078.7,\"size\":0.00005,\"timestamp\":1790609619049}",
+          "signature": "0x55d17011e30f616bcad6dfd5753b877853d88a435358fe8cad4a78c446b93f236a4672f65166fa9e4a4e8fcab826dbe3ef44867084ecfea08b782bdf4d6a59761c",
+          "operation": "lastTrade"
+        }
+      ]
+    },
+    {
+      "name": "tickerlayer-ethusd",
+      "builtinRecipe": 3,
+      "provider": "tickerlayer",
+      "request": {
+        "method": "GET",
+        "path": "/crypto/trade/last/ETHUSD"
+      },
+      "canonicalRequest": "[\"passthrough\",\"GET\",\"/crypto/trade/last/ETHUSD\",[],\"\"]",
+      "requestHash": "0xd46bd023cf61cea3bb03a9f2ee35199a3dcbcbbd1eca5f6c8dcb2db6f6385b53",
+      "url": "/api/crypto/trade/last/ETHUSD",
+      "samples": [
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xd46bd023cf61cea3bb03a9f2ee35199a3dcbcbbd1eca5f6c8dcb2db6f6385b53",
+          "timestamp": "1790609621",
+          "data": "{\"symbol\":\"ETHUSD\",\"price\":2669.54,\"size\":0.0169,\"timestamp\":1790609621186}",
+          "signature": "0xd807c51a0873bbeca9f97743441c694a5d6306492fc11149d97b33098323d529525b4f98711704cabbfda3842ad62832744aa2bcbbf1023caa199dc2ad749e611b",
+          "operation": "lastTrade"
+        },
+        {
+          "airnode": "0x32f5eA20F05fdADfCD50Cb8eD920acE96D5f9f2c",
+          "requestHash": "0xd46bd023cf61cea3bb03a9f2ee35199a3dcbcbbd1eca5f6c8dcb2db6f6385b53",
+          "timestamp": "1790609623",
+          "data": "{\"symbol\":\"ETHUSD\",\"price\":2669.64,\"size\":0.001,\"timestamp\":1790609622896}",
+          "signature": "0xcfaa913c6c259903051f61107c7d1240ea57ca7f287d509bb13228a56364b0ac5a3839fd9dbfed1976dbd02c2e1654137268bca82978159a78e837ca14649dd01b",
+          "operation": "lastTrade"
+        }
+      ]
+    },
+    {
+      "name": "nodary-eth-usd",
+      "builtinRecipe": 4,
+      "provider": "nodary",
+      "request": {
+        "method": "GET",
+        "path": "/feed/latest",
+        "query": {
+          "name": "ETH/USD"
+        }
+      },
+      "canonicalRequest": "[\"passthrough\",\"GET\",\"/feed/latest\",[[\"name\",\"ETH/USD\"]],\"\"]",
+      "requestHash": "0x908f3045e21de65da74dd2efae703b7dd0491aac91731fa58e1d2318067a6b29",
+      "url": "/api/feed/latest?name=ETH%2FUSD",
+      "samples": [
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x908f3045e21de65da74dd2efae703b7dd0491aac91731fa58e1d2318067a6b29",
+          "timestamp": "1790609624",
+          "data": "{\"ETH/USD\":{\"value\":2669.64,\"timestamp\":1790609624391,\"category\":\"crypto\"}}",
+          "signature": "0x3af0b87d493a417f2d2d5d84a2bd23a95e2c5034521cd826352b6cffb499ec8126e94c19249e9f0da80194466202dd815ca569531d9ed2d4a9d50eb94218ba691c",
+          "operation": "latestFeeds"
+        },
+        {
+          "airnode": "0xE70f1e8b22a21e4Bb5188918a3033341b281E4c0",
+          "requestHash": "0x908f3045e21de65da74dd2efae703b7dd0491aac91731fa58e1d2318067a6b29",
+          "timestamp": "1790609626",
+          "data": "{\"ETH/USD\":{\"value\":2669.635,\"timestamp\":1790609625391,\"category\":\"crypto\"}}",
+          "signature": "0x3d4df55620eb0944ec0075b1fb86c4360ba2dcda162da6dbb1ae5b6cbc7904ce653410b9271221c828cde81f633c1dab76f1876d2a80d9897c5b20c9f6ab6da51b",
+          "operation": "latestFeeds"
+        }
+      ]
+    },
+    {
+      "name": "drpc-base-blockhash",
+      "builtinRecipe": 5,
+      "provider": "drpc",
+      "request": {
+        "method": "POST",
+        "path": "/ogrpc",
+        "query": {
+          "network": "base"
+        },
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xcA11bde05977b3631167028862bE2a173976CA11\",\"data\":\"0x27e86d6e\"},\"latest\"]}"
+      },
+      "canonicalRequest": "[\"passthrough\",\"POST\",\"/ogrpc\",[[\"network\",\"base\"]],\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":null,\\\"method\\\":\\\"eth_call\\\",\\\"params\\\":[{\\\"to\\\":\\\"0xcA11bde05977b3631167028862bE2a173976CA11\\\",\\\"data\\\":\\\"0x27e86d6e\\\"},\\\"latest\\\"]}\"]",
+      "requestHash": "0xe7b6a016991169dcaa146957f1d5f4eed5e7281ca54c7c1b95c0fed75c92e7b8",
+      "url": "/api/ogrpc?network=base",
+      "samples": [
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xe7b6a016991169dcaa146957f1d5f4eed5e7281ca54c7c1b95c0fed75c92e7b8",
+          "timestamp": "1790609628",
+          "data": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0xb49d1d4bf715e0b8a7dbc80ad9da5f749819c6c9c2e854a6a27074c7f559f774\"}",
+          "signature": "0xc5e42732a2ef390d0e5daea14a590cb00ca52b79dcef37bd01950b68372953d16cd9207be36cb0f5e53c80affd2b60c884b44a02ce4d3b061479ecd306774f491b",
+          "operation": "jsonRpc"
+        },
+        {
+          "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+          "requestHash": "0xe7b6a016991169dcaa146957f1d5f4eed5e7281ca54c7c1b95c0fed75c92e7b8",
+          "timestamp": "1790609629",
+          "data": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0x457f43452b417339fdb337f3490a1f1877f22655d9c0975fb13404edfdf92327\"}",
+          "signature": "0xddded1f84a6ac5c7c5110825f2f199fe4147fe7d84c1e5bd589857f8c49d7dc754ebde061dd305deab1d099e738beec89fd4ce0e85c814ff84152b868c1f87b71c",
+          "operation": "jsonRpc"
+        }
+      ]
+    }
+  ]
+}

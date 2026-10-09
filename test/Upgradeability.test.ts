@@ -1,18 +1,23 @@
 import {readFileSync} from "node:fs";
 import {expect} from "chai";
 import {network} from "hardhat";
-import {deployProxy,implementationAddress,IMPLEMENTATION_SLOT} from "./helpers/proxy.ts";
-import {deployReadyEpochFixture,EPOCH_TEST_SIGNERS,epochAttestation,providerTestCatalog,signSelection} from "./helpers/epoch.ts";
+import {deployProxy,implementationAddress,implementationCodeHash,IMPLEMENTATION_SLOT} from "./helpers/proxy.ts";
+import {deployReadyEpochFixture,EPOCH_TEST_SIGNERS,epochAttestation,epochFixtureData,providerTestCatalog,replayServedRequest,signSelection} from "./helpers/epoch.ts";
+import {beaconAttestation,registerTestBeacon,testBeacon} from "./helpers/beacon.ts";
 import {publicKey,makeProof,proofOutput} from "./helpers/proof.ts";
-import {BUILTIN_EPOCH_RECIPES,builtins,deriveRequestSeed,replayCoordinator,epochCatalogHash,epochProtocolConfigurationHash,resolveEpochCatalog} from "../src/index.ts";
+import {BUILTIN_EPOCH_RECIPES,beaconSlotSigner,builtins,deriveRequestSeed,replayCoordinator,epochCatalogHash,epochProtocolConfigurationHash,passthroughEpochRecipe,resolveEpochCatalog} from "../src/index.ts";
 import {runtimeCodeAt,compiledRuntimeCodeHash} from "../scripts/lib/deployment.ts";
 const {ethers,networkHelpers,provider}=await network.create();
 const FEE=123n;
 const json=(path:string)=>JSON.parse(readFileSync(new URL(path,import.meta.url),"utf8"));
 // Live EpochEntropy implementations: creation and runtime bytecode behind the Arc Mainnet registry (640b60c), runtime
-// bytecode behind the Arc Testnet registry (96cc722), and the coordinator implementation both networks keep.
+// bytecode behind the Arc Testnet registry (96cc722), of de5f82e, which both registries ran until their drand upgrades, and of
+// b69dbf3, the drand implementation both run today.
+// Live D20VRFCoordinator implementations, runtime bytecode: 640b60c, which served the older registries, and f38aaf8, which
+// both networks run today.
 const mainnetEpoch=json("./fixtures/epoch-entropy-deployed-640b60c.json"),testnetEpoch=json("./fixtures/epoch-entropy-deployed-96cc722.json");
-const liveCoordinator=json("./fixtures/coordinator-deployed-640b60c.json");
+const liveEpoch=json("./fixtures/epoch-entropy-deployed-de5f82e.json"),beaconEpoch=json("./fixtures/epoch-entropy-deployed-b69dbf3.json");
+const liveCoordinator=json("./fixtures/coordinator-deployed-640b60c.json"),currentCoordinator=json("./fixtures/coordinator-deployed-f38aaf8.json");
 const mainnet=json("../deployments/arc-mainnet.json"),testnet=json("../deployments/arc-testnet.json");
 /// Whether a manifest runs this implementation now or records it as one it upgraded away from. An upgrade path stays
 /// supported after the network moves on, so the fixture must still match the deployment it was recorded from.
@@ -28,11 +33,11 @@ const OWNABLE="0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c19930
 const arrayBase=(slot:bigint)=>BigInt(ethers.solidityPackedKeccak256(["uint256"],[slot]));
 const mappingBase=(key:bigint,slot:bigint)=>BigInt(ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["uint64","uint256"],[key,slot])));
 async function mineTo(block:bigint){const now=BigInt(await ethers.provider.getBlockNumber());if(block>now)await networkHelpers.mine(Number(block-now));}
-/// Every declared slot and gap (0-47), the first entries of the three array slots, the epoch record and anchor of each
+/// Every declared slot and gap (0-47), the first `span` entries of the three array slots, the epoch record and anchor of each
 /// given epoch, and the OpenZeppelin namespaces.
-async function registryStorage(address:string,epochs:readonly bigint[]){
+async function registryStorage(address:string,epochs:readonly bigint[],span=32n){
   const slots=Array.from({length:48},(_,i)=>BigInt(i));
-  for(const array of [8n,9n,10n])for(let i=0n;i<32n;i++)slots.push(arrayBase(array)+i);
+  for(const array of [8n,9n,10n])for(let i=0n;i<span;i++)slots.push(arrayBase(array)+i);
   for(const epoch of epochs){for(let i=0n;i<9n;i++)slots.push(mappingBase(epoch,6n)+i);slots.push(mappingBase(epoch,7n));}
   slots.push(BigInt(OWNABLE),BigInt(OWNABLE_2STEP),BigInt(INITIALIZABLE));
   return Object.fromEntries(await Promise.all(slots.map(async slot=>[ethers.toBeHex(slot),await ethers.provider.getStorage(address,slot)])));
@@ -53,14 +58,22 @@ const LIVE_REGISTRIES:LiveRegistry[]=[
     return testnetEpoch.implementation;
   }},
 ];
-/// A registry proxy on live implementation code, served by a coordinator proxy on the live coordinator code.
-async function liveDeployment(live:LiveRegistry,owner:any,committer:any){
+/// The implementation behind both public registries until their drand upgrades, which already has the recipe registry. It is not in
+/// LIVE_REGISTRIES: those still need initializeRecipeRegistry, which this registry has run.
+const CURRENT_LIVE:LiveRegistry={label:"Arc Mainnet and Arc Testnet de5f82e",selection:"(uint8 source,uint8 recipe,address airnode,bytes32 selector,bytes32 queryHash,string canonicalRequest)",async implementation(){
+  await provider.request({method:"hardhat_setCode",params:[liveEpoch.implementation,liveEpoch.deployedBytecode]});
+  expect(ethers.keccak256(await ethers.provider.getCode(liveEpoch.implementation))).to.equal(liveEpoch.runtimeCodeHash);
+  return liveEpoch.implementation;
+}};
+/// A registry proxy on live implementation code, served by a coordinator proxy on live coordinator code: the 640b60c
+/// coordinator unless the test asks for another, such as the f38aaf8 one both networks run today.
+async function liveDeployment(live:LiveRegistry,owner:any,committer:any,{coordinator:served=liveCoordinator}:{coordinator?:typeof liveCoordinator}={}){
   const epochInterface=(await ethers.getContractFactory("EpochEntropy")).interface;
   const proxy=await ethers.deployContract("D20Proxy",[await live.implementation(),epochInterface.encodeFunctionData("initialize",[EPOCH_TEST_SIGNERS,owner.address,committer.address])]);
   const address=await proxy.getAddress(),registry:any=await ethers.getContractAt("EpochEntropy",address);
-  await provider.request({method:"hardhat_setCode",params:[liveCoordinator.implementation,liveCoordinator.deployedBytecode]});
+  await provider.request({method:"hardhat_setCode",params:[served.implementation,served.deployedBytecode]});
   const coordinatorInterface=(await ethers.getContractFactory("D20VRFCoordinator")).interface;
-  const coordinatorProxy=await ethers.deployContract("D20Proxy",[liveCoordinator.implementation,coordinatorInterface.encodeFunctionData("initialize",[publicKey(),owner.address,owner.address,FEE,1,address,5000])]);
+  const coordinatorProxy=await ethers.deployContract("D20Proxy",[served.implementation,coordinatorInterface.encodeFunctionData("initialize",[publicKey(),owner.address,owner.address,FEE,1,address,5000])]);
   const rng:any=await ethers.getContractAt("D20VRFCoordinator",await coordinatorProxy.getAddress());
   await rng.setPricing(FEE,0,300000);
   const consumer:any=await ethers.deployContract("TestConsumer",[await rng.getAddress()]);
@@ -166,19 +179,32 @@ describe("Atomic UUPS proxy initialization and upgrades",()=>{
     // Arc Testnet runs 96cc722, recorded with eth_getCode; its previous implementation was the mainnet one.
     expect(deployedHere(testnet,testnetEpoch.implementation,testnetEpoch.runtimeCodeHash),"96cc722 is Arc Testnet's implementation or one it upgraded from").to.equal(true);
     expect(ethers.keccak256(testnetEpoch.deployedBytecode)).to.equal(testnetEpoch.runtimeCodeHash);
-    // Arc Testnet reached 96cc722 from the mainnet implementation, so both fixtures sit on one recorded chain.
+    // de5f82e, recorded with eth_getCode at its live address, ran behind both registries until their drand upgrades, so deployedHere
+    // keeps the pin, as for the earlier implementations.
+    for(const manifest of [mainnet,testnet])expect(deployedHere(manifest,liveEpoch.implementation,liveEpoch.runtimeCodeHash),"de5f82e is this network's implementation or one it upgraded from").to.equal(true);
+    expect(ethers.keccak256(liveEpoch.deployedBytecode)).to.equal(liveEpoch.runtimeCodeHash);
+    // Both networks run the drand implementation b69dbf3 now, recorded the same way.
+    for(const manifest of [mainnet,testnet])expect([manifest.epochImplementation,manifest.epochImplementationCodeHash],"b69dbf3 is this network's current implementation").to.deep.equal([beaconEpoch.implementation,beaconEpoch.runtimeCodeHash]);
+    expect(ethers.keccak256(beaconEpoch.deployedBytecode)).to.equal(beaconEpoch.runtimeCodeHash);
+    // Arc Testnet reached 96cc722 from the mainnet implementation, and each network b69dbf3 from de5f82e, so the fixtures sit on one recorded chain.
     expect(testnet.implementationUpgrades.some((entry:any)=>
       entry.implementation===testnetEpoch.implementation&&entry.previousImplementationCodeHash===mainnetEpoch.runtimeCodeHash)).to.equal(true);
+    for(const manifest of [mainnet,testnet])expect(manifest.implementationUpgrades.some((entry:any)=>
+      entry.implementation===beaconEpoch.implementation&&entry.implementationCodeHash===beaconEpoch.runtimeCodeHash&&entry.previousImplementationCodeHash===liveEpoch.runtimeCodeHash),"this network upgraded from de5f82e to b69dbf3").to.equal(true);
     for(const manifest of [mainnet,testnet]){
       const current=manifest.coordinatorImplementation===liveCoordinator.implementation&&manifest.coordinatorImplementationCodeHash===liveCoordinator.runtimeCodeHash;
       const upgraded=(manifest.implementationUpgrades??[]).some((entry:any)=>entry.contract==="coordinator"&&entry.previousImplementation===liveCoordinator.implementation&&entry.previousImplementationCodeHash===liveCoordinator.runtimeCodeHash);
       expect(current||upgraded,"the live coordinator fixture is this network's coordinator or the one it upgraded from").to.equal(true);
     }
     expect(ethers.keccak256(liveCoordinator.deployedBytecode)).to.equal(liveCoordinator.runtimeCodeHash);
+    // Both networks run the f38aaf8 coordinator now, recorded with eth_getCode at its live address.
+    for(const manifest of [mainnet,testnet])expect([manifest.coordinatorImplementation,manifest.coordinatorImplementationCodeHash],"f38aaf8 is this network's current coordinator implementation")
+      .to.deep.equal([currentCoordinator.implementation,currentCoordinator.runtimeCodeHash]);
+    expect(ethers.keccak256(currentCoordinator.deployedBytecode)).to.equal(currentCoordinator.runtimeCodeHash);
     const next=await ethers.deployContract("EpochEntropy");
     // The owner tooling accepts exactly this deployment: its runtime code is the compiled artifact at its own address.
     expect(ethers.keccak256(await ethers.provider.getCode(await next.getAddress()))).to.equal(await compiledRuntimeCodeHash("EpochEntropy",await next.getAddress()));
-    for(const live of [mainnetEpoch,testnetEpoch])expect(await compiledRuntimeCodeHash("EpochEntropy",live.implementation)).not.to.equal(live.runtimeCodeHash);
+    for(const live of [mainnetEpoch,testnetEpoch,liveEpoch])expect(await compiledRuntimeCodeHash("EpochEntropy",live.implementation)).not.to.equal(live.runtimeCodeHash);
   });
 
   for(const live of LIVE_REGISTRIES){
@@ -336,6 +362,108 @@ describe("Atomic UUPS proxy initialization and upgrades",()=>{
       expect([paid.args.keeper,paid.args.paid]).to.deep.equal([committer.address,true]);
     });
   }
+
+  it("upgrades a registry running the live de5f82e implementation to the beacon registry with no call data, preserving storage, recipes, catalogs, epochs and service",async()=>{
+    const [owner,committer,nextOwner,user,backup]=await ethers.getSigners();
+    // Served by the coordinator both networks run today, f38aaf8.
+    const {registry,rng,consumer,address}=await liveDeployment(CURRENT_LIVE,owner,committer,{coordinator:currentCoordinator});
+    expect(await implementationCodeHash(ethers,rng)).to.equal(currentCoordinator.runtimeCodeHash);
+    type Receipt={blockNumber:number;logs:readonly any[]};
+    const replay=(id:bigint,proof:ReturnType<typeof makeProof>,commit:Receipt,accepted:Receipt)=>replayServedRequest(ethers,{registry,rng,consumer},id,proof,commit,accepted,FEE);
+    // The state of both networks before the beacon upgrade: the built-in recipes 0-5, the passthrough forms of built-ins 0, 1, 2, 4 and 5
+    // as recipes 6-10, one backup committer, and a catalog of the five with provider signers.
+    const passthrough=[0,1,2,4,5],recipes=[6,7,8,9,10];
+    for(const builtin of passthrough){const {canonicalRequest,template,body}=passthroughEpochRecipe(builtin);await registry.registerRecipe(canonicalRequest,template,body);}
+    await registry.setBackupCommitter(backup.address,true);
+    await registry.scheduleCatalog(recipes,providerTestCatalog(passthrough).signers,2);
+    expect(await registry.recipeCount()).to.equal(11n);
+    /// An epoch's selected passthrough recipe, signed by its provider's test Airnode with that listing's fixture data.
+    const sign=async(epoch:bigint)=>{
+      const selection=await registry.getEpochSelection(epoch),builtin=passthrough[Number(selection.recipe)-6];
+      expect(selection.canonicalRequest).to.equal(passthroughEpochRecipe(builtin).canonicalRequest);
+      return signSelection(selection,BigInt(await networkHelpers.time.latest()),JSON.stringify(epochFixtureData(builtin)));
+    };
+
+    // A request served from a passthrough epoch, then another left escrowed and unpublished in the next one.
+    await mineTo(await registry.epochStart(2n));
+    await consumer.request(ethers.id("served-before-beacon-upgrade"),200000,user.address,{value:FEE});
+    const served=await consumer.lastRequestId() as bigint;
+    const commit1=(await(await registry.connect(committer).commitEpoch(2n,await sign(2n))).wait())!;
+    await networkHelpers.mine(2);
+    const proof1=makeProof(await rng.requestSeed(served));
+    const accepted1=(await(await rng.fulfillRandomness(served,proof1,{gasLimit:2_000_000})).wait())!;
+    const replayBefore=await replay(served,proof1,commit1,accepted1);
+    expect(replayBefore.proof.matchesRecordedState).to.equal(true);
+    await mineTo(await registry.epochStart(3n));
+    await consumer.request(ethers.id("pending-across-beacon-upgrade"),200000,user.address,{value:FEE});
+    const pending=await consumer.lastRequestId() as bigint,pendingBefore=await rng.getRequest(pending);
+    expect([pendingBefore.epochId,pendingBefore.targetBlock,pendingBefore.epochHash]).to.deep.equal([3n,0n,ethers.ZeroHash]);
+    await registry.transferOwnership(nextOwner.address);
+
+    // Raw storage, with the recipe and catalog arrays read through their 11 recipes, and every view.
+    const snapshotBlock=await ethers.provider.getBlockNumber(),storageBefore=await registryStorage(address,[2n,3n],64n);
+    const plain=(value:any):any=>Array.isArray(value)?Array.from(value,plain):value;
+    const views=async()=>({owner:await registry.owner(),pendingOwner:await registry.pendingOwner(),committer:await registry.committer(),firstEpochStart:await registry.firstEpochStart(),
+      catalogHash:await registry.catalogHash(),signers:[await registry.hyperliquidSigner(),await registry.ethereumBlockSigner(),await registry.btcTradeSigner(),await registry.ethTradeSigner()],
+      recipeCount:await registry.recipeCount(),recipes:plain(await Promise.all(Array.from({length:11},(_,i)=>registry.getRecipe(i)))),
+      catalogs:plain(await Promise.all([1n,2n,3n].map(epoch=>registry.catalogAt(epoch)))),sourceCounts:await Promise.all([1n,2n,3n].map(epoch=>registry.sourceCountAt(epoch))),
+      backups:[await registry.backupCommitterCount(),await registry.isBackupCommitter(backup.address),await registry.isAuthorizedCommitter(backup.address)],
+      epochs:plain(await Promise.all([2n,3n].map(epoch=>registry.getEpoch(epoch)))),anchors:await Promise.all([1n,2n,3n].map(epoch=>registry.epochAnchors(epoch))),
+      selections:plain(await Promise.all([2n,3n].map(epoch=>registry.getEpochSelection(epoch)))),epochForHead:await registry.epochForBlock(snapshotBlock)});
+    const viewsBefore=await views();
+    expect([storageBefore[ethers.toBeHex(13)],storageBefore[INITIALIZABLE]]).to.deep.equal([ethers.ZeroHash,ethers.toBeHex(1,32)]);
+    expect(viewsBefore.recipeCount).to.equal(11n);expect(viewsBefore.epochs[0][0]).not.to.equal(ethers.ZeroHash);expect(viewsBefore.epochs[1][0]).to.equal(ethers.ZeroHash);
+    // The deployed code has no beacon views yet.
+    for(const view of [()=>registry.slotSigner(6),()=>registry.beaconOf(6),()=>registry.verifyBeacon(6,1,"0x")])await expect(view()).to.revert(ethers);
+
+    // The upgrade carries no call data: it swaps the implementation and does nothing else.
+    const next=await ethers.deployContract("EpochEntropy");
+    const upgrade=(await(await registry.upgradeToAndCall(await next.getAddress(),"0x")).wait())!;
+    expect(await implementationAddress(ethers,registry)).to.equal(await next.getAddress());
+    expect(upgrade.logs.map((log:any)=>log.topics[0])).to.deep.equal([ethers.id("Upgraded(address)")]);
+    // Every slot is as it was, the new beacons mapping (slot 13, once a gap slot) included; so is every view.
+    const storageAfter=await registryStorage(address,[2n,3n],64n);
+    expect(storageAfter).to.deep.equal(storageBefore);expect(storageAfter[ethers.toBeHex(13)]).to.equal(ethers.ZeroHash);
+    expect(await views()).to.deep.equal(viewsBefore);
+    expect(await registry.recipeCount()).to.equal(11n);
+    // The old recipes are signed ones as far as the new views are concerned.
+    expect(await registry.slotSigner(6)).to.equal(ethers.ZeroAddress);
+    expect(Array.from(await registry.beaconOf(6))).to.deep.equal([ethers.ZeroAddress,0n,0n,ethers.ZeroHash,"0x"]);
+    expect(await registry.verifyBeacon(6,1,"0x")).to.equal(false);
+    expect(await replay(served,proof1,commit1,accepted1)).to.deep.equal(replayBefore);
+
+    // The new code publishes the epoch the escrowed request waits for from the same passthrough catalog, through a backup
+    // committer that was set before the upgrade, and the deployed coordinator serves the request.
+    const commit3=(await(await registry.connect(backup).commitEpoch(3n,await sign(3n))).wait())!;
+    expect((await rng.getRequest(pending)).targetBlock).to.equal(BigInt(commit3.blockNumber)+1n);
+    await networkHelpers.mine(2);
+    const proof3=makeProof(await rng.requestSeed(pending));
+    const accepted3=(await(await rng.fulfillRandomness(pending,proof3,{gasLimit:2_000_000})).wait())!;
+    expect([(await rng.getRequest(pending)).delivered,await consumer.results(pending)]).to.deep.equal([true,proofOutput(proof3)]);
+    expect((await replay(pending,proof3,commit3,accepted3)).proof.matchesRecordedState).to.equal(true);
+
+    // The beacon becomes recipe 11 and serves an epoch of its own: request, commit, fulfil and replay.
+    const verifier=await ethers.deployContract("D20BeaconVerifier"),beacon=testBeacon(await verifier.getAddress(),BigInt(await networkHelpers.time.latest()));
+    await expect(registerTestBeacon(registry,beacon)).to.emit(registry,"BeaconRegistered").withArgs(11,beacon.verifier,beacon.chainHash,beacon.publicKey,beacon.genesis,beacon.period);
+    expect(await registry.recipeCount()).to.equal(12n);
+    const slot=await registry.slotSigner(11),from=await registry.epochForBlock(await ethers.provider.getBlockNumber())+2n;
+    expect(slot).to.equal(beaconSlotSigner(beacon));
+    await registry.scheduleCatalog([11],[slot],from);
+    await mineTo(await registry.epochStart(from));
+    await consumer.request(ethers.id("beacon-after-upgrade"),200000,user.address,{value:FEE});
+    const beaconRequest=await consumer.lastRequestId() as bigint;
+    const commit4=(await(await registry.connect(committer).commitEpoch(from,beaconAttestation(beacon,BigInt(await networkHelpers.time.latest())))).wait())!;
+    expect((await registry.getEpoch(from)).catalogHash).to.equal(epochCatalogHash([slot],[11]));
+    await networkHelpers.mine(2);
+    const proof4=makeProof(await rng.requestSeed(beaconRequest));
+    const accepted4=(await(await rng.fulfillRandomness(beaconRequest,proof4,{gasLimit:2_000_000})).wait())!;
+    expect((await rng.getRequest(beaconRequest)).delivered).to.equal(true);
+    expect((await replay(beaconRequest,proof4,commit4,accepted4)).proof.matchesRecordedState).to.equal(true);
+
+    // The history published by the deployed code replays exactly as before.
+    expect(await replay(served,proof1,commit1,accepted1)).to.deep.equal(replayBefore);
+    expect((await registry.catalogAt(2n))[0]).to.equal(epochCatalogHash(providerTestCatalog(passthrough).signers,recipes));
+  });
 
   it("recovers from an upgrade sent without the registry step only through the owner, and refuses catalogs under the old recipe ids",async()=>{
     const [owner,committer,,user]=await ethers.getSigners();

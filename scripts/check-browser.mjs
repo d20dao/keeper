@@ -11,6 +11,11 @@ const forbidden = Object.keys(result.metafile.inputs).filter(path =>
 if (forbidden.length) throw new Error(`Private/test code entered the public verifier: ${forbidden.join(", ")}`);
 const code = result.outputFiles[0].text;
 const publicVerifier = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+// The secret-key half of the beacon math is for tests and local fake beacons; the public verifier must not export it.
+const signingHelpers = ["signBeaconRound", "beaconPublicKey"].filter(name => name in publicVerifier);
+if (signingHelpers.length) throw new Error(`Beacon signing helpers entered the public verifier: ${signingHelpers.join(", ")}`);
+// Nor may the bundled text name the signer at all. Minifying renames locals, so this sees exports, strings and property names.
+if (code.includes("signBeaconRound")) throw new Error("The bundled public verifier contains the identifier signBeaconRound");
 if (publicVerifier.EPOCH_LENGTH !== 200n || publicVerifier.EVIDENCE_PACKET_BYTES !== 416 || publicVerifier.mapRandomness(`0x${"00".repeat(32)}`, publicVerifier.builtins.d20()).length !== 1)
   throw new Error("Bundled verifier smoke check failed");
 console.log(`Public verifier bundles for browsers (${result.outputFiles[0].contents.length} bytes); no keeper/test signer modules included.`);

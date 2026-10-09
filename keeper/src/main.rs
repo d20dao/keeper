@@ -119,16 +119,20 @@ async fn main() -> Result<ExitCode> {
                 (None, None) => None,
                 _ => anyhow::bail!("Use either --amount or --keep, not both"),
             } {
+                // In the native token of the chain the journal's keeper serves: USDC on Arc, ETH for a round keeper.
+                let unit = d20dao_keeper::sweep::Unit::of_journal(&pool).await?;
                 let request = d20dao_keeper::sweep::Request {
                     mode,
-                    wei: d20dao_keeper::sweep::parse_usdc(&value)?.to_string(),
+                    wei: unit.parse(&value)?.to_string(),
                     requested_at: d20dao_keeper::health::now()?,
                 };
                 d20dao_keeper::sweep::submit(&pool, &request).await?;
+                let mut queued = serde_json::json!({ "mode": request.mode });
+                queued[unit.key()] = value.into();
                 println!(
                     "{}",
                     serde_json::json!({
-                        "queued": { "mode": request.mode, "usdc": value },
+                        "queued": queued,
                         "note": "The running keeper sends it to the coordinator fee recipient when its nonce lane is free. Check with --status."
                     })
                 );
@@ -139,6 +143,36 @@ async fn main() -> Result<ExitCode> {
                 );
             }
             pool.close().await;
+        }
+        Some("finality") => {
+            let flag = |name: &str| args.windows(2).find(|a| a[0] == name).map(|a| a[1].clone());
+            let db = flag("--db")
+                .or_else(|| std::env::var("KEEPER_DB").ok())
+                .context("finality requires --db <path> or KEEPER_DB")?;
+            let pool = d20dao_keeper::sweep::open_existing(Path::new(&db)).await?;
+            let status = args.iter().any(|a| a == "--status");
+            let acknowledge = args.iter().position(|a| a == "--acknowledge");
+            let result = match (status, acknowledge) {
+                (true, Some(_)) => Err(anyhow::anyhow!(
+                    "Use either --status or --acknowledge <id>, not both"
+                )),
+                (false, Some(at)) => match args.get(at + 1).filter(|id| !id.starts_with("--")) {
+                    Some(id) => {
+                        d20dao_keeper::finality::acknowledge(
+                            &pool,
+                            id,
+                            d20dao_keeper::health::now()?,
+                        )
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "--acknowledge requires the id that --status prints"
+                    )),
+                },
+                _ => d20dao_keeper::finality::status(&pool).await,
+            };
+            pool.close().await;
+            println!("{}", serde_json::to_string_pretty(&result?)?);
         }
         Some("run") => {
             let cfg = Config::load(args.iter().any(|s| s == "--once"))?;
@@ -222,21 +256,42 @@ async fn main() -> Result<ExitCode> {
                 Ok(None) => {}
                 Err(_) => tracing::warn!("Optional Discord disabled: invalid configuration"),
             }
-            tracing::info!(chain_id=cfg.chain_id,coordinator=%cfg.coordinator,send=cfg.send,consumer_access="public","Outbound-only keeper started");
+            tracing::info!(chain_id=cfg.chain_id,coordinator=%cfg.coordinator,send=cfg.send,consumer_access="public",drand_relays=%cfg.drand_relays,"Outbound-only keeper started");
             let mut telemetry = d20dao_keeper::telemetry::spawn(&cfg, &worker.journal);
             let mut explorer = worker.spawn_explorer();
             let signals = worker.signals();
-            let mut subscription = d20dao_keeper::events::spawn(
+            // An epoch keeper follows every block and every log of its contracts; a round keeper follows requests, role
+            // changes and upgrades, and blocks only while work is open (events::Follow).
+            let (follow, keepalive) = match worker.coordinator_kind() {
+                d20dao_keeper::config::CoordinatorKind::Epoch => (
+                    d20dao_keeper::events::Follow::Everything,
+                    d20dao_keeper::events::Keepalive::default(),
+                ),
+                d20dao_keeper::config::CoordinatorKind::Round => (
+                    d20dao_keeper::events::Follow::Demand,
+                    d20dao_keeper::events::Keepalive::configured(&cfg.chain),
+                ),
+            };
+            let mut subscription = d20dao_keeper::events::spawn_following(
                 cfg.ws_urls.clone(),
                 worker.rpc.clone(),
                 cfg.chain_id,
-                [cfg.coordinator, worker.registry()],
+                worker.service_contracts(),
                 signals.clone(),
+                follow,
+                keepalive,
             );
+            let cadence = d20dao_keeper::events::Cadence {
+                poll: std::time::Duration::from_millis(cfg.poll_ms),
+                idle_poll: std::time::Duration::from_millis(cfg.idle_poll_ms),
+                heartbeat: cfg.idle_heartbeat,
+            };
             let mut heads = signals.heads();
             let mut failures = 0u64;
             // Consecutive ticks that could not run only because every RPC endpoint was rate limiting.
             let mut limited = 0u32;
+            // A round keeper's consecutive ticks that failed only because the endpoints failed as providers do.
+            let mut outage = d20dao_keeper::worker::ProviderOutage::default();
             loop {
                 // Poll shutdown before constructing/polling a new tick. In particular,
                 // a signal received as startup completed must not start API work.
@@ -288,11 +343,13 @@ async fn main() -> Result<ExitCode> {
                     worker.journal.pool.close().await;
                     return Ok(ExitCode::from(d20dao_keeper::proxy::APPROVED_UPGRADE_EXIT));
                 }
-                if let Err(error) = &result
-                    && !cfg.once
-                    && !stopping
-                    && d20dao_keeper::rpc::is_rate_limited(error)
-                {
+                let failed = match &result {
+                    Err(error) if !cfg.once && !stopping => Some(
+                        d20dao_keeper::worker::FailedTick::of(worker.coordinator_kind(), error),
+                    ),
+                    _ => None,
+                };
+                if failed == Some(d20dao_keeper::worker::FailedTick::RateLimited) {
                     // Not a fault of the chain, the keys or the configuration: the tick is deferred, does not count
                     // toward MAX_TICK_FAILURES, and health reports the condition until a tick runs again.
                     limited += 1;
@@ -315,6 +372,35 @@ async fn main() -> Result<ExitCode> {
                     }
                     continue;
                 }
+                if let (Some(d20dao_keeper::worker::FailedTick::ProviderUnavailable), Err(error)) =
+                    (failed, &result)
+                {
+                    // A round keeper's tick that failed only because the endpoints answered with transport or provider
+                    // errors (HTTP 429 or 5xx, -32000, no answer in time) is deferred as a rate-limited one is and not
+                    // counted: a restart would only add to their load. Health reports it once it has lasted
+                    // PROGRESS_STUCK_SECONDS.
+                    let deferral =
+                        outage.defer(std::time::Duration::from_secs(cfg.progress_stuck_seconds));
+                    if deferral.attempt == 1 {
+                        tracing::warn!(error=%error,"RPC endpoints are failing as providers do when overloaded or down; tick deferred and not counted as a failure");
+                    } else {
+                        tracing::debug!(error=%error,consecutive=deferral.attempt,"Tick still deferred by RPC provider errors");
+                    }
+                    if deferral.report {
+                        worker.notify_error(d20dao_keeper::telegram::ErrorClass::RpcUnavailable);
+                        tracing::error!(error=%error,consecutive=deferral.attempt,
+                            "RPC endpoints have failed every tick for PROGRESS_STUCK_SECONDS; still deferring, health reports rpc_unavailable");
+                    }
+                    if outage.reported() {
+                        d20dao_keeper::health::rpc_unavailable(&worker.journal, cfg.send).await?;
+                    }
+                    tokio::select! {
+                        biased;
+                        signal = shutdown.wait() => { signal?; break; },
+                        _ = tokio::time::sleep(rate_limit_pause(deferral.attempt)) => {}
+                    }
+                    continue;
+                }
                 if limited > 0 && result.is_ok() {
                     tracing::info!(
                         deferred = limited,
@@ -322,12 +408,34 @@ async fn main() -> Result<ExitCode> {
                     );
                     limited = 0;
                 }
+                // Any tick that was not deferred ends the run of deferred ones.
+                if let Some(deferred) = outage.end()
+                    && result.is_ok()
+                {
+                    tracing::info!(
+                        deferred,
+                        "RPC endpoints answer again after provider errors; ticks resumed"
+                    );
+                }
                 if let Err(error) = result {
                     worker.notify_error(d20dao_keeper::telegram::ErrorClass::KeeperTick);
                     d20dao_keeper::health::tick_failed(&worker.journal, cfg.send).await?;
-                    failures += 1;
-                    tracing::error!(error=%error,consecutive_failures=failures,"Keeper tick failed; journal retained");
-                    if cfg.once || failures >= cfg.max_tick_failures {
+                    // While a finality mismatch is on record or suspected the process stays up whatever fails: a restart
+                    // comes back to the same journal and the same incident, which the running keeper settles and recovers
+                    // from by itself. The failure is reported and not counted.
+                    let incident = !cfg.once && worker.finality_incident_open().await;
+                    if incident {
+                        tracing::error!(error=%error,"Keeper tick failed during a finality incident; the process stays up and the journal is retained");
+                    } else {
+                        failures += 1;
+                        tracing::error!(error=%error,consecutive_failures=failures,"Keeper tick failed; journal retained");
+                    }
+                    if d20dao_keeper::worker::tick_failure_ends_the_run(
+                        cfg.once,
+                        incident,
+                        failures,
+                        cfg.max_tick_failures,
+                    ) {
                         tracing::error!(
                             "Keeper exiting after failed work; supervisor should restart and operator should inspect persistent failures"
                         );
@@ -358,17 +466,14 @@ async fn main() -> Result<ExitCode> {
                     break;
                 }
                 // Open work keeps POLL_MS (or follows pushed blocks); an idle keeper waits for an event or its idle
-                // interval. A failed read of the journal counts as open work.
+                // interval. A failed read of the journal counts as open work. A round keeper's subscription follows new
+                // blocks only while it is open.
                 let busy = worker.open_work().await.unwrap_or(true);
+                signals.want_heads(busy);
                 tokio::select! {
                     biased;
                     signal = shutdown.wait() => { signal?; break; },
-                    _ = signals.next_tick(
-                        &mut heads,
-                        busy,
-                        std::time::Duration::from_millis(cfg.poll_ms),
-                        std::time::Duration::from_millis(cfg.idle_poll_ms),
-                    ) => {}
+                    _ = signals.next_tick(&mut heads, busy, cadence) => {}
                 }
             }
             drop(subscription.take());
@@ -379,7 +484,7 @@ async fn main() -> Result<ExitCode> {
             worker.journal.pool.close().await;
         }
         _ => println!(
-            "d20dao-keeper run [--once]\nd20dao-keeper health --db <path> [--max-age <seconds>]\nd20dao-keeper sweep [--db <path>] --amount <USDC> | --keep <USDC> | --status | --cancel\nd20dao-keeper migrate --from <old-db> --prepare|--apply|--resume\nd20dao-keeper prove <seed> <key-file>\nd20dao-keeper public-key <key-file>\nConfiguration: keeper/.env.example. Sending is OFF by default. Migration requires drained ingress and the reviewed destination environment."
+            "d20dao-keeper run [--once]\nd20dao-keeper health --db <path> [--max-age <seconds>]\nd20dao-keeper sweep [--db <path>] --amount <amount> | --keep <amount> | --status | --cancel (USDC on Arc, ETH for a round keeper)\nd20dao-keeper finality [--db <path>] --status | --acknowledge <id>\nd20dao-keeper migrate --from <old-db> --prepare|--apply|--resume\nd20dao-keeper prove <seed> <key-file>\nd20dao-keeper public-key <key-file>\nConfiguration: keeper/.env.example. Sending is OFF by default. Migration requires drained ingress and the reviewed destination environment."
         ),
     }
     Ok(ExitCode::SUCCESS)

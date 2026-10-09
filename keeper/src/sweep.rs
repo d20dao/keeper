@@ -4,6 +4,7 @@
 //! on its own nonce lane while no other attempt is unresolved, commits the signed bytes before
 //! any broadcast, and treats an unresolved sweep as a busy lane. Game and epoch transactions
 //! therefore never race the sweep for a nonce, and nothing outside the keeper signs with its key.
+use crate::journal::{Mark, write_mark};
 use alloy_primitives::U256;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -69,8 +70,62 @@ pub struct Outcome {
     pub finished_at: u64,
 }
 
+/// The unit a sweep is asked and reported in: the native token of the chain the keeper serves, with 18 decimals. An epoch
+/// keeper serves Arc, whose gas is USDC; a round keeper a chain whose gas is ETH (Robinhood Chain).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit {
+    Usdc,
+    Eth,
+}
+impl Unit {
+    /// The unit of the coordinator kind a keeper serves.
+    pub fn of(kind: crate::config::CoordinatorKind) -> Self {
+        match kind {
+            crate::config::CoordinatorKind::Epoch => Self::Usdc,
+            crate::config::CoordinatorKind::Round => Self::Eth,
+        }
+    }
+    /// The unit of the journal a keeper wrote: a round coordinator's names its kind.
+    pub async fn of_journal(pool: &SqlitePool) -> Result<Self> {
+        let kind: Option<String> = sqlx::query_scalar("SELECT value FROM meta WHERE key=?")
+            .bind(crate::journal::KIND_KEY)
+            .fetch_optional(pool)
+            .await?;
+        Ok(if kind.as_deref() == Some("round") {
+            Self::Eth
+        } else {
+            Self::Usdc
+        })
+    }
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Usdc => "USDC",
+            Self::Eth => "ETH",
+        }
+    }
+    /// The key a command's JSON gives an amount under: `usdc` as 0.4.1 names it, or `eth`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Usdc => "usdc",
+            Self::Eth => "eth",
+        }
+    }
+    /// A decimal amount of the unit (18 decimals) in wei.
+    pub fn parse(self, text: &str) -> Result<U256> {
+        parse_amount(text, self.symbol())
+    }
+    /// Wei as a decimal amount of the unit.
+    pub fn format(self, wei: U256) -> String {
+        format_usdc(wei)
+    }
+}
+
 /// Parses a non-negative decimal USDC amount (18 decimals) into wei.
 pub fn parse_usdc(text: &str) -> Result<U256> {
+    parse_amount(text, "USDC")
+}
+/// Parses a non-negative decimal amount of `symbol` (18 decimals) into wei.
+fn parse_amount(text: &str, symbol: &str) -> Result<U256> {
     let text = text.trim();
     let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
     ensure!(
@@ -78,7 +133,7 @@ pub fn parse_usdc(text: &str) -> Result<U256> {
             && whole.chars().all(|c| c.is_ascii_digit())
             && fraction.chars().all(|c| c.is_ascii_digit())
             && fraction.len() <= 18,
-        "Amount must be a decimal USDC value with at most 18 decimals, for example 5 or 2.5"
+        "Amount must be a decimal {symbol} value with at most 18 decimals, for example 5 or 2.5"
     );
     let whole: U256 = if whole.is_empty() {
         U256::ZERO
@@ -102,14 +157,16 @@ pub fn format_usdc(wei: U256) -> String {
     }
 }
 
-/// The value to transfer, or why the request is refused. `gas_cost` is the transfer's maximum
+/// The value to transfer, or why the request is refused, in `unit`. `gas_cost` is the transfer's maximum
 /// gas cost; `reserve` is what must remain in the wallet afterwards.
 pub fn plan(
     request: &Request,
     balance: U256,
     gas_cost: U256,
     reserve: U256,
+    unit: Unit,
 ) -> std::result::Result<U256, String> {
+    let (symbol, format_usdc) = (unit.symbol(), |wei| unit.format(wei));
     let wei: U256 = request
         .wei
         .parse()
@@ -122,7 +179,7 @@ pub fn plan(
             }
             if spendable < wei.saturating_add(reserve) {
                 return Err(format!(
-                    "Balance {} USDC cannot send {} USDC and keep the {} USDC reserve plus gas",
+                    "Balance {} {symbol} cannot send {} {symbol} and keep the {} {symbol} reserve plus gas",
                     format_usdc(balance),
                     format_usdc(wei),
                     format_usdc(reserve)
@@ -133,14 +190,14 @@ pub fn plan(
         Mode::Keep => {
             if wei < reserve {
                 return Err(format!(
-                    "Keep at least the {} USDC reserve",
+                    "Keep at least the {} {symbol} reserve",
                     format_usdc(reserve)
                 ));
             }
             let value = spendable.saturating_sub(wei);
             if value.is_zero() {
                 return Err(format!(
-                    "Balance {} USDC is not above {} USDC plus gas; nothing to send",
+                    "Balance {} {symbol} is not above {} {symbol} plus gas; nothing to send",
                     format_usdc(balance),
                     format_usdc(wei)
                 ));
@@ -206,6 +263,10 @@ pub async fn cancel_request(pool: &SqlitePool) -> Result<bool> {
 }
 /// The request becomes an attempt, atomically and before any broadcast. The lane must be free.
 pub async fn start(pool: &SqlitePool, attempt: &Attempt) -> Result<()> {
+    start_marked(pool, attempt, None).await
+}
+/// `start`, with the `sign` mark of a soft keeper in the same commit: the decision head the transfer was signed at.
+pub async fn start_marked(pool: &SqlitePool, attempt: &Attempt, mark: Option<&Mark>) -> Result<()> {
     let mut tx = pool.begin().await?;
     // Same predicate as the journal's active nonce lane (signed or submitted attempts).
     let active: i64 =
@@ -243,6 +304,9 @@ pub async fn start(pool: &SqlitePool, attempt: &Attempt) -> Result<()> {
         inserted.rows_affected() == 1,
         "A sweep is already in flight"
     );
+    if let Some(mark) = mark {
+        write_mark(&mut tx, mark).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -256,10 +320,39 @@ pub async fn save(pool: &SqlitePool, attempt: &Attempt) -> Result<()> {
     ensure!(updated.rows_affected() == 1, "Sweep attempt missing");
     Ok(())
 }
+/// `save` of a replacement that was just signed, with its `sign` mark in the same commit. Without a mark it is `save`.
+pub async fn save_marked(pool: &SqlitePool, attempt: &Attempt, mark: Option<&Mark>) -> Result<()> {
+    let Some(mark) = mark else {
+        return save(pool, attempt).await;
+    };
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query("UPDATE meta SET value=? WHERE key=?")
+        .bind(serde_json::to_string(attempt)?)
+        .bind(ATTEMPT_KEY)
+        .execute(&mut *tx)
+        .await?;
+    ensure!(updated.rows_affected() == 1, "Sweep attempt missing");
+    write_mark(&mut tx, mark).await?;
+    tx.commit().await?;
+    Ok(())
+}
 /// A finalized receipt resolves the attempt: the outcome, the cleared attempt and the nonce floor commit together.
 pub async fn finish(pool: &SqlitePool, nonce: u64, outcome: &Outcome) -> Result<()> {
+    finish_marked(pool, nonce, outcome, None).await
+}
+/// `finish`, with the `receipt` mark of a soft keeper in the same commit: a nonce floor that moves on a receipt the
+/// sequencer served is moved with the record of the block, so that the audit checks it.
+pub async fn finish_marked(
+    pool: &SqlitePool,
+    nonce: u64,
+    outcome: &Outcome,
+    mark: Option<&Mark>,
+) -> Result<()> {
     let next = nonce.checked_add(1).context("Nonce overflow")?;
     let mut tx = pool.begin().await?;
+    if let Some(mark) = mark {
+        write_mark(&mut tx, mark).await?;
+    }
     let removed = sqlx::query("DELETE FROM meta WHERE key=?")
         .bind(ATTEMPT_KEY)
         .execute(&mut *tx)
@@ -306,23 +399,39 @@ async fn record(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, outcome: &Outcome)
     Ok(())
 }
 
-/// Operator view without signed bytes.
+/// Operator view without signed bytes, in the unit of the keeper that wrote the journal.
 pub async fn status(pool: &SqlitePool) -> Result<serde_json::Value> {
+    let unit = Unit::of_journal(pool).await?;
     let attempt = attempt(pool).await?.map(|a| {
-        serde_json::json!({
+        let mut view = serde_json::json!({
             "nonce": a.nonce,
             "to": a.to,
-            "value_usdc": a.value.parse::<U256>().map(format_usdc).unwrap_or(a.value),
-            "requested_at": a.request.requested_at,
-            "transactions": a.txs.iter().map(|t| serde_json::json!({"kind": t.kind, "hash": t.hash, "created": t.created})).collect::<Vec<_>>(),
-        })
+        });
+        view[format!("value_{}", unit.key())] = a
+            .value
+            .parse::<U256>()
+            .map(|wei| unit.format(wei))
+            .unwrap_or(a.value)
+            .into();
+        view["requested_at"] = a.request.requested_at.into();
+        view["transactions"] = a
+            .txs
+            .iter()
+            .map(|t| serde_json::json!({"kind": t.kind, "hash": t.hash, "created": t.created}))
+            .collect::<Vec<_>>()
+            .into();
+        view
     });
     let request = request(pool).await?.map(|r| {
-        serde_json::json!({
-            "mode": r.mode,
-            "usdc": r.wei.parse::<U256>().map(format_usdc).unwrap_or(r.wei),
-            "requested_at": r.requested_at,
-        })
+        let mut view = serde_json::json!({"mode": r.mode});
+        view[unit.key()] = r
+            .wei
+            .parse::<U256>()
+            .map(|wei| unit.format(wei))
+            .unwrap_or(r.wei)
+            .into();
+        view["requested_at"] = r.requested_at.into();
+        view
     });
     Ok(serde_json::json!({
         "queued": request,
@@ -375,17 +484,27 @@ mod tests {
         let reserve = U256::from(USDC);
         let balance = U256::from(10 * USDC);
         assert_eq!(
-            plan(&req(Mode::Amount, 8), balance, gas, reserve),
+            plan(&req(Mode::Amount, 8), balance, gas, reserve, Unit::Usdc),
             Ok(U256::from(8 * USDC))
         );
-        assert!(plan(&req(Mode::Amount, 9), balance, gas, reserve).is_err());
-        assert!(plan(&req(Mode::Amount, 0), balance, gas, reserve).is_err());
+        assert!(plan(&req(Mode::Amount, 9), balance, gas, reserve, Unit::Usdc).is_err());
+        assert!(plan(&req(Mode::Amount, 0), balance, gas, reserve, Unit::Usdc).is_err());
         assert_eq!(
-            plan(&req(Mode::Keep, 2), balance, gas, reserve),
+            plan(&req(Mode::Keep, 2), balance, gas, reserve, Unit::Usdc),
             Ok(balance - gas - U256::from(2 * USDC))
         );
-        assert!(plan(&req(Mode::Keep, 0), balance, gas, reserve).is_err());
-        assert!(plan(&req(Mode::Keep, 10), balance, gas, reserve).is_err());
+        assert!(plan(&req(Mode::Keep, 0), balance, gas, reserve, Unit::Usdc).is_err());
+        assert!(plan(&req(Mode::Keep, 10), balance, gas, reserve, Unit::Usdc).is_err());
+        // A round keeper's sweep is in ETH, and says so.
+        let refused = plan(&req(Mode::Amount, 9), balance, gas, reserve, Unit::Eth).unwrap_err();
+        assert!(
+            refused.contains(" ETH ") && !refused.contains("USDC"),
+            "{refused}"
+        );
+        assert_eq!(Unit::Eth.parse("2.5").unwrap(), U256::from(5 * USDC / 2));
+        let error = Unit::Eth.parse("x").unwrap_err().to_string();
+        assert!(error.contains("decimal ETH value"), "{error}");
+        assert_eq!(Unit::Eth.format(U256::from(3 * USDC)), "3");
     }
     fn signed(kind: &str, hash: &str) -> SignedTx {
         SignedTx {

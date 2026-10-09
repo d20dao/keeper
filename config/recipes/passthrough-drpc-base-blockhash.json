@@ -1,0 +1,34 @@
+{
+  "description": "dRPC Base block hash through the gateway's passthrough (/api): built-in recipe 5's record and template under the passthrough request hash",
+  "signer": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+  "body": [
+    "passthrough",
+    "POST",
+    "/ogrpc",
+    [
+      [
+        "network",
+        "base"
+      ]
+    ],
+    "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xcA11bde05977b3631167028862bE2a173976CA11\",\"data\":\"0x27e86d6e\"},\"latest\"]}"
+  ],
+  "template": [
+    {
+      "literal": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0x"
+    },
+    {
+      "hex": 64
+    },
+    {
+      "literal": "\"}"
+    }
+  ],
+  "sample": {
+    "airnode": "0x511AcE8648D2f64260d50D036F8f8ce622d92137",
+    "requestHash": "0xe7b6a016991169dcaa146957f1d5f4eed5e7281ca54c7c1b95c0fed75c92e7b8",
+    "timestamp": "1790609628",
+    "data": "{\"id\":null,\"jsonrpc\":\"2.0\",\"result\":\"0xb49d1d4bf715e0b8a7dbc80ad9da5f749819c6c9c2e854a6a27074c7f559f774\"}",
+    "signature": "0xc5e42732a2ef390d0e5daea14a590cb00ca52b79dcef37bd01950b68372953d16cd9207be36cb0f5e53c80affd2b60c884b44a02ce4d3b061479ecd306774f491b"
+  }
+}

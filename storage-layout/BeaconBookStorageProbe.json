@@ -1,0 +1,284 @@
+{
+  "contract": "BeaconBookStorageProbe",
+  "openzeppelin": "5.6.1",
+  "storage": [
+    {
+      "label": "book",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+        "encoding": "inplace",
+        "label": "struct BeaconBook.BeaconBookStorage",
+        "numberOfBytes": "160",
+        "members": [
+          {
+            "label": "beacons",
+            "slot": "0",
+            "offset": 0,
+            "type": {
+              "encoding": "dynamic_array",
+              "label": "struct BeaconBook.StoredBeacon[]",
+              "numberOfBytes": "32",
+              "base": {
+                "encoding": "inplace",
+                "label": "struct BeaconBook.StoredBeacon",
+                "numberOfBytes": "96",
+                "members": [
+                  {
+                    "label": "verifier",
+                    "slot": "0",
+                    "offset": 0,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "address",
+                      "numberOfBytes": "20"
+                    }
+                  },
+                  {
+                    "label": "genesis",
+                    "slot": "0",
+                    "offset": 20,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint40",
+                      "numberOfBytes": "5"
+                    }
+                  },
+                  {
+                    "label": "period",
+                    "slot": "0",
+                    "offset": 25,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint16",
+                      "numberOfBytes": "2"
+                    }
+                  },
+                  {
+                    "label": "chainHash",
+                    "slot": "1",
+                    "offset": 0,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "bytes32",
+                      "numberOfBytes": "32"
+                    }
+                  },
+                  {
+                    "label": "publicKey",
+                    "slot": "2",
+                    "offset": 0,
+                    "type": {
+                      "encoding": "bytes",
+                      "label": "bytes",
+                      "numberOfBytes": "32"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "label": "schedule",
+            "slot": "1",
+            "offset": 0,
+            "type": {
+              "encoding": "inplace",
+              "label": "struct BeaconBook.Schedule",
+              "numberOfBytes": "32",
+              "members": [
+                {
+                  "label": "beaconId",
+                  "slot": "0",
+                  "offset": 0,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint8",
+                    "numberOfBytes": "1"
+                  }
+                },
+                {
+                  "label": "since",
+                  "slot": "0",
+                  "offset": 1,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint40",
+                    "numberOfBytes": "5"
+                  }
+                },
+                {
+                  "label": "genesis",
+                  "slot": "0",
+                  "offset": 6,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint40",
+                    "numberOfBytes": "5"
+                  }
+                },
+                {
+                  "label": "period",
+                  "slot": "0",
+                  "offset": 11,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint16",
+                    "numberOfBytes": "2"
+                  }
+                },
+                {
+                  "label": "nextBeaconId",
+                  "slot": "0",
+                  "offset": 13,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint8",
+                    "numberOfBytes": "1"
+                  }
+                },
+                {
+                  "label": "nextFrom",
+                  "slot": "0",
+                  "offset": 14,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint40",
+                    "numberOfBytes": "5"
+                  }
+                },
+                {
+                  "label": "nextGenesis",
+                  "slot": "0",
+                  "offset": 19,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint40",
+                    "numberOfBytes": "5"
+                  }
+                },
+                {
+                  "label": "nextPeriod",
+                  "slot": "0",
+                  "offset": 24,
+                  "type": {
+                    "encoding": "inplace",
+                    "label": "uint16",
+                    "numberOfBytes": "2"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "label": "past",
+            "slot": "2",
+            "offset": 0,
+            "type": {
+              "encoding": "dynamic_array",
+              "label": "struct BeaconBook.Era[]",
+              "numberOfBytes": "32",
+              "base": {
+                "encoding": "inplace",
+                "label": "struct BeaconBook.Era",
+                "numberOfBytes": "32",
+                "members": [
+                  {
+                    "label": "beaconId",
+                    "slot": "0",
+                    "offset": 0,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint8",
+                      "numberOfBytes": "1"
+                    }
+                  },
+                  {
+                    "label": "since",
+                    "slot": "0",
+                    "offset": 1,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint40",
+                      "numberOfBytes": "5"
+                    }
+                  },
+                  {
+                    "label": "genesis",
+                    "slot": "0",
+                    "offset": 6,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint40",
+                      "numberOfBytes": "5"
+                    }
+                  },
+                  {
+                    "label": "period",
+                    "slot": "0",
+                    "offset": 11,
+                    "type": {
+                      "encoding": "inplace",
+                      "label": "uint16",
+                      "numberOfBytes": "2"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "label": "registered",
+            "slot": "3",
+            "offset": 0,
+            "type": {
+              "encoding": "mapping",
+              "label": "mapping(bytes32 => bool)",
+              "numberOfBytes": "32",
+              "key": {
+                "encoding": "inplace",
+                "label": "bytes32",
+                "numberOfBytes": "32"
+              },
+              "value": {
+                "encoding": "inplace",
+                "label": "bool",
+                "numberOfBytes": "1"
+              }
+            }
+          },
+          {
+            "label": "roundRandomness",
+            "slot": "4",
+            "offset": 0,
+            "type": {
+              "encoding": "mapping",
+              "label": "mapping(uint8 => mapping(uint64 => bytes32))",
+              "numberOfBytes": "32",
+              "key": {
+                "encoding": "inplace",
+                "label": "uint8",
+                "numberOfBytes": "1"
+              },
+              "value": {
+                "encoding": "mapping",
+                "label": "mapping(uint64 => bytes32)",
+                "numberOfBytes": "32",
+                "key": {
+                  "encoding": "inplace",
+                  "label": "uint64",
+                  "numberOfBytes": "8"
+                },
+                "value": {
+                  "encoding": "inplace",
+                  "label": "bytes32",
+                  "numberOfBytes": "32"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

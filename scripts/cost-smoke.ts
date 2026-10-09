@@ -8,7 +8,7 @@ import {DatabaseSync} from "node:sqlite";
 import assert from "node:assert/strict";
 import {Contract,JsonRpcProvider,keccak256,getBytes,getAddress,parseUnits,formatUnits,id,type TransactionRequest,type TransactionReceipt} from "ethers";
 import {loadDeployer} from "./lib/deployer-env.ts";
-import {loadChain} from "./lib/chains.ts";
+import {loadChain,requireOperable} from "./lib/chains.ts";
 import {DEFAULT_OPERATOR_DIRECTORY,loadOrCreateOperator,privateDirectory,validateNetwork,Stop} from "./lib/deployment.ts";
 import {RemotePilot} from "./lib/remote-pilot.ts";
 import {builtins,decodeEvidencePacket,replayCoordinator,resolveEpochCatalog,type RequestContext,type EpochRecord} from "../src/index.ts";
@@ -20,6 +20,8 @@ async function main(){
   const {values}=parseArgs({options:{manifest:{type:"string"},env:{type:"string"},"operator-directory":{type:"string"},"keeper-ssh":{type:"string"},"keeper-path":{type:"string"},apply:{type:"boolean",default:false},"keeper-stopped":{type:"boolean",default:false}}});
   if(!values.manifest||!values.env)throw new Stop("Manifest and authorized deployer env path required");
   const manifest=JSON.parse(await readFile(resolve(values.manifest),"utf8")),chain=await loadChain(manifest.network);
+  // The registry ABI and manifest fields here are Arc's; refused before any network access or key use.
+  requireOperable(chain,"cost-smoke.ts");
   if(!chain.testnet||chain.chainId!==manifest.chainId)throw new Stop("Only a configured testnet is allowed");
   const provider=new JsonRpcProvider(chain.rpcUrls[0],undefined,{batchMaxCount:1});
   let child:ReturnType<typeof spawn>|undefined;
@@ -127,7 +129,7 @@ async function main(){
       const attempts=remote?await remote.observe<Array<{hash:string;kind:string;job:unknown}>>("attempts"):rows("SELECT hash,kind,job FROM txs");
       for(const attempt of attempts){const receipt=await provider.getTransactionReceipt(String(attempt.hash));if(receipt?.status===1)recordCost(`keeper-${attempt.kind}`,receipt);}
       assert.equal(await provider.getTransactionCount(operator.keeper.address,"latest"),await provider.getTransactionCount(operator.keeper.address,"pending"));
-      const report={network:chain.key,chainId:chain.chainId,currency:chain.nativeCurrency.symbol,sourceMode:"live API3 on public testnet",minFeeWei:String(minFee),keeperFeeBps:Number(await rng.keeperFeeBps()),costs,
+      const report={network:chain.key,chainId:chain.chainId,currency:chain.nativeCurrency.symbol,sourceMode:"live drand relays on public testnet",minFeeWei:String(minFee),keeperFeeBps:Number(await rng.keeperFeeBps()),costs,
         requests:traces,timeout:{requestId:String(expiredId),requestTransaction:timedOut.hash,refunded:true},keeperBalanceWei:String(await provider.getBalance(operator.keeper.address)),treasuryEarnedWei:String(await rng.earnedFees()),pricingDecided:false};
       await writeFile(join(directory,"report.json"),JSON.stringify(report,(_,value)=>typeof value==="bigint"?String(value):value,2)+"\n",{flag:"wx",mode:0o600});
       console.log(JSON.stringify({passed:true,accepted:3,callbackRepair:true,expiredRefund:true,report:join(directory,"report.json")},null,2));

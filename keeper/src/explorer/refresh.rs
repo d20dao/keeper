@@ -171,7 +171,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let pins = RuntimePins::default();
+        // An epoch coordinator's identity, whose registry pin is its own.
+        let pins = RuntimePins {
+            registry: Some(crate::proxy::ProxyPin::default()),
+            ..RuntimePins::default()
+        };
         let c = address(pins.coordinator.proxy);
         pool.execute("INSERT INTO d20dao_explorer.deployments(chain_id,coordinator,registry,configuration,catalog,protocol_configuration_hash,implementation_pins,first_block) VALUES($1,$2,$2,'{}','{}','0x','[]',10)",&[&chain,&c]).await.unwrap();
         pool.execute(

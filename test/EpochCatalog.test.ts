@@ -121,4 +121,81 @@ describe("Epoch source catalogs",function(){
     // Epochs before the version still select among the initial four.
     expect(await registry.sourceCountAt(2)).to.equal(4n);
   });
+
+  /// Three one-source catalogs of the built-in signed recipes, each with its provider's test Airnode, and their hashes.
+  const single=(recipe:number)=>{const {recipes,signers}=providerTestCatalog([recipe]);return {recipes,signers,hash:epochCatalogHash(signers,recipes)};};
+  const [X,Y,Z]=[single(5),single(0),single(2)];
+  const mineToEpoch=async(registry:any,epoch:bigint)=>{const start=await registry.epochStart(epoch),head=BigInt(await ethers.provider.getBlockNumber());if(start>head)await networkHelpers.mine(Number(start-head));};
+  const hashAt=async(registry:any,epoch:bigint)=>(await view(registry,epoch)).hash as string;
+
+  it("keeps the version that takes effect at the next epoch when a catalog is scheduled, and replaces only one further away",async()=>{
+    const {registry}=await networkHelpers.loadFixture(registryFixture);
+    const initial=await hashAt(registry,1n);
+    // The reproduction: x is scheduled in epoch 3 for epoch 5, and y in epoch 4 for epoch 6. Epoch 5 is then the next epoch, and
+    // scheduling y must not take its catalog back.
+    await mineToEpoch(registry,3n);
+    await expect(registry.scheduleCatalog(X.recipes,X.signers,5)).to.emit(registry,"CatalogScheduled").withArgs(5,X.hash,X.recipes,X.signers);
+    expect([await hashAt(registry,4n),await hashAt(registry,5n)]).to.deep.equal([initial,X.hash]);
+    await mineToEpoch(registry,4n);
+    await expect(registry.scheduleCatalog(Y.recipes,Y.signers,6)).to.emit(registry,"CatalogScheduled").withArgs(6,Y.hash,Y.recipes,Y.signers);
+    expect([await hashAt(registry,4n),await hashAt(registry,5n),await hashAt(registry,6n),await hashAt(registry,9n)]).to.deep.equal([initial,X.hash,Y.hash,Y.hash]);
+    expect([await registry.sourceCountAt(4),await registry.sourceCountAt(5),await registry.sourceCountAt(6)]).to.deep.equal([4n,1n,1n]);
+    // Still in epoch 4: y, two epochs away, is pending and is replaced, and x stays. So is a version scheduled for the same epoch again.
+    await registry.scheduleCatalog(Z.recipes,Z.signers,7);
+    expect([await hashAt(registry,5n),await hashAt(registry,6n),await hashAt(registry,7n)]).to.deep.equal([X.hash,X.hash,Z.hash]);
+    await registry.scheduleCatalog(Y.recipes,Y.signers,7);
+    expect([await hashAt(registry,5n),await hashAt(registry,6n),await hashAt(registry,7n)]).to.deep.equal([X.hash,X.hash,Y.hash]);
+    // The epoch that is now the next one is fixed too: at the start of epoch 5, x is active and y is due at 7, two epochs away.
+    await mineToEpoch(registry,5n);
+    await registry.scheduleCatalog(Z.recipes,Z.signers,8);
+    expect([await hashAt(registry,5n),await hashAt(registry,6n),await hashAt(registry,7n),await hashAt(registry,8n)]).to.deep.equal([X.hash,X.hash,X.hash,Z.hash]);
+    // A schedule can never start before the epoch after next, so nothing that is active or next can be scheduled over.
+    for(const tooSoon of [5n,6n])await expect(registry.scheduleCatalog(Y.recipes,Y.signers,tooSoon)).to.be.revertedWithCustomError(registry,"InvalidEpoch");
+  });
+
+  it("replaces a pending version more than one epoch away exactly as before",async()=>{
+    const {registry}=await networkHelpers.loadFixture(registryFixture);
+    const initial=await hashAt(registry,1n);
+    await mineToEpoch(registry,3n);
+    await registry.scheduleCatalog(X.recipes,X.signers,5);
+    // In the same epoch, 5 is two epochs ahead: the pending version goes, whether the new one starts earlier, later or in the same epoch.
+    await registry.scheduleCatalog(Y.recipes,Y.signers,6);
+    expect([await hashAt(registry,5n),await hashAt(registry,6n)]).to.deep.equal([initial,Y.hash]);
+    await registry.scheduleCatalog(Z.recipes,Z.signers,5);
+    expect([await hashAt(registry,4n),await hashAt(registry,5n),await hashAt(registry,6n)]).to.deep.equal([initial,Z.hash,Z.hash]);
+    await registry.scheduleCatalog(X.recipes,X.signers,9);
+    expect([await hashAt(registry,5n),await hashAt(registry,8n),await hashAt(registry,9n)]).to.deep.equal([initial,initial,X.hash]);
+    // An active version is never replaced: from epoch 9 on x is active, and a later schedule follows it.
+    await mineToEpoch(registry,9n);
+    await registry.scheduleCatalog(Y.recipes,Y.signers,11);
+    expect([await hashAt(registry,9n),await hashAt(registry,10n),await hashAt(registry,11n)]).to.deep.equal([X.hash,X.hash,Y.hash]);
+  });
+
+  it("holds the current and next epoch's catalog fixed and keeps versions ascending through a long run of schedules",async()=>{
+    const {registry}=await networkHelpers.loadFixture(registryFixture);
+    const catalogs=[X,Y,Z,single(3)],initial=await hashAt(registry,1n);
+    // A model of the rule: the versions ascending by first epoch, and a schedule drops the last one only if it is more than one
+    // epoch beyond the current epoch. The registry must agree with it for every epoch, whatever order the schedules come in.
+    const model:Array<{from:bigint;hash:string}>=[];
+    const modelAt=(epoch:bigint)=>{for(let i=model.length;i>0;i--)if(epoch>=model[i-1].from)return model[i-1].hash;return initial;};
+    let random=BigInt(ethers.id("catalog schedule run")),epoch=1n;
+    const next=(bound:number)=>{random=BigInt(ethers.keccak256(ethers.toBeHex(random,32)));return Number(random%BigInt(bound));};
+    let kept=0,replaced=0;
+    for(let step=0;step<80;step++){
+      const advance=BigInt(next(3));
+      if(advance>0n){epoch+=advance;await mineToEpoch(registry,epoch);}
+      const current=BigInt(await registry.epochForBlock((await ethers.provider.getBlockNumber())+1)),from=current+2n+BigInt(next(3)),chosen=catalogs[next(catalogs.length)];
+      const before=[await hashAt(registry,current),await hashAt(registry,current+1n)];
+      await registry.scheduleCatalog(chosen.recipes,chosen.signers,from);
+      if(model.length&&model[model.length-1].from>current+1n){model.pop();replaced++;}else if(model.length)kept++;
+      model.push({from,hash:chosen.hash});
+      // Neither the current nor the next epoch changed catalog, and no two versions start together or out of order.
+      expect([await hashAt(registry,current),await hashAt(registry,current+1n)],`step ${step}`).to.deep.equal(before);
+      for(let i=1;i<model.length;i++)expect(model[i].from>model[i-1].from,`step ${step}`).to.equal(true);
+      for(let e=1n;e<=current+8n;e++)expect(await hashAt(registry,e),`step ${step}, epoch ${e}`).to.equal(modelAt(e));
+    }
+    // Both branches of the rule were exercised.
+    console.log(`Catalog schedules: ${kept} kept the last version, ${replaced} replaced it (80 steps, ${epoch} epochs)`);
+    expect(kept).to.be.greaterThan(10);expect(replaced).to.be.greaterThan(10);
+  });
 });

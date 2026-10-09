@@ -15,6 +15,8 @@ sol! {
     }
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct EpochSelection { uint8 source; uint8 recipe; address airnode; bytes32 selector; bytes32 queryHash; string canonicalRequest; }
+    /// A beacon recipe's registration; its verifier is zero for a signed recipe.
+    struct Beacon { address verifier; uint64 genesis; uint64 period; bytes32 chainHash; bytes publicKey; }
     #[derive(Debug)]
     struct EpochRecord {
         bytes32 epochHash; bytes32 catalogHash; bytes32 anchorHash; uint8 source;
@@ -31,6 +33,8 @@ sol! {
         function getEpoch(uint64 epochId) external view returns (EpochRecord record);
         function getEpochFallbackSelection(uint64 epochId, uint8 attempt) external view returns (EpochSelection selection);
         function getRecipe(uint8 recipe) external view returns (bytes32 queryHash, string canonicalRequest, bytes template, string body);
+        function beaconOf(uint8 recipe) external view returns (Beacon beacon);
+        function verifyBeacon(uint8 recipe, uint64 round, bytes signature) external view returns (bool valid);
         function commitEpoch(uint64 epochId, ApiProof attestation) external;
         function commitEpochFallback(uint64 epochId, uint8 attempt, ApiProof attestation) external;
     }
@@ -51,5 +55,9 @@ sol! {
         function nextRequestId() external view returns (uint256 count);
         function publicKeyX() external view returns (uint256 x);
         function publicKeyY() external view returns (uint256 y);
+    }
+    /// Arbitrum's NodeInterface, a virtual contract at 0xc8 that only eth_call reaches.
+    interface NodeInterface {
+        function gasEstimateL1Component(address to, bool contractCreation, bytes data) external payable returns (uint64 gasEstimateForL1, uint256 baseFee, uint256 l1BaseFeeEstimate);
     }
 }

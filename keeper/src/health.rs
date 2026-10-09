@@ -130,6 +130,47 @@ pub async fn authorized(journal: &Journal) -> Result<()> {
         .await?;
     Ok(())
 }
+/// The epoch registry's catalog selected a recipe this keeper does not prepare: a signed API recipe (see
+/// epoch::UNSUPPORTED_RECIPE). The keeper goes on: epochs the registry has published are served, and the epochs after it are
+/// prepared as usual. The fault names the recipe and stands until an epoch's selected source is supported again, so it
+/// shows even when no request waits on the epoch.
+pub async fn unsupported_recipe(pool: &sqlx::SqlitePool, recipe: u8) -> Result<()> {
+    sqlx::query("INSERT INTO meta(key,value) VALUES('health:unsupported_recipe',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .bind(recipe.to_string()).execute(pool).await?;
+    Ok(())
+}
+pub async fn supported_recipe(pool: &sqlx::SqlitePool) -> Result<()> {
+    sqlx::query("DELETE FROM meta WHERE key='health:unsupported_recipe'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+/// The finality audit is behind (soft finality): the oldest block the keeper acted on that it has not checked was written
+/// at `oldest`, more than FINALITY_AUDIT_MAX_LAG_SECONDS ago. L1 batch posting or L1 finality has stopped. The keeper goes
+/// on serving; the fault is degraded, not a halt, and stands until the audit has caught up.
+pub async fn finality_audit_stalled(journal: &Journal, oldest: u64) -> Result<()> {
+    sqlx::query("INSERT INTO meta(key,value) VALUES('health:finality_audit_stalled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .bind(oldest.to_string()).execute(&journal.pool).await?;
+    Ok(())
+}
+pub async fn finality_audit_current(journal: &Journal) -> Result<()> {
+    sqlx::query("DELETE FROM meta WHERE key='health:finality_audit_stalled'")
+        .execute(&journal.pool)
+        .await?;
+    Ok(())
+}
+/// The meta key of the round lane's fault `round_unavailable` (see round::Lane::poll): the beacon and round live demand
+/// has waited on for more than drand::UNAVAILABLE_SECONDS while no relay served it. The lane writes and clears it at each
+/// tick, whether or not the keeper may send: a round that cannot be fetched is the service's fault, not the wallet's.
+pub const ROUND_UNAVAILABLE: &str = "health:round_unavailable";
+/// The meta key of the round lane's fault `round_rpc_error`: the same wait, when the last failure of the round's fetches
+/// was the keeper's own read of the chain (the coordinator's verdict on a signature, or its record of the round), not
+/// what the relays did. At most one of the two stands.
+pub const ROUND_RPC_ERROR: &str = "health:round_rpc_error";
+/// The meta key of the round lane's fault `clock_behind` (see round::Lane::observe_clock): this machine's clock is more
+/// than round::CLOCK_BEHIND_SECONDS behind the decision head's time. The lane goes by the chain's time meanwhile and keeps
+/// serving; the owner sets the clock right.
+pub const CLOCK_BEHIND: &str = "health:clock_behind";
 pub async fn rejection(journal: &Journal, reason: &str) -> Result<()> {
     sqlx::query("INSERT INTO meta(key,value) VALUES('health:rejection',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         .bind(reason).execute(&journal.pool).await?;
@@ -150,8 +191,37 @@ pub async fn assess(
     lane_limit: u64,
 ) -> Result<Status> {
     let mut faults = Vec::new();
+    // Soft finality: at least two endpoints agree that a block the keeper acted on is not the chain's, and the keeper is
+    // recovering from it by itself; it starts no new work until it has. The fault is the record itself, so that it
+    // cannot be missing while the recovery runs, whether or not the keeper is configured to send, and it stands over a
+    // restart. `finality_unconfirmed` is one endpoint's word that no second endpoint has confirmed: the keeper holds
+    // its sends and asks again. `finality_audit_stalled` below is only a degradation.
+    if journal.finality_mismatch().await?.is_some() {
+        faults.push("finality_mismatch".into());
+    } else if journal.meta(crate::journal::SUSPECTED_KEY).await?.is_some() {
+        faults.push("finality_unconfirmed".into());
+    }
     if let Some(reason) = journal.meta("health:unauthorized").await? {
         faults.push(format!("wallet_unauthorized:{reason}"));
+    }
+    if let Some(recipe) = journal.meta("health:unsupported_recipe").await? {
+        faults.push(format!("epoch_recipe_unsupported:{recipe}"));
+    }
+    if journal
+        .meta("health:finality_audit_stalled")
+        .await?
+        .is_some()
+    {
+        faults.push("finality_audit_stalled".into());
+    }
+    if journal.meta(ROUND_UNAVAILABLE).await?.is_some() {
+        faults.push("round_unavailable".into());
+    }
+    if journal.meta(ROUND_RPC_ERROR).await?.is_some() {
+        faults.push("round_rpc_error".into());
+    }
+    if journal.meta(CLOCK_BEHIND).await?.is_some() {
+        faults.push("clock_behind".into());
     }
     // Evidence is pruned whether or not this keeper may send; it only becomes a fault when it may.
     let preparation = preparation_stalled(journal, at, progress_limit).await?;
@@ -267,6 +337,12 @@ pub async fn tick_failed(journal: &Journal, send: bool) -> Result<()> {
 pub async fn rate_limited(journal: &Journal, send: bool) -> Result<()> {
     mark(journal, send, "rpc_rate_limited").await
 }
+/// A round keeper's ticks have been deferred for PROGRESS_STUCK_SECONDS because the RPC endpoints fail as providers do
+/// when they are overloaded or down. As with `rate_limited`, the keeper keeps trying and the next tick that runs writes a
+/// fresh observation without this fault.
+pub async fn rpc_unavailable(journal: &Journal, send: bool) -> Result<()> {
+    mark(journal, send, "rpc_unavailable").await
+}
 /// Keep the last observation's faults, add this one, and make the observation current and unhealthy.
 async fn mark(journal: &Journal, send: bool, fault: &str) -> Result<()> {
     let mut status = journal
@@ -315,6 +391,95 @@ mod tests {
                 assert_eq!(status.faults, vec![fault]);
             }
         }
+    }
+    #[tokio::test]
+    async fn an_unsupported_recipe_is_a_fault_at_once_until_a_supported_source_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recipe.sqlite");
+        let j = Journal::open(&path, "scope").await.unwrap();
+        assert!(assess(&j, true, 100, 20, None, 120).await.unwrap().healthy);
+        supported_recipe(&j.pool).await.unwrap();
+        unsupported_recipe(&j.pool, 3).await.unwrap();
+        // At the first observation, whatever the progress limit, and whether or not this keeper sends.
+        for send in [true, false] {
+            let status = assess(&j, send, 100, 20, None, 120).await.unwrap();
+            assert!(!status.healthy);
+            assert_eq!(status.faults, vec!["epoch_recipe_unsupported:3"]);
+        }
+        // A restart keeps it, `health` reads it, and the latest recipe refused is the one it names.
+        j.pool.close().await;
+        let j = Journal::open(&path, "scope").await.unwrap();
+        unsupported_recipe(&j.pool, 5).await.unwrap();
+        assess(&j, true, 101, 20, None, 120).await.unwrap();
+        let status = read(&path).await.unwrap();
+        assert!(!status.healthy);
+        assert_eq!(status.faults, vec!["epoch_recipe_unsupported:5"]);
+        // It stands next to the other faults and goes with the source that was supported.
+        unauthorized(&j, "not a committer").await.unwrap();
+        assert_eq!(
+            assess(&j, true, 102, 20, None, 120).await.unwrap().faults,
+            vec![
+                "wallet_unauthorized:not a committer".to_owned(),
+                "epoch_recipe_unsupported:5".to_owned()
+            ]
+        );
+        authorized(&j).await.unwrap();
+        supported_recipe(&j.pool).await.unwrap();
+        supported_recipe(&j.pool).await.unwrap();
+        assert!(assess(&j, true, 103, 20, None, 120).await.unwrap().healthy);
+        j.pool.close().await;
+    }
+    #[tokio::test]
+    async fn a_finality_mismatch_is_its_own_fault_distinct_from_a_stalled_audit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mismatch.sqlite");
+        let j = Journal::open(&path, "scope").await.unwrap();
+        assert!(assess(&j, true, 100, 20, None, 120).await.unwrap().healthy);
+        // A stalled audit is a degradation of its own, and no incident: the record is what the incident is.
+        finality_audit_stalled(&j, 40).await.unwrap();
+        assert_eq!(
+            assess(&j, true, 100, 20, None, 120).await.unwrap().faults,
+            ["finality_audit_stalled"]
+        );
+        let found = crate::journal::Mismatch {
+            kind: "receipt".into(),
+            number: 7,
+            reference: "0xtx".into(),
+            expected: "0xa".into(),
+            actual: "0xb".into(),
+            detected_at: 90,
+        };
+        assert!(j.record_finality_mismatch(&found).await.unwrap());
+        // Unhealthy with both, in this order, whether or not the keeper sends: an incident does not depend on the
+        // settings.
+        for send in [true, false] {
+            let status = assess(&j, send, 101, 20, None, 120).await.unwrap();
+            assert!(!status.healthy);
+            assert_eq!(
+                status.faults,
+                ["finality_mismatch", "finality_audit_stalled"]
+            );
+        }
+        // The audit catching up clears its own fault and not the incident's.
+        finality_audit_current(&j).await.unwrap();
+        assert_eq!(
+            assess(&j, true, 102, 20, None, 120).await.unwrap().faults,
+            ["finality_mismatch"]
+        );
+        // It stands over a restart, in the report the `health` command reads, and an acknowledgement does not lift it:
+        // only the recovery that has cleared the record does.
+        j.pool.close().await;
+        let j = Journal::open(&path, "scope").await.unwrap();
+        j.acknowledge_finality(&found.id(), 103).await.unwrap();
+        assess(&j, true, 104, 20, None, 120).await.unwrap();
+        let status = read(&path).await.unwrap();
+        assert!(!status.healthy);
+        assert_eq!(status.faults, ["finality_mismatch"]);
+        j.clear_finality_incident(&serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(assess(&j, true, 105, 20, None, 120).await.unwrap().healthy);
+        j.pool.close().await;
     }
     #[tokio::test]
     async fn observations_survive_restart_expiry_and_arrivals_until_progress() {

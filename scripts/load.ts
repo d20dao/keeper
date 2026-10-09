@@ -9,8 +9,9 @@ import {join,resolve} from "node:path";
 import {performance} from "node:perf_hooks";
 import {network} from "hardhat";
 import {TEST_SECRET,publicKey} from "../test/helpers/proof.ts";
-import {canonicalApiRequest,attestationDigest} from "../src/index.ts";
-import {EPOCH_TEST_SIGNERS,EPOCH_TEST_WALLETS,epochFixtureData} from "../test/helpers/epoch.ts";
+import {beaconRoundTime} from "../src/index.ts";
+import {EPOCH_TEST_SIGNERS} from "../test/helpers/epoch.ts";
+import {registerTestBeacon,signTestRound,testBeacon} from "../test/helpers/beacon.ts";
 import type {TransactionReceipt,Contract,Log,EventLog} from "ethers";
 
 const binary=resolve("keeper/target/release/d20dao-keeper"+(process.platform==="win32"?".exe":""));
@@ -19,6 +20,7 @@ const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 const quantile=(values:number[],p:number)=>values.length?[...values].sort((a,b)=>a-b)[Math.max(0,Math.ceil(values.length*p)-1)]:null;
 await mkdir(".research",{recursive:true});
 const output=await mkdtemp(resolve(".research/arc-load-"));
+// epochApiDelayMs holds every round request of the fake drand relay for that long before it answers.
 type Scenario={name:string;count:number;spacingMs:number;rpcDelayMs:number;initialBurst?:number;pollMs?:number;epochApiDelayMs?:number};
 const suite:Scenario[]=process.env.LOAD_PLAN ? JSON.parse(await readFile(process.env.LOAD_PLAN,"utf8")) : [{name:"steady-1rps",count:20,spacingMs:1000,rpcDelayMs:0},
   {name:"burst-32",count:32,spacingMs:0,rpcDelayMs:0},
@@ -47,23 +49,36 @@ for(const scenario of suite){
   const registry=await deployProxy(ethers,"EpochEntropy",[EPOCH_TEST_SIGNERS,owner.address,wallet.address]);
   const rng:Contract=await deployProxy(ethers,"D20VRFCoordinator",[publicKey(),owner.address,owner.address,ethers.parseEther("0.001"),1,await registry.getAddress(),0]);
   await rng.setPricing(ethers.parseEther("0.001"),0,300000); // Flat fee: load requests send exact values.
+  // Epoch 1 keeps the initial catalog, signed recipes that keepers no longer serve; a test drand network, registered with the real
+  // BLS verifier as recipe 6, takes over from epoch 2, which is where the scenario's requests are made.
+  const verifier=await ethers.deployContract("D20BeaconVerifier");
+  const beacon=testBeacon(await verifier.getAddress(),BigInt((await ethers.provider.getBlock("latest"))!.timestamp));
+  await registerTestBeacon(registry,beacon);
+  const BEACON_RECIPE=6,chainHex=beacon.chainHash.slice(2);
+  await registry.scheduleCatalog([BEACON_RECIPE],[await registry.slotSigner(BEACON_RECIPE)],2);
   const game:Contract=await ethers.deployContract("TestConsumer",[await rng.getAddress()]);
-  const counters:Record<string,number>={};let rpcInFlight=0,maxRpcInFlight=0,apiCalls=0;
+  const counters:Record<string,number>={};let rpcInFlight=0,maxRpcInFlight=0,relayCalls=0;
   const server=createServer(async(req,res)=>{
+    if(req.url?.startsWith("/api/")){
+      // The fake drand relay (TEST_API_BASE): GET /api/<chain hash>/public/<round> answers a round signed by the test key once the
+      // round's scheduled time has passed on the chain, and HTTP 425 before, as a real relay does.
+      try{
+        const match=/^\/api\/([0-9a-f]{64})\/public\/([1-9][0-9]*)$/.exec(req.url);
+        assert.ok(req.method==="GET"&&match&&match[1]===chainHex);relayCalls++;
+        const round=BigInt(match[2]);
+        if(scenario.epochApiDelayMs)await sleep(scenario.epochApiDelayMs);
+        const head=await ethers.provider.getBlock("latest");
+        if(beaconRoundTime(beacon,round)>BigInt(head!.timestamp)){res.writeHead(425,{"Content-Type":"text/plain"});res.end("Too early");return;}
+        const signature=signTestRound(round);
+        res.writeHead(200,{"Content-Type":"application/json"});
+        res.end(JSON.stringify({round:Number(round),randomness:ethers.keccak256(signature).slice(2),signature:signature.slice(2)}));
+      }catch{res.writeHead(500);res.end();}
+      return;
+    }
     rpcInFlight++;maxRpcInFlight=Math.max(maxRpcInFlight,rpcInFlight);
     try{
       const chunks:Buffer[]=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>131072)throw new Error("RPC request bound");chunks.push(Buffer.from(chunk));}
       const call=JSON.parse(Buffer.concat(chunks).toString());
-      if(req.url?.startsWith("/api/")){
-        // The keeper posts to /api/<recipe>; this registry keeps its initial catalog, whose slot n is recipe n.
-        const source=Number(req.url.slice(5));assert.ok(source>=0&&source<=3);apiCalls++;
-        if(scenario.epochApiDelayMs)await sleep(scenario.epochApiDelayMs);
-        const text=JSON.stringify(epochFixtureData(source));
-        const head=await ethers.provider.getBlock("latest"),queryHash=ethers.id(canonicalApiRequest(call));
-        const proof={timestamp:BigInt(head!.timestamp),data:ethers.hexlify(ethers.toUtf8Bytes(text)),signature:"0x"};
-        const signature=await EPOCH_TEST_WALLETS[source].signMessage(ethers.getBytes(attestationDigest(queryHash,proof)));
-        res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({airnode:EPOCH_TEST_SIGNERS[source],requestHash:queryHash,timestamp:proof.timestamp.toString(),data:JSON.parse(text),signature}));return;
-      }
       counters[call.method]=(counters[call.method]??0)+1;
       if(scenario.rpcDelayMs)await sleep(scenario.rpcDelayMs);
       let reply;try{reply={jsonrpc:"2.0",id:call.id,result:await provider.request({method:call.method,params:call.params})};}
@@ -102,19 +117,19 @@ for(const scenario of suite){
   const started=performance.now();
   console.log(`SCENARIO ${scenario.name}: ${scenario.count} requests; RPC +${scenario.rpcDelayMs}ms`);
   try{
-    // Activation is outside offered traffic. Idle preparation must not publish onchain.
+    // Activation is outside offered traffic: the chain jumps to the first epoch of the drand catalog. Idle preparation must not publish onchain.
     miningPaused=true;while(mining)await sleep(10);
     const stamp=(await ethers.provider.getBlock("latest"))!.timestamp;
     let bootstrapBlock=BigInt(await provider.request({method:"eth_blockNumber",params:[]}));
-    const firstStart=await registry.firstEpochStart();
+    const firstStart=await registry.epochStart(2);
     while(bootstrapBlock<firstStart){await provider.request({method:"evm_mine",params:[stamp]});bootstrapBlock++;}
     miningPaused=false;
     const bootstrapEnd=performance.now()+45000;
-    while(apiCalls===0){
+    while(relayCalls===0){
       if(miningError)throw miningError;if(exitCode!==undefined)throw new Error(`Keeper exited ${exitCode}`);
       if(performance.now()>bootstrapEnd)throw new Error("Local epoch preparation did not start");await sleep(100);
     }
-    assert.equal((await registry.getEpoch(1)).epochHash,ethers.ZeroHash,"Idle epoch published before demand");
+    assert.equal((await registry.getEpoch(2)).epochHash,ethers.ZeroHash,"Idle epoch published before demand");
     assert.equal(await ethers.provider.getTransactionCount(wallet.address,"pending"),0,"Idle keeper consumed a transaction nonce");
     let nonce=await player.getNonce();
     for(let i=0;i<scenario.count;i++){
@@ -160,7 +175,7 @@ for(const scenario of suite){
     const fulfillmentReceipts=await Promise.all(fulfilledLogs.map(l=>ethers.provider.getTransactionReceipt(l.transactionHash)));
     const gasUsed=fulfillmentReceipts.map(r=>Number(r!.gasUsed));
     const epochCommits=await registry.queryFilter(registry.filters.EpochCommitted(),initial!.number);
-    const report={scenario,environment:"local EDR + signed fixture APIs; NOT Arc testnet benchmark",prover:"release Rust daemon",apiCalls,epochCommits:epochCommits.length,configuration:{targetBlockMs:480,epochBlocks:200,gasPerBlock:30000000,baseFeeGwei:20,pollMs:scenario.pollMs??250,deadlineSeconds:60,maxGas:Number(env.MAX_GAS),fulfillBatchMax:Number(env.FULFILL_BATCH_MAX)},
+    const report={scenario,environment:"local EDR + fake drand relay; NOT Arc testnet benchmark",prover:"release Rust daemon",relayCalls,epochCommits:epochCommits.length,configuration:{targetBlockMs:480,epochBlocks:200,gasPerBlock:30000000,baseFeeGwei:20,pollMs:scenario.pollMs??250,deadlineSeconds:60,maxGas:Number(env.MAX_GAS),fulfillBatchMax:Number(env.FULFILL_BATCH_MAX)},
       sent:states.length,fulfilled:successful.length,expired:claimable.length,pending:states.filter(s=>!s.fulfilled&&!s.refunded&&!s.deadlineExpired).length,
       observedBlock:observedHead!.number,observedTimestamp:observedHead!.timestamp,completedRefunds:refundTxs.length,within10Blocks:blocks.filter(n=>n<=10).length,
       within10BlocksRate:blocks.filter(n=>n<=10).length/states.length,tenBlockGoalMet:successful.length===states.length&&blocks.every(n=>n<=10),

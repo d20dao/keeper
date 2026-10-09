@@ -5,7 +5,7 @@ import {parseArgs} from "node:util";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {JsonRpcProvider,getAddress} from "ethers";
-import {loadChain} from "./lib/chains.ts";
+import {loadChain,requireOwner} from "./lib/chains.ts";
 import {failoverReport} from "./lib/failover-report.ts";
 
 async function main(){
@@ -13,6 +13,8 @@ async function main(){
   if(!values.manifest||!/^\d+$/.test(values["from-block"]??""))throw new Error("Usage: node scripts/failover-report.ts --manifest <deployments/network.json> --from-block <n> [--to-block <m>] [--wallets 0x..,0x..]");
   if(values["to-block"]!==undefined&&!/^\d+$/.test(values["to-block"]))throw new Error("--to-block must be a block number");
   const manifest=JSON.parse(await readFile(resolve(values.manifest),"utf8")),chain=await loadChain(manifest.network);
+  // Read-only, so an Arbitrum chain is fine; a deployment on a chain whose owner is not decided is not.
+  requireOwner(chain,"failover-report.ts");
   if(manifest.chainId!==chain.chainId)throw new Error("Manifest and chain profile differ");
   const provider=new JsonRpcProvider(chain.rpcUrls[0],chain.chainId,{staticNetwork:true,batchMaxCount:1});
   try {

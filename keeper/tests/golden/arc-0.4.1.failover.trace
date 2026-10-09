@@ -1,0 +1,409 @@
+# The calls of keeper 0.4.1 with two RPC endpoints and two drand relays, one of each failing.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+# A call to an endpoint that is down is recorded as asked and answered with an HTTP error; `relay[1]` is down in section 2.
+
+## 1. both endpoints and both relays answer
+### startup verifies both endpoints
+startup
+[1] eth_chainId
+[1] eth_getCode latest coordinator
+[2] eth_chainId
+[2] eth_getCode latest coordinator
+{
+  [1] eth_getCode latest coordinator
+  [1] eth_getStorageAt latest coordinator slot=eip1967.implementation
+}
+[1] eth_getCode latest coordinator_implementation
+[1] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+{
+  [1] eth_getCode latest registry
+  [1] eth_getStorageAt latest registry slot=eip1967.implementation
+}
+[1] eth_getCode latest registry_implementation
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_call finalized coordinator 0xfa6df55d publicKeyX
+[1] eth_call finalized coordinator 0xd7a6f6e8 publicKeyY
+[1] eth_call finalized coordinator 0x155cf49b protocolConfigurationHash
+[1] eth_call finalized coordinator 0x460a58aa confirmationBlocks
+[1] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+[1] eth_call finalized registry 0x5bc8e8f9 committer
+[1] eth_call finalized registry 0x830c083a catalogHash
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_getBlockByNumber finalized full=false
+### the epoch's snapshot is asked of both relays
+tick
+[1] batch [
+  eth_getBlockByNumber finalized full=false
+]
+[1] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[1] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [1] eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  [1] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  [1] eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+[1] eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[1,0]
+[1] eth_getBlockByNumber latest full=false
+[1] eth_call finalized registry 0xba01b103 getRecipe args=[6]
+[1] eth_call finalized registry 0x87533a48 beaconOf args=[6]
+[1] eth_getBlockByNumber #latest-8/finalized-5 full=false
+{
+  relay[1] GET /<chain hash>/public/1000334
+  relay[2] GET /<chain hash>/public/1000334
+}
+[1] eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=d99c7c70
+journal
+jobs []
+txs []
+epochs [1=prepared]
+sweep queued=false in_flight=false last=none
+cursor=1 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+
+## 2. the first endpoint and the first relay are down
+### startup passes over the first endpoint
+startup
+[1] eth_chainId
+[2] eth_chainId
+[2] eth_getCode latest coordinator
+{
+  [2] eth_getCode latest coordinator
+  [2] eth_getStorageAt latest coordinator slot=eip1967.implementation
+}
+[2] eth_getCode latest coordinator_implementation
+[2] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+{
+  [2] eth_getCode latest registry
+  [2] eth_getStorageAt latest registry slot=eip1967.implementation
+}
+[2] eth_getCode latest registry_implementation
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] eth_call finalized coordinator 0xfa6df55d publicKeyX
+[2] eth_call finalized coordinator 0xd7a6f6e8 publicKeyY
+[2] eth_call finalized coordinator 0x155cf49b protocolConfigurationHash
+[2] eth_call finalized coordinator 0x460a58aa confirmationBlocks
+[2] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+[2] eth_call finalized registry 0x5bc8e8f9 committer
+[2] eth_call finalized registry 0x830c083a catalogHash
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] eth_getBlockByNumber finalized full=false
+### the next epoch's snapshot comes from the second relay, over the second endpoint
+tick
+[2] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-200/finalized-197 full=false
+]
+[2] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[2] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [2] eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  [2] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  [2] eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+[2] eth_call finalized registry 0x0e5a0e02 getEpochFallbackSelection args=[2,0]
+[2] eth_getBlockByNumber latest full=false
+[2] eth_call finalized registry 0xba01b103 getRecipe args=[6]
+[2] eth_call finalized registry 0x87533a48 beaconOf args=[6]
+[2] eth_getBlockByNumber #latest-5/finalized-2 full=false
+{
+  relay[1] GET /<chain hash>/public/1000401
+  relay[2] GET /<chain hash>/public/1000401
+}
+[2] eth_call finalized registry 0x0ccd9ab2 verifyBeacon args=9f8b4c02
+journal
+jobs []
+txs []
+epochs [1=prepared 2=prepared]
+sweep queued=false in_flight=false last=none
+cursor=1 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+
+## 3. a request is served over the second endpoint
+### the request is proved and fulfilled
+tick
+[2] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-13/finalized-10 full=false
+]
+[2] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[2] eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[1,256]
+[2] batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+]
+[2] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [2] eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  [2] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  [2] eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+[2] eth_getBlockByNumber finalized full=false
+[2] eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+[2] eth_call finalized coordinator 0xcf14de9d getProofContext args=[1]
+[2] eth_getBlockByNumber latest full=false
+{
+  [2] eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+  [2] eth_getBlockByNumber finalized full=false
+  [2] eth_getTransactionCount latest keeper
+  [2] eth_getTransactionCount pending keeper
+}
+[2] eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 from=keeper
+[2] eth_feeHistory latest blocks=20 percentiles=[50]
+[2] eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[1]
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] eth_getBlockByNumber latest full=false
+[2] eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] eth_getBlockByNumber latest full=false
+[2] eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 type=2 chain=5042002 nonce=0 gas=810000 maxFee=4080000000 maxPriority=2000000000 value=0
+journal
+jobs [1=submitted]
+txs [1:fulfill@0=submitted]
+epochs [1=prepared 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=2 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+### the receipt settles it
+tick
+[2] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+[2] eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+[2] eth_getBlockByNumber finalized full=false
+[2] eth_getBlockByNumber #latest-4/finalized-1 full=false
+[2] eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+[2] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[2] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [2] eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  [2] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  [2] eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served]
+txs [1:fulfill@0=resolved]
+epochs [1=prepared 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=2 nonce_floor=1
+health healthy=true faults=[] send_enabled=true
+
+## 4. the first endpoint refuses a transaction
+### startup verifies both endpoints again
+startup
+[1] eth_chainId
+[1] eth_getCode latest coordinator
+[2] eth_chainId
+[2] eth_getCode latest coordinator
+[1] eth_getStorageAt latest coordinator slot=eip1967.implementation
+[1] eth_getCode latest coordinator
+[1] eth_getCode latest coordinator_implementation
+[1] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+[1] eth_getStorageAt latest registry slot=eip1967.implementation
+[1] eth_getCode latest registry
+[1] eth_getCode latest registry_implementation
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_call finalized coordinator 0xfa6df55d publicKeyX
+[1] eth_call finalized coordinator 0xd7a6f6e8 publicKeyY
+[1] eth_call finalized coordinator 0x155cf49b protocolConfigurationHash
+[1] eth_call finalized coordinator 0x460a58aa confirmationBlocks
+[1] eth_call finalized coordinator 0x2b12cb69 epochRegistry
+[1] eth_call finalized registry 0x5bc8e8f9 committer
+[1] eth_call finalized registry 0x830c083a catalogHash
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_getBlockByNumber finalized full=false
+### the request is proved and the first endpoint refuses the fulfillment
+tick
+[1] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+[1] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[1] eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[2,256]
+[1] batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+]
+[1] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [1] eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  [1] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  [1] eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+[1] eth_getBlockByNumber finalized full=false
+[1] eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+[1] eth_call finalized coordinator 0xcf14de9d getProofContext args=[2]
+[1] eth_getBlockByNumber latest full=false
+{
+  [1] eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+  [1] eth_getBlockByNumber finalized full=false
+  [1] eth_getTransactionCount latest keeper
+  [1] eth_getTransactionCount pending keeper
+}
+[1] eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=2 seed=75a28a54 bytes=452 from=keeper
+[1] eth_feeHistory latest blocks=20 percentiles=[50]
+[1] eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[2]
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_getBlockByNumber latest full=false
+[1] eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+[1] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[1] eth_getBlockByNumber latest full=false
+[1] eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=2 seed=75a28a54 bytes=452 type=2 chain=5042002 nonce=1 gas=810000 maxFee=4140000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 2=signed]
+txs [1:fulfill@0=resolved 2:fulfill@1=signed]
+epochs [1=prepared 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=1
+health healthy=false faults=["node_rejected:transaction_underpriced"] send_enabled=true
+### the fulfillment is sent again, to the second endpoint
+tick
+[2] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+[2] eth_getTransactionReceipt unknown
+[2] eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+[2] eth_getTransactionCount finalized keeper
+[2] eth_call finalized coordinator 0xc58343ef getRequest args=[2]
+[2] batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+[2] eth_getBlockByNumber latest full=false
+[2] eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=2 seed=75a28a54 bytes=452 type=2 chain=5042002 nonce=1 gas=810000 maxFee=4140000000 maxPriority=2000000000 value=0
+[2] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+journal
+jobs [1=served 2=submitted]
+txs [1:fulfill@0=resolved 2:fulfill@1=submitted]
+epochs [1=prepared 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=1
+health healthy=true faults=[] send_enabled=true
+### the receipt settles it
+tick
+[1] batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+[1] eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+[1] eth_getBlockByNumber finalized full=false
+[1] eth_getBlockByNumber #latest-4/finalized-1 full=false
+[1] eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[2]
+[1] eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+[1] eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  [1] eth_call finalized registry 0x12a02c82 getEpoch args=[2]
+  [1] eth_call finalized registry 0x3edc6b12 sourceCountAt args=[2]
+  [1] eth_call finalized registry 0xa1587509 epochStart args=[2]
+}
+journal
+jobs [1=served 2=served]
+txs [1:fulfill@0=resolved 2:fulfill@1=resolved]
+epochs [1=prepared 2=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=2
+health healthy=true faults=[] send_enabled=true

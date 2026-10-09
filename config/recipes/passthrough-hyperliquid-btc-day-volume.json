@@ -1,0 +1,42 @@
+{
+  "description": "Hyperliquid BTC daily notional volume through the gateway's passthrough (/api): built-in recipe 0's record and template under the passthrough request hash",
+  "signer": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+  "body": [
+    "passthrough",
+    "POST",
+    "/info",
+    [],
+    "{\"type\":\"metaAndAssetCtxs\",\"dex\":\"\"}",
+    [
+      [
+        "symbol",
+        "/0/universe/0/name"
+      ],
+      [
+        "value",
+        "/1/0/dayNtlVlm"
+      ]
+    ]
+  ],
+  "template": [
+    {
+      "literal": "{\"symbol\":\"BTC\",\"value\":\""
+    },
+    {
+      "decimal": {
+        "fraction": true,
+        "exponent": false
+      }
+    },
+    {
+      "literal": "\"}"
+    }
+  ],
+  "sample": {
+    "airnode": "0x509F4275Cbe2E2201cc5444bAc8948E3cc7c665B",
+    "requestHash": "0x233f9b433caa493c3c7d372cbad003ea1127c804d0abc81444d2f9323d8e8c08",
+    "timestamp": "1790609609",
+    "data": "{\"symbol\":\"BTC\",\"value\":\"2273564252.6995515823\"}",
+    "signature": "0x903d4b293073331d362c17b1b8fda1283c74b7821ae22bfb2143887dbe57944b32b8d4160cf3686802386e72e8652955b72ec82d859758e25a1128b6113e644e1c"
+  }
+}

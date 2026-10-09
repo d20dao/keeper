@@ -175,7 +175,12 @@ async fn prepare(pool: &SqlitePool, chain: u64, coordinator: &str) -> Result<(St
             "fee_budget_exceeded" => "fee_budget_exceeded", "epoch_stalled" => "epoch_stalled",
             "tick_failed" => "tick_failed", "rpc_rate_limited" => "rpc_rate_limited", "observation_stale" => "observation_stale",
             "observation_clock_anomaly" => "observation_clock_anomaly",
+            "finality_audit_stalled" => "finality_audit_stalled", "finality_mismatch" => "finality_mismatch",
+            "finality_unconfirmed" => "finality_unconfirmed", "round_unavailable" => "round_unavailable",
+            "round_rpc_error" => "round_rpc_error", "clock_behind" => "clock_behind",
+            s if s == "sequencer_dropped" || s.starts_with("sequencer_dropped:") => "sequencer_dropped",
             s if s.starts_with("node_rejected:") => "node_transaction_rejected",
+            s if s.starts_with("epoch_recipe_unsupported:") => "epoch_recipe_unsupported",
             s if s.starts_with("nonce_stalled:") => "nonce_stalled", _ => "unknown_fault",
         }).collect();
         json!({"observedAt":status.observed_at,"healthy":status.healthy,"sendEnabled":status.send_enabled,"faults":codes,"role":status.role.as_deref().unwrap_or("primary"),"primaryAlive":status.primary_alive})
@@ -523,6 +528,154 @@ mod tests {
         assert_eq!(v["summary"]["progress"], 2);
         assert_eq!(v["events"]["progress"][0]["kind"], "discovered");
         assert_eq!(v["events"]["progress"][1]["kind"], "prepared");
+        j.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn health_faults_are_reported_as_fixed_codes_without_their_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite"), "scope")
+            .await
+            .unwrap();
+        // An unsupported recipe has a code of its own, not the one for faults the receiver does not know, and neither it
+        // nor a nonce or a node rejection relays its id or its text.
+        health::unsupported_recipe(&j.pool, 3).await.unwrap();
+        health::rejection(&j, "PRIVATE_NODE_ERROR").await.unwrap();
+        health::assess(&j, true, health::now().unwrap(), 20, Some((7, 0)), 120)
+            .await
+            .unwrap();
+        let (_, payload) = prepare(&j.pool, 31337, "coordinator").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["health"]["faults"],
+            serde_json::json!([
+                "epoch_recipe_unsupported",
+                "node_transaction_rejected",
+                "nonce_stalled"
+            ])
+        );
+        assert!(!payload.contains("unknown_fault") && !payload.contains("PRIVATE_"));
+        assert!(!payload.contains("unsupported:3") && !payload.contains("stalled:7"));
+        j.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_stalled_finality_audit_is_reported_as_a_fixed_code_without_its_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite"), "scope")
+            .await
+            .unwrap();
+        // The observation holds when the oldest mark waiting for the audit was written; the receiver learns that the
+        // audit is behind and nothing else, beside the codes of the other faults in their order.
+        health::finality_audit_stalled(&j, 1_234_567).await.unwrap();
+        health::rejection(&j, "PRIVATE_NODE_ERROR").await.unwrap();
+        health::assess(&j, true, health::now().unwrap(), 20, Some((7, 0)), 120)
+            .await
+            .unwrap();
+        let (_, payload) = prepare(&j.pool, 31337, "coordinator").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["health"]["faults"],
+            serde_json::json!([
+                "finality_audit_stalled",
+                "node_transaction_rejected",
+                "nonce_stalled"
+            ])
+        );
+        assert_eq!(v["health"]["healthy"], false);
+        assert!(!payload.contains("unknown_fault") && !payload.contains("1234567"));
+        j.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_finality_faults_reach_the_report_as_fixed_codes_and_nothing_of_their_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite"), "scope")
+            .await
+            .unwrap();
+        // The incident, read from the record itself: the receiver learns that the keeper recovers from a replaced block,
+        // and not the block, the hashes or the transaction. The audit that falls behind is another code.
+        j.record_finality_mismatch(&crate::journal::Mismatch {
+            kind: "receipt".into(),
+            number: 424_242,
+            reference: "0xPRIVATE_TRANSACTION".into(),
+            expected: "0xPRIVATE_RECORDED".into(),
+            actual: "0xPRIVATE_CHAIN".into(),
+            detected_at: 1_234_567,
+        })
+        .await
+        .unwrap();
+        health::finality_audit_stalled(&j, 7_654_321).await.unwrap();
+        health::assess(&j, true, health::now().unwrap(), 20, None, 120)
+            .await
+            .unwrap();
+        let (_, payload) = prepare(&j.pool, 31337, "coordinator").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["health"]["faults"],
+            serde_json::json!(["finality_audit_stalled", "finality_mismatch"])
+        );
+        assert_eq!(v["health"]["healthy"], false);
+        for private in ["PRIVATE", "424242", "1234567", "7654321", "unknown_fault"] {
+            assert!(!payload.contains(private), "{private}: {payload}");
+        }
+        j.pool.close().await;
+
+        // A mismatch one endpoint showed and none confirmed, from its note: a code of its own, and again none of it.
+        let j = Journal::open(&dir.path().join("suspected.sqlite"), "scope")
+            .await
+            .unwrap();
+        j.note_suspicion(&crate::journal::Suspected {
+            mismatch: crate::journal::Mismatch {
+                kind: "soft_checkpoint".into(),
+                number: 424_242,
+                reference: String::new(),
+                expected: "0xPRIVATE_RECORDED".into(),
+                actual: "0xPRIVATE_CHAIN".into(),
+                detected_at: 1_234_567,
+            },
+            checks: 3,
+            endpoints: 1,
+            answered: 1,
+        })
+        .await
+        .unwrap();
+        health::assess(&j, true, health::now().unwrap(), 20, None, 120)
+            .await
+            .unwrap();
+        let (_, payload) = prepare(&j.pool, 31337, "coordinator").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["health"]["faults"],
+            serde_json::json!(["finality_unconfirmed"])
+        );
+        for private in ["PRIVATE", "424242", "1234567", "unknown_fault"] {
+            assert!(!payload.contains(private), "{private}: {payload}");
+        }
+        j.pool.close().await;
+
+        // The fault of a dropped transaction names its request in the report of the keeper and not in the receiver's.
+        let j = Journal::open(&dir.path().join("dropped.sqlite"), "scope")
+            .await
+            .unwrap();
+        let status = health::Status {
+            observed_at: health::now().unwrap(),
+            send_enabled: true,
+            healthy: false,
+            faults: vec!["sequencer_dropped:77".into(), "sequencer_dropped".into()],
+            role: None,
+            primary_alive: None,
+        };
+        j.set_meta("health:status", &serde_json::to_string(&status).unwrap())
+            .await
+            .unwrap();
+        let (_, payload) = prepare(&j.pool, 31337, "coordinator").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["health"]["faults"],
+            serde_json::json!(["sequencer_dropped"])
+        );
+        assert!(!payload.contains("sequencer_dropped:") && !payload.contains("unknown_fault"));
         j.pool.close().await;
     }
 

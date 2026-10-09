@@ -1,0 +1,61 @@
+{
+  "source": "drand evmnet, fetched on 2026-09-29 from api.drand.sh, api2.drand.sh, api3.drand.sh and drand.cloudflare.com (v1 /{chainHash}/info and /{chainHash}/public/{round}); all four relays served identical chain info and round records.",
+  "info": {
+    "public_key": "07e1d1d335df83fa98462005690372c643340060d205306a9aa8106b6bd0b3820557ec32c2ad488e4d4f6008f89a346f18492092ccc0d594610de2732c8b808f0095685ae3a85ba243747b1b2f426049010f6b73a0cf1d389351d5aaaa1047f6297d3a4f9749b33eb2d904c9d9ebf17224150ddd7abd7567a9bec6c74480ee0b",
+    "period": 3,
+    "genesis_time": 1727521075,
+    "hash": "04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3",
+    "groupHash": "cd7ad2f0e0cce5d8c288f2dd016ffe7bc8dc88dbb229b3da2b6ad736490dfed6",
+    "schemeID": "bls-bn254-unchained-on-g1",
+    "metadata": {
+      "beaconID": "evmnet"
+    }
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "randomness": "781b75698adc3af62cfa55db83cf0c73ae54e1ac8c0d4c3a2224126b65369ec5",
+      "signature": "11f812d738a36b2210dc88c2d635ad8039588205f42445d6de09e6530165c3462a23aca348c84badcf8df5321ac24577b7963d5b0d780bc4626baedb45cde373"
+    },
+    {
+      "round": 21056714,
+      "randomness": "378fcda04a19460e947ea6912ee0a5c3e42ff8439650f42922cb4a6f283b7f54",
+      "signature": "0173ad66b938c92af89e02f46b5acefed9c289baa0d6148852413b94c4de3d4d286c39faaa3df6e8fe07e8f9de901f30984769337e7d7184c4457121bee4c2f9"
+    },
+    {
+      "round": 21056750,
+      "randomness": "d8a86e51f26ff2d44f82a984a33af3b683a117bb9ecd331abb1bb2527903e23c",
+      "signature": "00cb012f74e2eb1305ef496af683e1f155c2dd6a6e7f971d78b1e58ce2db9757293910b3b622927bf4c98f6d37216953ddc9bea7d4a6c8a9f54e5390e84731b2"
+    },
+    {
+      "round": 21056968,
+      "randomness": "d5f72e711ba66d71ba2494d4ff06a57fcead37aa9b18a8776cfdc480246704c3",
+      "signature": "20a651e4df2b003033a35c67ac66714f14ae06979b0cdf82195d0e9d175f0c0c134febaaa6e175de75bc275ae33ef07fe0dd8dd08ee69bb1294028a23167416e"
+    }
+  ],
+  "messagePoints": {
+    "source": "H(round) = hash-to-curve of keccak256(round as 8 big-endian bytes) under the scheme DST, computed by @kevincharm/noble-bn254-drand 0.0.1 (the library drand-client 1.4.2 uses for this scheme); decimal affine coordinates.",
+    "points": [
+      {
+        "round": 1,
+        "x": "3274388634597322850260789370149388140895047873973358019313287818327097230193",
+        "y": "10513082672822249208187315831936923759893212599696164836629308721715663163524"
+      },
+      {
+        "round": 21056714,
+        "x": "16524563134194552981483266722066143470832056556994566573464720225533617908001",
+        "y": "5142628860299249259467802951139607433390964922369064564984966104650707748309"
+      },
+      {
+        "round": 21056750,
+        "x": "10431376189679657176036827230789673715139754984909242224940703896605489519743",
+        "y": "12796491449620820319027727451049513910861172136377938478954335863686786427308"
+      },
+      {
+        "round": 21056968,
+        "x": "12101623047344698827292124066498846288684927934608005807563073926633592680058",
+        "y": "3290128763749157230707948098909503759779322145791204577829620273041179156871"
+      }
+    ]
+  }
+}

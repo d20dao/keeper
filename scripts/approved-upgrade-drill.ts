@@ -6,7 +6,7 @@
 // APPROVED_NEXT_IMPLEMENTATION_CODE_HASH.
 //
 //   npx hardhat run scripts/approved-upgrade-drill.ts
-//   PREVIOUS_KEEPER_BINARY=<a keeper build without the setting> npx hardhat run scripts/approved-upgrade-drill.ts
+//   PREVIOUS_KEEPER_BINARY=<an older keeper build that serves beacon epochs> npx hardhat run scripts/approved-upgrade-drill.ts
 //   DRILL_EXPLORER=1 npx hardhat run scripts/approved-upgrade-drill.ts
 //
 // preflight   The upgrade lands after the keeper estimated a fulfillment and before it signs: it signs nothing, exits
@@ -17,8 +17,12 @@
 //             mined: the batch runs on the new implementation, the keeper exits with status 75 at its next check, and
 //             the restarted keeper settles every member.
 // pins        Startup on the new implementation passes only with the approval or a reviewed pin, and refuses a
-//             placeholder approval. With PREVIOUS_KEEPER_BINARY, a keeper build that predates the setting starts and
-//             serves with the approval lines present, as after a health-gated update falls back to it.
+//             placeholder approval. With PREVIOUS_KEEPER_BINARY, an older keeper build (0.4.0 or later, the first to serve
+//             drand epochs) starts and serves with the approval lines present, as after a health-gated update falls
+//             back to it.
+//
+// Epoch 1 keeps the registry's initial catalog, signed recipes that keepers no longer serve; a test drand network takes
+// over from epoch 2, where every scenario runs, served by a fake relay whose rounds D20BeaconVerifier checks onchain.
 //
 // The supervisor restarts an exited keeper after 100 ms, as Docker's restart policy first does. With DRILL_EXPLORER=1
 // the preflight coordinator is also indexed by the local explorer runner (keeper/examples/explorer_local.rs), once with
@@ -35,8 +39,9 @@ import assert from "node:assert/strict";
 import {network} from "hardhat";
 import {deployProxy,implementationAddress,implementationCodeHash} from "../test/helpers/proxy.ts";
 import {TEST_SECRET,publicKey} from "../test/helpers/proof.ts";
-import {epochFixtureData} from "../test/helpers/epoch.ts";
-import {canonicalApiRequest} from "../src/sources.ts";
+import {EPOCH_TEST_SIGNERS} from "../test/helpers/epoch.ts";
+import {registerTestBeacon,signTestRound,testBeacon} from "../test/helpers/beacon.ts";
+import {beaconRoundTime} from "../src/index.ts";
 import {buildKeeper} from "./lib/keeper-binary.ts";
 import {loadChain} from "./lib/chains.ts";
 import {initCode} from "./lib/deployment.ts";
@@ -59,7 +64,6 @@ await mkdir(".research",{recursive:true});
 const dir=await mkdtemp(resolve(".research/approved-upgrade-drill-"));
 const [owner,player]=await ethers.getSigners();
 const keeperWallet=ethers.HDNodeWallet.fromPhrase("test test test test test test test test test test test junk",undefined,"m/44'/60'/0'/0/2");
-const signers=["11","22","33","44"].map(value=>new ethers.Wallet("0x"+value.repeat(32)));
 const vrfPath=join(dir,"vrf.key"),txPath=join(dir,"tx.key");
 await writeFile(vrfPath,ethers.toBeHex(TEST_SECRET,32),{mode:0o600});
 await writeFile(txPath,keeperWallet.privateKey,{mode:0o600});
@@ -75,7 +79,12 @@ async function until(condition:()=>Promise<boolean>|boolean,message:string,ms:nu
 await provider.request({method:"hardhat_setNonce",params:[owner.address,ethers.toQuantity(1_000+Math.floor(Math.random()*1_000_000))]});
 // The registry, the live implementation at its live address (its UUPS self address is embedded in the runtime) and
 // the new implementation at its CREATE2 address.
-const registry:any=await deployProxy(ethers,"EpochEntropy",[signers.map(s=>s.address),owner.address,keeperWallet.address]);
+const registry:any=await deployProxy(ethers,"EpochEntropy",[EPOCH_TEST_SIGNERS,owner.address,keeperWallet.address]);
+const verifier=await ethers.deployContract("D20BeaconVerifier");
+const beacon=testBeacon(await verifier.getAddress(),BigInt((await ethers.provider.getBlock("latest"))!.timestamp));
+await registerTestBeacon(registry,beacon);
+const BEACON_RECIPE=6; // After the registry's six built-in recipes.
+await registry.scheduleCatalog([BEACON_RECIPE],[await registry.slotSigner(BEACON_RECIPE)],2);
 await provider.request({method:"hardhat_setCode",params:[live.implementation,live.deployedBytecode]});
 assert.equal(ethers.keccak256(await ethers.provider.getCode(live.implementation)),live.runtimeCodeHash);
 if(await ethers.provider.getCode(chain.create2.factory)==="0x")
@@ -104,7 +113,7 @@ async function liveCoordinator(name:string):Promise<Service>{
 }
 const services={preflight:await liveCoordinator("preflight"),inflight:await liveCoordinator("in-flight"),previous:await liveCoordinator("previous")};
 
-// One JSON-RPC endpoint for every keeper and the local AirnodeHub fixture gateway. Hooks: hold the answer to one
+// One JSON-RPC endpoint for every keeper and the fake drand relay. Hooks: hold the answer to one
 // fulfillment estimate for a coordinator, and run an action before a coordinator's batch is forwarded to the chain.
 const sends:{to:string;from:string;hash:string;selector:string;at:number}[]=[];
 let holdEstimate:{coordinator:string;entered:()=>void;released:Promise<void>}|undefined;
@@ -130,26 +139,19 @@ async function forward(call:any):Promise<object>{
 const server=createServer(async(req,res)=>{
   const reply=(value:unknown,status=200)=>{res.writeHead(status,{"Content-Type":"application/json"});res.end(JSON.stringify(value));};
   try {
+    if(req.url?.startsWith("/api/")){
+      // The fake drand relay (TEST_API_BASE): GET /api/<chain hash>/public/<round> answers a round signed by the test key once the
+      // round's scheduled time has passed on the chain, and HTTP 425 before, as a real relay does.
+      const match=/^\/api\/([0-9a-f]{64})\/public\/([1-9][0-9]*)$/.exec(req.url);
+      assert.ok(req.method==="GET"&&match&&match[1]===beacon.chainHash.slice(2));
+      const round=BigInt(match[2]);
+      const head=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string;timestamp:string};
+      if(beaconRoundTime(beacon,round)>BigInt(head.timestamp)){res.writeHead(425,{"Content-Type":"text/plain"});res.end("Too early");return;}
+      const signature=signTestRound(round);
+      reply({round:Number(round),randomness:ethers.keccak256(signature).slice(2),signature:signature.slice(2)});return;
+    }
     const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
     const body=JSON.parse(Buffer.concat(chunks).toString());
-    if(req.url?.startsWith("/api/")){
-      const recipe=Number(req.url.split("/").at(-1));
-      const head=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string;timestamp:string};
-      const epoch=await registry.nextEpochToPrepare(BigInt(head.number));
-      let selection;
-      const sources=Number(await registry.sourceCountAt(epoch));
-      for(let attempt=0;attempt<sources&&!selection;attempt++){
-        const s=await registry.getEpochFallbackSelection(epoch,attempt);
-        if(Number(s.recipe)===recipe)selection=s;
-      }
-      if(!selection){reply({error:"not a source of this epoch"},400);return;}
-      const canonical=canonicalApiRequest(body);
-      assert.equal(canonical,selection.canonicalRequest);
-      const data=epochFixtureData(recipe),requestHash=ethers.id(canonical),timestamp=BigInt(head.timestamp);
-      const digest=ethers.keccak256(ethers.solidityPacked(["bytes32","uint256","bytes"],[requestHash,timestamp,ethers.toUtf8Bytes(JSON.stringify(data))]));
-      const airnode=signers.find(s=>s.address===selection.airnode)!;
-      reply({airnode:airnode.address,requestHash,timestamp:String(timestamp),data,signature:await airnode.signMessage(ethers.getBytes(digest))});return;
-    }
     if(Array.isArray(body)){reply(await Promise.all(body.map(forward)));return;}
     reply(await forward(body));
   } catch(error){reply({error:String(error)},500);}
@@ -282,9 +284,9 @@ const report:Record<string,unknown>={chain:"local EDR 31337, one block every 500
 const supervisors:Supervisor[]=[];
 try {
   if(process.env.DRILL_EXPLORER==="1")await completed("cargo",["build",...explorerRunner.filter(arg=>arg!=="--quiet")]);
-  // Epoch 1 starts 200 blocks after the registry; reach it at once, then mine in real time.
-  const firstEpoch=Number(await registry.firstEpochStart());
-  await provider.request({method:"hardhat_mine",params:[ethers.toQuantity(firstEpoch-await ethers.provider.getBlockNumber()),"0x0"]});
+  // The drand catalog starts at epoch 2, 400 blocks after the registry; reach it at once, then mine in real time.
+  const epochTwo=Number(await registry.epochStart(2));
+  await provider.request({method:"hardhat_mine",params:[ethers.toQuantity(epochTwo-await ethers.provider.getBlockNumber()),"0x0"]});
   await provider.request({method:"evm_setAutomine",params:[false]});
   await provider.request({method:"evm_setIntervalMining",params:[BLOCK_MS]});
 

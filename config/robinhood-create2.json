@@ -1,0 +1,28 @@
+{
+  "beaconVerifier": {
+    "contract": "D20BeaconVerifier",
+    "salt": "0x000000000000000000000000000000000000000000000000769ad50100000000",
+    "initCodeHash": "0xb82105a8322fe23541fe030ea59a0f2b8956be56184587bf535dba7984f173ae",
+    "runtimeCodeHash": "0x4388250d26298224c4a39d030263550655390ca831ab44c4124f8b0be1f65351",
+    "address": "0xd20dA01Aa16AeD6b77Cd8DDb869151802599100a"
+  },
+  "proofVerifier": {
+    "contract": "D20VRFProofVerifier",
+    "salt": "0xef48ee4c7f570bd0fba27c47c92e7e53fad1351bece5f29cadcec11c099314aa",
+    "runtimeCodeHash": "0x2038efbfea08f4fe79add117570209e0ac7128ead09ad815b166d159454fdb64"
+  },
+  "mappingLibrary": {
+    "contract": "LinkedRandomnessMapping",
+    "salt": "0xcc9ccd84aa197d0a925f1ea3b5f5481517d940566e8051b73036034d4bbeb205",
+    "runtimeCodeHash": "0xc6148c742f31804eee99c3599a87ab25c988f65422842b37a12d5fd27e4794cd"
+  },
+  "coordinatorImplementation": {
+    "contract": "D20VRFCoordinatorRobinhood",
+    "salt": "0x6b1a6749f69e7226e4d3732202b101de9660cf661aac772df7b29e5395507da5",
+    "runtimeCodeHash": "0xe692b447c02225cb95c921ed29952edb566f2afdfe28ff929452b4909460e8f6"
+  },
+  "coordinator": {
+    "contract": "D20Proxy",
+    "salt": "0x8a3f36b3dab5bb41cd7002fe6ef76caf69ca0742c1280aafdf6d1c0c22791aaf"
+  }
+}

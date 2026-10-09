@@ -28,9 +28,9 @@ import assert from "node:assert/strict";
 import {network} from "hardhat";
 import {deployProxy} from "../test/helpers/proxy.ts";
 import {TEST_SECRET,publicKey} from "../test/helpers/proof.ts";
-import {epochFixtureData,signSelection} from "../test/helpers/epoch.ts";
-import {canonicalApiRequest} from "../src/sources.ts";
-import {BUILTIN_EPOCH_RECIPES,type EpochProvider} from "../src/epoch.ts";
+import {EPOCH_TEST_SIGNERS} from "../test/helpers/epoch.ts";
+import {registerTestBeacon,signTestRound,testBeacon} from "../test/helpers/beacon.ts";
+import {beaconRoundTime} from "../src/index.ts";
 import {buildKeeper} from "./lib/keeper-binary.ts";
 import {failoverReport} from "./lib/failover-report.ts";
 
@@ -98,8 +98,7 @@ const binary=binaryOption?resolve(binaryOption):await buildKeeper("release");
 await access(binary).catch(()=>{throw new Error(`Keeper binary ${binary} does not exist`);});
 await mkdir(".research",{recursive:true});
 const dir=await mkdtemp(resolve(".research/fleet-drill-"));
-const FEE=123n,CATALOG=[0,1,2,4,5];
-const providerOf=(recipe:number)=>BUILTIN_EPOCH_RECIPES[recipe].provider;
+const FEE=123n,BEACON_RECIPE=6;
 const [owner,player]=await ethers.getSigners();
 // One wallet per keeper, from the public test mnemonic: the primary is the registry committer, the follower a backup.
 const walletAt=(index:number)=>ethers.HDNodeWallet.fromPhrase("test test test test test test test test test test test junk",undefined,`m/44'/60'/0'/0/${index}`);
@@ -108,15 +107,17 @@ const MAX_LANES=Math.max(...SCENARIOS.map(scenario=>scenario.lanes));
 const keeperWallets:Record<string,ReturnType<typeof walletAt>>={primary:walletAt(2)};
 for(let lane=0;lane<MAX_LANES-1;lane++)keeperWallets[FOLLOWER_NAMES[lane]]=walletAt(3+lane);
 const followerNames=()=>Object.keys(keeperWallets).filter(name=>name!=="primary");
-const signers=["11","22","33","44"].map(value=>new ethers.Wallet("0x"+value.repeat(32)));
-const providerSigners:Record<EpochProvider,InstanceType<typeof ethers.Wallet>>={hyperliquid:signers[0],drpc:signers[1],tickerlayer:signers[2],nodary:new ethers.Wallet("0x"+"55".repeat(32))};
-const signerFor=(address:string)=>[...signers,...Object.values(providerSigners)].find(w=>w.address===address)!;
 const vrfPath=join(dir,"vrf.key");await writeFile(vrfPath,ethers.toBeHex(TEST_SECRET,32),{mode:0o600});
 const keyPaths:Record<string,string>={};
 for(const [name,wallet] of Object.entries(keeperWallets)){keyPaths[name]=join(dir,`${name}-tx.key`);await writeFile(keyPaths[name],wallet.privateKey,{mode:0o600});}
 
-const registry:any=await deployProxy(ethers,"EpochEntropy",[signers.map(s=>s.address),owner.address,keeperWallets.primary.address]);
-await registry.scheduleCatalog(CATALOG,CATALOG.map(recipe=>providerSigners[providerOf(recipe)].address),2);
+const registry:any=await deployProxy(ethers,"EpochEntropy",[EPOCH_TEST_SIGNERS,owner.address,keeperWallets.primary.address]);
+// Epoch 1 keeps the initial catalog, signed recipes that keepers no longer serve; a test drand network, registered with the real BLS
+// verifier as recipe 6, takes over from epoch 2.
+const verifier=await ethers.deployContract("D20BeaconVerifier");
+const beacon=testBeacon(await verifier.getAddress(),BigInt((await ethers.provider.getBlock("latest"))!.timestamp));
+await registerTestBeacon(registry,beacon);
+await registry.scheduleCatalog([BEACON_RECIPE],[await registry.slotSigner(BEACON_RECIPE)],2);
 for(const name of followerNames())await registry.setBackupCommitter(keeperWallets[name].address,true);
 const rng:any=await deployProxy(ethers,"D20VRFCoordinator",[publicKey(),owner.address,owner.address,FEE,1,await registry.getAddress(),5000]);
 await rng.setPricing(FEE,0,300000); // Flat fee: the drill's requests send an exact value.
@@ -124,10 +125,10 @@ const consumer:any=await ethers.deployContract("TestConsumer",[await rng.getAddr
 for(const wallet of Object.values(keeperWallets))await owner.sendTransaction({to:wallet.address,value:ethers.parseEther("50")});
 
 // One HTTP endpoint per keeper, so a single keeper's RPC can be blocked while its process keeps running, plus the
-// local AirnodeHub fixture gateway. No keeper ever reaches the chain except through this proxy.
+// fake drand relay. No keeper ever reaches the chain except through this proxy.
 const blockedRpc=new Set<string>();
-const apiCalls:Record<string,number>={};
-const snapshotEpochs=new Set<bigint>(); // Epochs whose snapshot a keeper has fetched from the fixture gateway.
+let relayCalls=0;
+const snapshotEpochs=new Set<bigint>(); // Epochs whose round a keeper has fetched from the fake relay.
 /// JSON-RPC traffic each keeper sent to its endpoint, counted on arrival and cumulative for the whole drill; a rate
 /// window is the difference of two snapshots. HTTP requests are counted apart from calls, so batching shows as fewer
 /// requests for the same calls. `sites` keys a call by method, contract function and block tag, which is how it is
@@ -167,30 +168,21 @@ async function forwardCall(keeper:string,call:any):Promise<object>{
 const server=createServer(async(req,res)=>{
   const reply=(value:unknown,status=200)=>{res.writeHead(status,{"Content-Type":"application/json"});res.end(JSON.stringify(value));};
   try {
+    if(req.url?.startsWith("/api/")){
+      // The fake drand relay (TEST_API_BASE): GET /api/<chain hash>/public/<round> answers a round signed by the test key once the
+      // round's scheduled time has passed on the chain, and HTTP 425 before, as a real relay does.
+      const match=/^\/api\/([0-9a-f]{64})\/public\/([1-9][0-9]*)$/.exec(req.url);
+      assert.ok(req.method==="GET"&&match&&match[1]===beacon.chainHash.slice(2));
+      const round=BigInt(match[2]);
+      const head=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string;timestamp:string};
+      relayCalls++;
+      snapshotEpochs.add(BigInt(await registry.nextEpochToPrepare(BigInt(head.number))));
+      if(beaconRoundTime(beacon,round)>BigInt(head.timestamp)){res.writeHead(425,{"Content-Type":"text/plain"});res.end("Too early");return;}
+      const signature=signTestRound(round);
+      reply({round:Number(round),randomness:ethers.keccak256(signature).slice(2),signature:signature.slice(2)});return;
+    }
     const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
     const body=JSON.parse(Buffer.concat(chunks).toString());
-    if(req.url?.startsWith("/api/")){
-      const recipe=Number(req.url.split("/").at(-1));
-      const head=await provider.request({method:"eth_getBlockByNumber",params:["latest",false]}) as {number:string;timestamp:string};
-      const epoch=await registry.nextEpochToPrepare(BigInt(head.number));
-      let selection;
-      const sources=Number(await registry.sourceCountAt(epoch));
-      for(let attempt=0;attempt<sources&&!selection;attempt++){
-        const s=await registry.getEpochFallbackSelection(epoch,attempt);
-        if(Number(s.recipe)===recipe)selection=s;
-      }
-      if(!selection){reply({error:"not a source of this epoch"},400);return;}
-      const canonical=canonicalApiRequest(body);
-      assert.equal(canonical,selection.canonicalRequest);
-      apiCalls[String(recipe)]=(apiCalls[String(recipe)]??0)+1;
-      snapshotEpochs.add(BigInt(epoch));
-      const timestamp=BigInt(head.timestamp);
-      const data=epochFixtureData(recipe);
-      const requestHash=ethers.id(canonical);
-      const digest=ethers.keccak256(ethers.solidityPacked(["bytes32","uint256","bytes"],[requestHash,timestamp,ethers.toUtf8Bytes(JSON.stringify(data))]));
-      const airnode=signerFor(selection.airnode);
-      reply({airnode:airnode.address,requestHash,timestamp:String(timestamp),data,signature:await airnode.signMessage(ethers.getBytes(digest))});return;
-    }
     const keeper=req.url?.slice("/rpc/".length)??"";
     if(!Object.keys(keeperWallets).includes(keeper)){reply({error:"unknown keeper endpoint"},404);return;}
     const traffic=trafficOf(keeper);
@@ -333,14 +325,16 @@ async function until(condition:()=>Promise<boolean>,message:string,ms:number,int
 }
 
 try {
+  // The drand catalog starts at epoch 2, so epoch 1 passes at once. The blocks mined here keep their timestamp (zero interval),
+  // so the chain still runs in real time from here on.
+  const epochTwo=await registry.epochStart(2) as bigint;
+  await provider.request({method:"hardhat_mine",params:[ethers.toQuantity(epochTwo-BigInt(await ethers.provider.getBlockNumber())),"0x0"]});
   // Arc-like timing: blocks every 500 ms with no automine, so deadlines, delays and fallback windows run in real time.
   await provider.request({method:"evm_setAutomine",params:[false]});
   await provider.request({method:"evm_setIntervalMining",params:[500]});
   const startedAt=Date.now();
   await setFleet(plan[0]?.lanes??2); // The first scenario's lanes, so a single-lane measurement never starts a follower.
-  // Wait for the first epoch and one published packet, so scenarios start from a served service.
-  const firstEpochStart=await registry.firstEpochStart() as bigint;
-  await until(async()=>BigInt(await ethers.provider.getBlockNumber())>=firstEpochStart,"the first epoch did not start",240_000);
+  // Wait for one published packet, so scenarios start from a served service.
   const warmUp=await request("fleet-drill-warm-up");
   await until(async()=>(await rng.getRequest(warmUp)).fulfilled,"the fleet did not serve the warm-up request",90_000);
 
@@ -348,7 +342,7 @@ try {
   for(const spec of plan)results.push(await runScenario(spec));
   const failures=results.filter(result=>result.failures.length>0);
   console.log(JSON.stringify({drill:"fleet",chain:"local EDR 31337, 500 ms blocks",binary,pollMs:Number(env.POLL_MS),fixtureDirectory:dir,
-    seconds:Math.round((Date.now()-startedAt)/1000),apiCallsByRecipe:apiCalls,scenarios:results},null,2));
+    seconds:Math.round((Date.now()-startedAt)/1000),relayCalls,scenarios:results},null,2));
   assert.equal(failures.length,0,`Scenarios outside their thresholds: ${failures.map(f=>`${f.scenario}: ${f.failures.join("; ")}`).join(" | ")}`);
 } finally {
   for(const child of children)child.kill();

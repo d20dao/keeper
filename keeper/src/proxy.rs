@@ -1,7 +1,11 @@
 //! Exact proxy/implementation identities. Never trust a proxy runtime hash by itself.
-use crate::{abi::Coordinator as C, config::Config, rpc::Rpc};
+use crate::{
+    abi::Coordinator as C,
+    config::{Config, CoordinatorKind},
+    rpc::Rpc,
+};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -20,7 +24,10 @@ pub struct ProxyPin {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePins {
     pub coordinator: ProxyPin,
-    pub registry: ProxyPin,
+    /// The epoch registry behind an epoch coordinator. `None` for a round coordinator, which has no registry: its keeper
+    /// pins and verifies the coordinator alone.
+    #[serde(default)]
+    pub registry: Option<ProxyPin>,
 }
 /// The two service proxies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +75,10 @@ impl ApprovedNext {
     pub fn for_proxy(&self, pins: &RuntimePins, proxy: Address) -> Option<B256> {
         if proxy == pins.coordinator.proxy {
             self.coordinator
-        } else if proxy == pins.registry.proxy {
+        } else if pins
+            .registry
+            .is_some_and(|registry| registry.proxy == proxy)
+        {
             self.registry
         } else {
             None
@@ -244,6 +254,8 @@ impl ProxyPin {
     }
 }
 impl RuntimePins {
+    /// The identity of the coordinator proxy and, behind an epoch coordinator, of its registry proxy. A round
+    /// coordinator (COORDINATOR_KIND=round) has no registry: nothing is asked of it beyond its own proxy.
     pub async fn observe(rpc: &Rpc, cfg: &Config) -> Result<Self> {
         let approved = cfg.approved_next();
         let coordinator = ProxyPin::observe(
@@ -256,28 +268,47 @@ impl RuntimePins {
             },
         )
         .await?;
-        let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
-        // Both service addresses use the same D20Proxy artifact.
-        let registry = ProxyPin::observe(
-            rpc,
-            registry,
-            Some(coordinator.proxy_code_hash),
-            Accepted {
-                pin: cfg.registry_implementation_code_hash,
-                next: approved.registry,
-            },
-        )
-        .await?;
+        let registry = match cfg.chain.coordinator_kind {
+            CoordinatorKind::Epoch => {
+                let registry = rpc.call(cfg.coordinator, C::epochRegistryCall {}).await?;
+                // Both service addresses use the same D20Proxy artifact.
+                Some(
+                    ProxyPin::observe(
+                        rpc,
+                        registry,
+                        Some(coordinator.proxy_code_hash),
+                        Accepted {
+                            pin: cfg.registry_implementation_code_hash,
+                            next: approved.registry,
+                        },
+                    )
+                    .await?,
+                )
+            }
+            CoordinatorKind::Round => None,
+        };
         Ok(Self {
             coordinator,
             registry,
         })
     }
-    pub fn get(&self, service: Service) -> ProxyPin {
+    /// The pin of `service`; `None` for the registry of a round coordinator, which has none.
+    pub fn get(&self, service: Service) -> Option<ProxyPin> {
         match service {
-            Service::Coordinator => self.coordinator,
+            Service::Coordinator => Some(self.coordinator),
             Service::Registry => self.registry,
         }
+    }
+    /// The epoch registry's pin, for the code that only an epoch coordinator's keeper runs (the explorer's epoch index).
+    pub fn epoch_registry(&self) -> Result<ProxyPin> {
+        self.registry
+            .context("A round coordinator has no epoch registry")
+    }
+    /// The service proxies this identity pins, in the order they are verified: the coordinator, then the registry.
+    pub fn services(&self) -> Vec<(Service, ProxyPin)> {
+        std::iter::once((Service::Coordinator, self.coordinator))
+            .chain(self.registry.map(|pin| (Service::Registry, pin)))
+            .collect()
     }
     /// The services this identity accepted through their approved next hash rather than their pin.
     pub fn on_approved_next(&self, cfg: &Config) -> Vec<Service> {
@@ -288,15 +319,18 @@ impl RuntimePins {
         ]
         .into_iter()
         .filter(|(service, pin)| {
-            let hash = self.get(*service).implementation_code_hash;
-            approved.get(*service) == Some(hash) && *pin != Some(hash)
+            self.get(*service).is_some_and(|found| {
+                let hash = found.implementation_code_hash;
+                approved.get(*service) == Some(hash) && *pin != Some(hash)
+            })
         })
         .map(|(service, _)| service)
         .collect()
     }
     /// Both proxies' implementation slots and the runtime code of all four contracts, read in one JSON-RPC batch
     /// from one endpoint, so the check costs one request and never mixes two endpoints' views of the chain. A moved
-    /// slot costs one more read, from the same endpoint, only when that proxy has an approved next implementation.
+    /// slot costs one more read, from the same endpoint, only when that proxy has an approved next implementation. A
+    /// round coordinator's identity has the coordinator proxy alone: its batch reads the one slot and two codes.
     ///
     /// An endpoint whose answer is unusable (null, not hex, a storage word that is not 32 bytes), in the batch or in
     /// the follow-up read, fails like one that did not answer, and the next endpoint answers the whole check afresh.
@@ -306,10 +340,7 @@ impl RuntimePins {
     /// Any change other than a move to the approved next implementation fails as a plain error, as it always has. A
     /// move to it, with every other pin intact, fails as an `ApprovedUpgrade`: the caller stops for a verified restart.
     pub async fn verify(&self, rpc: &Rpc, approved: ApprovedNext) -> Result<()> {
-        let services = [
-            (Service::Coordinator, self.coordinator),
-            (Service::Registry, self.registry),
-        ];
+        let services = &self.services();
         let mut calls = Vec::with_capacity(6);
         for (_, pin) in services {
             calls.push((
@@ -324,7 +355,7 @@ impl RuntimePins {
             .hedged("eth_getStorageAt batch", move |endpoint| async move {
                 let values = rpc.batch_at(endpoint, calls).await?;
                 let mut views = Vec::with_capacity(services.len());
-                for ((service, pin), values) in services.into_iter().zip(values.chunks(3)) {
+                for ((service, pin), values) in services.iter().copied().zip(values.chunks(3)) {
                     let word = storage_word(values[0].clone())?;
                     let proxy_code = runtime_code(values[1].clone())?;
                     let implementation_code = runtime_code(values[2].clone())?;
@@ -346,7 +377,7 @@ impl RuntimePins {
             .await?;
         let mut upgrade = None;
         for ((service, pin), (word, proxy_code, implementation_code, moved_code)) in
-            services.into_iter().zip(views)
+            services.iter().copied().zip(views)
         {
             ensure!(
                 !proxy_code.is_empty() && !implementation_code.is_empty(),
@@ -407,12 +438,12 @@ pub(crate) mod tests {
     pub(crate) fn pins() -> RuntimePins {
         RuntimePins {
             coordinator: coordinator_pin(),
-            registry: ProxyPin {
+            registry: Some(ProxyPin {
                 proxy: Address::repeat_byte(0xe1),
                 proxy_code_hash: hash(PROXY_CODE),
                 implementation: Address::repeat_byte(0xe2),
                 implementation_code_hash: hash(REGISTRY_CODE),
-            },
+            }),
         }
     }
 
@@ -643,16 +674,17 @@ pub(crate) mod tests {
     pub(crate) async fn served_chain() -> (Shared, String) {
         let pins = pins();
         let mut chain = Chain::default();
-        for pin in [pins.coordinator, pins.registry] {
+        for pin in [pins.coordinator, pins.registry.unwrap()] {
             chain.slots.insert(pin.proxy, pin.implementation);
             chain.code.insert(pin.proxy, PROXY_CODE.to_vec());
         }
         chain
             .code
             .insert(pins.coordinator.implementation, OLD_CODE.to_vec());
-        chain
-            .code
-            .insert(pins.registry.implementation, REGISTRY_CODE.to_vec());
+        chain.code.insert(
+            pins.registry.unwrap().implementation,
+            REGISTRY_CODE.to_vec(),
+        );
         chain
             .code
             .insert(Address::repeat_byte(0xc3), NEXT_CODE.to_vec());
@@ -716,6 +748,58 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .to_string(),
             "Proxy code pin mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_round_coordinators_identity_is_its_own_proxy_alone() {
+        let (chain, rpc) = local_chain().await;
+        let pins = RuntimePins {
+            registry: None,
+            ..pins()
+        };
+        assert_eq!(
+            pins.services(),
+            vec![(Service::Coordinator, pins.coordinator)]
+        );
+        assert_eq!(pins.get(Service::Registry), None);
+        assert!(pins.epoch_registry().is_err());
+        // One batched request of one slot and two codes.
+        let before = chain.lock().unwrap().requests;
+        pins.verify(&rpc, ApprovedNext::default()).await.unwrap();
+        assert_eq!(chain.lock().unwrap().requests, before + 1);
+        // A move of the coordinator is judged as before; there is no registry to move.
+        chain
+            .lock()
+            .unwrap()
+            .slots
+            .insert(pins.coordinator.proxy, Address::repeat_byte(0xc3));
+        let approved = ApprovedNext {
+            coordinator: Some(hash(NEXT_CODE)),
+            registry: None,
+        };
+        let upgrade = approved_upgrade(&pins.verify(&rpc, approved).await.unwrap_err())
+            .expect("an approved upgrade");
+        assert_eq!(upgrade.service, Service::Coordinator);
+        assert!(
+            approved_upgrade(
+                &pins
+                    .verify(&rpc, ApprovedNext::default())
+                    .await
+                    .unwrap_err()
+            )
+            .is_none()
+        );
+        // Saved without a registry, and read back the same; a saved epoch identity reads as one with a registry.
+        let saved = serde_json::to_string(&pins).unwrap();
+        assert!(saved.contains("\"registry\":null"), "{saved}");
+        assert_eq!(serde_json::from_str::<RuntimePins>(&saved).unwrap(), pins);
+        let epoch = serde_json::to_string(&super::tests::pins()).unwrap();
+        assert!(
+            serde_json::from_str::<RuntimePins>(&epoch)
+                .unwrap()
+                .registry
+                .is_some()
         );
     }
 
@@ -784,14 +868,13 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .slots
-            .insert(pins.registry.proxy, Address::repeat_byte(0xc4));
+            .insert(pins.registry.unwrap().proxy, Address::repeat_byte(0xc4));
         let error = pins.verify(&rpc, approved).await.unwrap_err();
         assert!(approved_upgrade(&error).is_none(), "{error}");
-        chain
-            .lock()
-            .unwrap()
-            .slots
-            .insert(pins.registry.proxy, pins.registry.implementation);
+        chain.lock().unwrap().slots.insert(
+            pins.registry.unwrap().proxy,
+            pins.registry.unwrap().implementation,
+        );
         // Code replaced at the pinned address is refused even when it is the approved code.
         move_coordinator(0xc2);
         chain
@@ -825,7 +908,7 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .slots
-            .insert(pins.registry.proxy, Address::repeat_byte(0xc3));
+            .insert(pins.registry.unwrap().proxy, Address::repeat_byte(0xc3));
         let registry_only = ApprovedNext {
             coordinator: None,
             registry: Some(hash(NEXT_CODE)),
@@ -836,7 +919,7 @@ pub(crate) mod tests {
             (upgrade.service, upgrade.proxy, upgrade.to),
             (
                 Service::Registry,
-                pins.registry.proxy,
+                pins.registry.unwrap().proxy,
                 Address::repeat_byte(0xc3)
             )
         );

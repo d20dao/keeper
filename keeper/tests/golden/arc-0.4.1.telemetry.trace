@@ -1,0 +1,233 @@
+# The health reports of keeper 0.4.1: what it posts, what it does when a report is not acknowledged, and what it sends next.
+# Source: commit f03c688 (keeper 0.4.1) with only the test modules added, by keeper/tests/golden/record.sh.
+# Recorder: version 4 (keeper/src/golden*.rs, rig.rs, scripted*.rs).
+# One line per JSON-RPC call, with everything the keeper asked:
+# - the method, and the block it reads at: a name as sent, or a number as its distance from the latest and the
+#   finalized head (`#latest-4/finalized-1`);
+# - a call or an estimate: the target, the selector, who it is from, what it carries and its arguments (`args=[..]`
+#   holds small integers and roles, anything else a fingerprint of the bytes);
+# - a storage read: its slot; a fee history: the blocks and percentiles asked;
+# - a transaction the keeper sends: `eth_sendRawTransaction - <target> <call> type= chain= nonce= gas= <fees> value=`,
+#   with the ids and seeds a fulfillment serves (its proof is random) or the packet an epoch commit carries.
+# Calls made at the same time are in braces, in a fixed order; `batch [ ... ]` is one JSON-RPC batch. After each
+# tick, the journal it left: request, transaction and epoch states, sweep and health.
+# With several RPC endpoints or drand relays, a call starts with the endpoint it went to (`[2] `, `relay[2]`).
+# A tick of a process that stays up across ticks is shown without the re-checks its start makes when their wall-clock
+# intervals have passed (the runtime pins every 15 seconds, the wallet's authorization every 2 or 30): how long a tick took
+# must not be in a trace.
+# `telemetry` lines are what the scripted receiver was sent; the report's id and every time in it are left out.
+
+## 1. the keeper serves a request and finds another refunded
+### the request is proved and fulfilled; the other was refunded
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[1,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+]
+eth_call finalized registry 0xc78fafe2 nextEpochToPrepare block=#latest-3/finalized
+{
+  eth_call finalized registry 0x12a02c82 getEpoch args=[1]
+  eth_call finalized registry 0x3edc6b12 sourceCountAt args=[1]
+  eth_call finalized registry 0xa1587509 epochStart args=[1]
+}
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[1]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[1]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[1]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=1 seed=e7c1a842 bytes=452 type=2 chain=5042002 nonce=0 gas=810000 maxFee=4140000000 maxPriority=2000000000 value=0
+journal
+jobs [1=submitted]
+txs [1:fulfill@0=submitted]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=0
+health healthy=true faults=[] send_enabled=true
+### the receipt settles it
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[1]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+journal
+jobs [1=served]
+txs [1:fulfill@0=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=3 nonce_floor=1
+health healthy=true faults=[] send_enabled=true
+
+## 2. a report that is not acknowledged is posted again
+telemetry POST /health -> 500
+telemetry headers accept,authorization,content-length,content-type,host,idempotency-key
+telemetry authorization Bearer <the key>
+telemetry content-type application/json
+telemetry idempotency-key is the report id
+telemetry payload version 1
+telemetry payload nodeId "0x0f0a24c0b44ad22fd39e5ba360622d30ce0102191ea31f5dc1b0bb19fbbb1a15"
+telemetry payload chainId "5042002"
+telemetry payload coordinator "0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0"
+telemetry payload reportId "<report id>"
+telemetry payload observedAt "<time>"
+telemetry payload health {"observedAt":"<time>","healthy":true,"sendEnabled":true,"faults":[],"role":"primary","primaryAlive":null}
+telemetry payload summary {"completed":1,"rejected":0,"failed":0,"progress":2}
+telemetry payload events.completed[0] {"cursor":"3","requestId":"1","kind":"served","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.rejected []
+telemetry payload events.failed []
+telemetry payload events.progress[0] {"cursor":"1","requestId":"1","kind":"discovered","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.progress[1] {"cursor":"2","requestId":"1","kind":"prepared","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload nextCursor "3"
+telemetry payload droppedCount 0
+telemetry payload droppedTotal 0
+telemetry payload rejectionHistoryPrunedTotal 0
+telemetry POST /health -> 200
+telemetry headers accept,authorization,content-length,content-type,host,idempotency-key
+telemetry authorization Bearer <the key>
+telemetry content-type application/json
+telemetry idempotency-key is the report id
+telemetry payload version 1
+telemetry payload nodeId "0x0f0a24c0b44ad22fd39e5ba360622d30ce0102191ea31f5dc1b0bb19fbbb1a15"
+telemetry payload chainId "5042002"
+telemetry payload coordinator "0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0"
+telemetry payload reportId "<report id>"
+telemetry payload observedAt "<time>"
+telemetry payload health {"observedAt":"<time>","healthy":true,"sendEnabled":true,"faults":[],"role":"primary","primaryAlive":null}
+telemetry payload summary {"completed":1,"rejected":0,"failed":0,"progress":2}
+telemetry payload events.completed[0] {"cursor":"3","requestId":"1","kind":"served","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.rejected []
+telemetry payload events.failed []
+telemetry payload events.progress[0] {"cursor":"1","requestId":"1","kind":"discovered","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.progress[1] {"cursor":"2","requestId":"1","kind":"prepared","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload nextCursor "3"
+telemetry payload droppedCount 0
+telemetry payload droppedTotal 0
+telemetry payload rejectionHistoryPrunedTotal 0
+
+## 3. the next report carries only what is new
+### another request is proved and fulfilled
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-9/finalized-6 full=false
+]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+eth_call #latest-3/finalized coordinator 0xfdfe72e6 getPendingRequestIds args=[3,256]
+batch [
+  eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+]
+eth_getBlockByNumber finalized full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+eth_call finalized coordinator 0xcf14de9d getProofContext args=[3]
+eth_getBlockByNumber latest full=false
+{
+  eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+  eth_getBlockByNumber finalized full=false
+  eth_getTransactionCount latest keeper
+  eth_getTransactionCount pending keeper
+}
+eth_estimateGas - coordinator 0xef7c2b19 fulfillRandomness id=3 seed=4aa4bdfe bytes=452 from=keeper
+eth_feeHistory latest blocks=20 percentiles=[50]
+eth_call finalized coordinator 0xef7cc992 requestFeePaid args=[3]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_call finalized coordinator 0xc58343ef getRequest args=[3]
+batch [
+  eth_getStorageAt latest coordinator slot=eip1967.implementation
+  eth_getCode latest coordinator
+  eth_getCode latest coordinator_implementation
+  eth_getStorageAt latest registry slot=eip1967.implementation
+  eth_getCode latest registry
+  eth_getCode latest registry_implementation
+]
+eth_getBlockByNumber latest full=false
+eth_sendRawTransaction - coordinator 0xef7c2b19 fulfillRandomness id=3 seed=4aa4bdfe bytes=452 type=2 chain=5042002 nonce=1 gas=810000 maxFee=4040000000 maxPriority=2000000000 value=0
+journal
+jobs [1=served 3=submitted]
+txs [1:fulfill@0=resolved 3:fulfill@1=submitted]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=1
+health healthy=true faults=[] send_enabled=true
+### the receipt settles it
+tick
+batch [
+  eth_getBlockByNumber finalized full=false
+  eth_getBlockByNumber #latest-8/finalized-5 full=false
+]
+eth_getTransactionReceipt 0xef7c2b19 fulfillRandomness
+eth_getBlockByNumber finalized full=false
+eth_getBlockByNumber #latest-4/finalized-1 full=false
+eth_call #latest-3/finalized coordinator 0xc58343ef getRequest args=[3]
+eth_call #latest-3/finalized coordinator 0x6a84a985 nextRequestId
+journal
+jobs [1=served 3=served]
+txs [1:fulfill@0=resolved 3:fulfill@1=resolved]
+epochs [1=committed]
+sweep queued=false in_flight=false last=none
+cursor=4 nonce_floor=2
+health healthy=true faults=[] send_enabled=true
+telemetry POST /health -> 200
+telemetry headers accept,authorization,content-length,content-type,host,idempotency-key
+telemetry authorization Bearer <the key>
+telemetry content-type application/json
+telemetry idempotency-key is the report id
+telemetry payload version 1
+telemetry payload nodeId "0x0f0a24c0b44ad22fd39e5ba360622d30ce0102191ea31f5dc1b0bb19fbbb1a15"
+telemetry payload chainId "5042002"
+telemetry payload coordinator "0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0"
+telemetry payload reportId "<report id>"
+telemetry payload observedAt "<time>"
+telemetry payload health {"observedAt":"<time>","healthy":true,"sendEnabled":true,"faults":[],"role":"primary","primaryAlive":null}
+telemetry payload summary {"completed":1,"rejected":0,"failed":0,"progress":2}
+telemetry payload events.completed[0] {"cursor":"6","requestId":"3","kind":"served","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.rejected []
+telemetry payload events.failed []
+telemetry payload events.progress[0] {"cursor":"4","requestId":"3","kind":"discovered","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload events.progress[1] {"cursor":"5","requestId":"3","kind":"prepared","origin":"5042002:0xC0C0c0c0C0C0c0c0c0C0c0C0C0C0C0C0C0C0c0c0:0xa06Add288DF81cc94dBA0375A545858f47C622C7","observedAt":"<time>"}
+telemetry payload nextCursor "6"
+telemetry payload droppedCount 0
+telemetry payload droppedTotal 0
+telemetry payload rejectionHistoryPrunedTotal 0
