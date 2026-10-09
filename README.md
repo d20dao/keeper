@@ -5,7 +5,7 @@ A general randomness service on two networks, with one consumer interface (`requ
 - **Arc** (Arc Mainnet and Arc Testnet): epochs and drand. A drand beacon round is prepared locally for each 200-block epoch and published only when a live request needs it; randomness binds the published round to a future block and fixed request context. Requests escrow a fee in USDC quoted from the block base fee and callback gas limit (never below the configured minimum), and keepers may serve up to 16 of them in one transaction.
 - **Robinhood Chain** (mainnet and testnet): round-bound drand, no epochs. Each request is bound to a future drand round when it is made, so nobody can know or choose the result in advance. The contract verifies the drand signature and the VRF proof on chain, and anyone can replay a result from public data. Fees are in ETH. See [the Robinhood coordinator](docs/robinhood.md).
 
-The d20dao-keeper daemon (0.5.1, [changelog](keeper/CHANGELOG.md)) serves either kind of coordinator, shares one durable nonce lane across all its transactions, and receives a configured share of earned fees for operating costs. On Arc it behaves exactly as 0.4.1 did.
+The d20dao-keeper daemon (0.5.2, [changelog](keeper/CHANGELOG.md)) serves either kind of coordinator, shares one durable nonce lane across all its transactions, and receives a configured share of earned fees for operating costs. On Arc it behaves exactly as 0.4.1 did.
 
 The service contracts use owner-authorized UUPS upgrades behind stable, atomically initialized D20Proxy addresses. Ownership transfer is two-step; keeper/fee-recipient roles are adjustable. Runtime checks pin the proxy implementations. Deployment networks live in chains.json.
 

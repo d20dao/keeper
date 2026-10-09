@@ -4773,13 +4773,16 @@ impl Worker {
         // Read at a fixed block no older than the receipt's: an endpoint that has not caught up with
         // it fails the read instead of answering with the state from before the transaction.
         let at = head.number.max(quantity(&receipt["blockNumber"])?);
-        // An epoch coordinator's request, which the proof feed announces; a round coordinator's settlement.
-        let (r, request) = match self.lane.kind() {
+        // The request, which the proof feed announces: an epoch coordinator's, or a round coordinator's.
+        let (r, request, round_request) = match self.lane.kind() {
             CoordinatorKind::Epoch => {
                 let request = self.request_at(a.job.parse()?, at).await?;
-                (Status::of(&request), Some(request))
+                (Status::of(&request), Some(request), None)
             }
-            CoordinatorKind::Round => (self.status_at(a.job.parse()?, at).await?, None),
+            CoordinatorKind::Round => {
+                let request = self.round_request_at(a.job.parse()?, at).await?;
+                (Status::of_round(request.as_ref()), None, request)
+            }
         };
         if r.fulfilled && !r.delivered {
             crate::audit::callback_failed(&self.journal.pool, &a.job).await?;
@@ -4813,13 +4816,20 @@ impl Worker {
             tracing::warn!(request_id=%a.job,tx_hash=%a.hash,"Follower served request {}",a.job);
         }
         if let Some(notifier) = &self.discord
-            && let Some(request) = &request
             && let (Ok(request_id), Ok(tx_hash)) = (a.job.parse(), a.hash.parse())
-            && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                status, &a.kind, request_id, tx_hash, request,
-            )
         {
-            notifier.notify(proof);
+            let proof = match (&request, &round_request) {
+                (Some(request), _) => crate::discord::ProofAccepted::from_receipt(
+                    status, &a.kind, request_id, tx_hash, request,
+                ),
+                (None, Some(request)) => crate::discord::ProofAccepted::from_round_receipt(
+                    status, &a.kind, request_id, tx_hash, request,
+                ),
+                (None, None) => None,
+            };
+            if let Some(proof) = proof {
+                notifier.notify(proof);
+            }
         }
         Ok(())
     }
@@ -4993,17 +5003,26 @@ impl Worker {
         // Read at a fixed block no older than the receipt's, as for a single fulfillment. An epoch coordinator's requests,
         // which the proof feed announces; a round coordinator's settlements.
         let at = head.number.max(quantity(&receipt["blockNumber"])?);
-        let (requests, announced) = match self.lane.kind() {
+        let (requests, announced, round_announced) = match self.lane.kind() {
             CoordinatorKind::Epoch => {
                 let read = self.member_requests_at(members, at).await?;
-                (read.iter().map(Status::of).collect::<Vec<_>>(), Some(read))
+                (
+                    read.iter().map(Status::of).collect::<Vec<_>>(),
+                    Some(read),
+                    None,
+                )
             }
             CoordinatorKind::Round => {
                 let ids = members
                     .iter()
                     .map(|id| id.parse())
                     .collect::<std::result::Result<Vec<U256>, _>>()?;
-                (self.statuses_in(&ids, &format!("0x{at:x}")).await?, None)
+                let read = self.round_requests_in(&ids, &format!("0x{at:x}")).await?;
+                let statuses = read
+                    .iter()
+                    .map(|request| Status::of_round(request.as_ref()))
+                    .collect::<Vec<_>>();
+                (statuses, None, Some(read))
             }
         };
         let mut states = Vec::with_capacity(members.len());
@@ -5055,13 +5074,27 @@ impl Worker {
                         tx_hash,
                     });
                 }
-                if let Some(notifier) = &self.discord
-                    && let Some(request) = announced.as_ref().and_then(|read| read.get(index))
-                    && let Some(proof) = crate::discord::ProofAccepted::from_receipt(
-                        status, &a.kind, request_id, tx_hash, request,
-                    )
-                {
-                    notifier.notify(proof);
+                if let Some(notifier) = &self.discord {
+                    let proof = match (&announced, &round_announced) {
+                        (Some(read), _) => read.get(index).and_then(|request| {
+                            crate::discord::ProofAccepted::from_receipt(
+                                status, &a.kind, request_id, tx_hash, request,
+                            )
+                        }),
+                        (None, Some(read)) => {
+                            read.get(index)
+                                .and_then(Option::as_ref)
+                                .and_then(|request| {
+                                    crate::discord::ProofAccepted::from_round_receipt(
+                                        status, &a.kind, request_id, tx_hash, request,
+                                    )
+                                })
+                        }
+                        (None, None) => None,
+                    };
+                    if let Some(proof) = proof {
+                        notifier.notify(proof);
+                    }
                 }
             }
         }

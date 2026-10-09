@@ -207,6 +207,12 @@ pub struct Process<'a> {
     pub startup: Vec<String>,
 }
 impl Process<'_> {
+    /// From now on the Discord proof notices of this process wait for the test to read them.
+    pub fn proofs(&mut self) -> tokio::sync::mpsc::Receiver<crate::discord::ProofAccepted> {
+        let (notifier, captured) = crate::discord::Notifier::capture();
+        self.worker.attach_discord(notifier);
+        captured
+    }
     /// From now on the Telegram events of this process wait for the test to read them.
     pub fn told(&mut self) -> crate::telegram::Captured {
         let (notifier, captured) = crate::telegram::TelegramNotifier::capture();

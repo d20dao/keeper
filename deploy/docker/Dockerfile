@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1
-FROM rust:1.96.1-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS build
+# syntax=mirror.gcr.io/docker/dockerfile:1
+FROM mirror.gcr.io/library/rust:1.96.1-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS build
 WORKDIR /build/keeper
 COPY keeper/Cargo.toml keeper/Cargo.lock keeper/explorer-schema.sql ./
 COPY keeper/src/ ./src/
 ARG CARGO_BUILD_JOBS=2
 RUN cargo build --release --locked --jobs "$CARGO_BUILD_JOBS"
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM mirror.gcr.io/library/debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 keeper && useradd --uid 10001 --gid 10001 --no-create-home keeper \

@@ -972,3 +972,60 @@ async fn a_signed_fulfillment_the_wallet_can_no_longer_pay_asks_the_owner_once()
     assert!(meta(&rig, crate::worker::LOW_FUNDS_KEY).await.is_some());
     process.stop().await;
 }
+
+/// The proof feed: a round keeper announces each request its accepted fulfillment served, once, with the request's drand
+/// round, whether it was sent alone or in a batch.
+#[tokio::test]
+async fn an_accepted_round_fulfillment_is_announced_once_per_request_with_its_round() {
+    let drain = |proofs: &mut tokio::sync::mpsc::Receiver<crate::discord::ProofAccepted>| {
+        let mut seen = Vec::new();
+        while let Ok(proof) = proofs.try_recv() {
+            seen.push((proof.request_id, proof.source));
+        }
+        seen
+    };
+    // Alone.
+    let rig = serving_rig().await;
+    let mut process = rig.process(true, false).await;
+    let mut proofs = process.proofs();
+    let id = rig.request();
+    let (_, round, _) = bound(&rig, id);
+    serve(&rig, &process, id).await;
+    assert_eq!(sent(&rig).len(), 1, "{:?}", sent(&rig));
+    assert!(drain(&mut proofs).is_empty(), "nothing before the receipt");
+    for _ in 0..3 {
+        rig.settle();
+        process.tick().await.unwrap();
+    }
+    assert_eq!(
+        drain(&mut proofs),
+        [(U256::from(id), crate::discord::Source::Round(round))]
+    );
+    process.stop().await;
+    // In a batch: one notice for each member.
+    let rig = serving_rig().await;
+    let mut process = rig.process(true, false).await;
+    let mut proofs = process.proofs();
+    let (first, second) = (rig.request(), rig.request());
+    let (_, round, _) = bound(&rig, first);
+    serve(&rig, &process, first).await;
+    assert!(
+        sent(&rig)[0].0.contains("fulfillRandomnessBatch"),
+        "{:?}",
+        sent(&rig)
+    );
+    for _ in 0..3 {
+        rig.settle();
+        process.tick().await.unwrap();
+    }
+    let mut seen = drain(&mut proofs);
+    seen.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        seen,
+        [
+            (U256::from(first), crate::discord::Source::Round(round)),
+            (U256::from(second), crate::discord::Source::Round(round))
+        ]
+    );
+    process.stop().await;
+}

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+The public Discord proof feed (`DISCORD_BOT_TOKEN`, `DISCORD_PROTOCOL_CHANNEL_ID`, `EXPLORER_URL`, `DISCORD_PUBLIC_EXPLORER_URL`) also posts a round keeper's accepted fulfillments, one message per request with its drand round. Epoch mode (Arc) is unchanged.
+
 ## 0.5.1
 
 Documentation and profile notes; no behaviour change.

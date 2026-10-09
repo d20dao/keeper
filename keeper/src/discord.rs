@@ -93,10 +93,16 @@ impl Settings {
     }
 }
 
+/// What a request's randomness came from: an epoch coordinator's epoch, or the drand round a round coordinator bound it to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Epoch(u64),
+    Round(u64),
+}
 #[derive(Clone)]
 pub struct ProofAccepted {
     pub request_id: U256,
-    pub epoch_id: u64,
+    pub source: Source,
     pub tx_hash: B256,
     pub proof_hash: B256,
     pub randomness: B256,
@@ -112,18 +118,39 @@ impl ProofAccepted {
         (status == 1 && (kind == "fulfill" || kind == "fulfill_batch") && request.fulfilled)
             .then_some(Self {
                 request_id,
-                epoch_id: request.epochId,
+                source: Source::Epoch(request.epochId),
+                tx_hash,
+                proof_hash: request.proofHash,
+                randomness: request.randomness,
+            })
+    }
+    /// A round coordinator's request that an accepted fulfillment `kind` served, read after its receipt.
+    pub fn from_round_receipt(
+        status: u64,
+        kind: &str,
+        request_id: U256,
+        tx_hash: B256,
+        request: &crate::abi_round::RoundRequest,
+    ) -> Option<Self> {
+        (status == 1 && (kind == "fulfill" || kind == "fulfill_batch") && request.fulfilled)
+            .then_some(Self {
+                request_id,
+                source: Source::Round(request.round),
                 tx_hash,
                 proof_hash: request.proofHash,
                 randomness: request.randomness,
             })
     }
     fn payload(&self, links: &Links) -> Value {
+        let (label, number) = match self.source {
+            Source::Epoch(epoch) => ("Epoch", epoch),
+            Source::Round(round) => ("Round", round),
+        };
         let mut content = format!(
-            "**Proof verified · Request #{}**\nChain `{}` · Epoch `{}`\n\nRandomness\n`{}`\nProof hash\n`{}`\n\n[View transaction]({}/tx/{})",
+            "**Proof verified · Request #{}**\nChain `{}` · {label} `{}`\n\nRandomness\n`{}`\nProof hash\n`{}`\n\n[View transaction]({}/tx/{})",
             self.request_id,
             links.chain,
-            self.epoch_id,
+            number,
             self.randomness,
             self.proof_hash,
             links.explorer,
@@ -174,6 +201,19 @@ impl Notifier {
             tx,
             _task: Arc::new(Task(task.abort_handle())),
         })
+    }
+    /// A notifier that sends nothing to anyone: the proofs the worker gives it wait for a test to read them.
+    #[cfg(test)]
+    pub(crate) fn capture() -> (Self, mpsc::Receiver<ProofAccepted>) {
+        let (tx, rx) = mpsc::channel(CAPACITY);
+        let idle = tokio::spawn(std::future::pending::<()>());
+        (
+            Self {
+                tx,
+                _task: Arc::new(Task(idle.abort_handle())),
+            },
+            rx,
+        )
     }
     pub fn notify(&self, proof: ProofAccepted) {
         // Best effort, just like Telegram: never block the request/nonce lane.
@@ -328,6 +368,70 @@ mod tests {
                 Address::ZERO
             )
             .is_err()
+        );
+    }
+    /// A round coordinator's accepted proof: the drand round in place of the epoch, the same links and the same identity.
+    #[test]
+    fn a_round_proof_names_its_drand_round() {
+        let mut request = crate::abi_round::RoundRequest {
+            fulfilled: true,
+            round: 28_412_345,
+            randomness: B256::repeat_byte(0xaa),
+            proofHash: B256::repeat_byte(0xbb),
+            ..Default::default()
+        };
+        for (status, kind) in [(0, "fulfill"), (1, "cancel")] {
+            assert!(
+                ProofAccepted::from_round_receipt(
+                    status,
+                    kind,
+                    U256::from(9),
+                    B256::ZERO,
+                    &request
+                )
+                .is_none()
+            );
+        }
+        let tx = B256::repeat_byte(0xcc);
+        let proof =
+            ProofAccepted::from_round_receipt(1, "fulfill_batch", U256::from(9), tx, &request)
+                .unwrap();
+        assert_eq!(proof.source, Source::Round(28_412_345));
+        let links = Settings::parse(
+            Some("public-fixture-token".into()),
+            Some("42".into()),
+            Some("https://robinhoodchain.blockscout.com".into()),
+            Some("https://d20dao.org".into()),
+            4663,
+            Address::repeat_byte(0xec),
+        )
+        .unwrap()
+        .unwrap()
+        .links;
+        let payload = proof.payload(&links);
+        let coordinator = Address::repeat_byte(0xec);
+        assert_eq!(
+            payload["content"].as_str().unwrap(),
+            format!(
+                "**Proof verified · Request #9**
+Chain `4663` · Round `28412345`
+
+Randomness
+`{}`
+Proof hash
+`{}`
+
+[View transaction](https://robinhoodchain.blockscout.com/tx/{tx})
+[Replay proof](https://d20dao.org/explorer/request/4663/{coordinator}/9)",
+                B256::repeat_byte(0xaa),
+                B256::repeat_byte(0xbb)
+            )
+        );
+        let identity = keccak256(format!("4663:{coordinator}:9:{tx}"));
+        assert_eq!(payload["nonce"], hex::encode(&identity[..12]));
+        request.fulfilled = false;
+        assert!(
+            ProofAccepted::from_round_receipt(1, "fulfill", U256::from(9), tx, &request).is_none()
         );
     }
     #[test]
